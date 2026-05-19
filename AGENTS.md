@@ -40,8 +40,8 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 | 1. Foundation | Done | `theta-ai` + `theta-models` |
 | 2. Agent Runtime | Done | `theta-agent-core` |
 | 3. CLI + Tools | Done | `theta` binary with built-in tools |
-| 4. TUI | Next | `theta-tui` + interactive mode |
-| 5. Extensibility | Pending | Skills, templates, extension traits |
+| 4. TUI | Done | `theta-tui` + interactive mode |
+| 5. Extensibility | Next | Skills, templates, extension traits |
 | 6. Polish | Pending | Compaction, docs, releases |
 
 ## Rust Conventions

@@ -203,6 +203,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -1466,6 +1467,7 @@ dependencies = [
 name = "theta-tui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crossterm",
  "futures",
  "ratatui",

@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 
 use theta::cli::{Cli, Command};
 use theta::config::{ThetaConfig, load_config};
+use theta::interactive::run_tui;
 use theta::login::login_provider;
 use theta::print_mode::run_prompt_print_mode;
 use theta::session::SessionManager;
@@ -167,12 +168,24 @@ async fn handle_login(
 }
 
 async fn handle_tui(
-    _config: &ThetaConfig,
-    _working_dir: &Path,
-    _cli: &Cli,
-    _args: &theta::cli::TuiArgs,
+    config: &ThetaConfig,
+    working_dir: &Path,
+    cli: &Cli,
+    args: &theta::cli::TuiArgs,
 ) -> anyhow::Result<()> {
-    println!("TUI mode not yet implemented.");
+    let model = cli
+        .model
+        .as_deref()
+        .or(config.model.default.as_deref())
+        .unwrap_or("gpt-5.5");
+    let thinking = cli.thinking.as_deref().unwrap_or("medium");
+    let prompt = if args.text.is_empty() {
+        None
+    } else {
+        Some(args.text.join(" "))
+    };
+    let prompt = prompt.as_deref();
+    run_tui(config, working_dir, model, thinking, prompt).await?;
     Ok(())
 }
 

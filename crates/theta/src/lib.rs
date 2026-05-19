@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod interactive;
 pub mod login;
 pub mod print_mode;
 pub mod session;
