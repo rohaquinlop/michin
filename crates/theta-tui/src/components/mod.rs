@@ -4,13 +4,15 @@ use crossterm::event::Event;
 use ratatui::{Frame, layout::Rect};
 
 pub mod chat;
+pub mod command_picker;
 pub mod editor;
 pub mod login_flow;
 pub mod model_selector;
+pub mod path_picker;
 pub mod session_picker;
 pub mod status;
 
-pub use login_flow::LoginFlow;
+pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use model_selector::{ModelEntry, ModelSelector};
 pub use session_picker::{SessionInfo, SessionPicker};
 
@@ -26,6 +28,8 @@ pub enum Action {
     ForkSession,
     ShowHelp,
     ShowModelSelector,
+    ShowPathPicker,
+    ShowCommandPicker,
     None,
 }
 

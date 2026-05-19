@@ -53,6 +53,23 @@ impl Editor {
         &self.text
     }
 
+    /// Insert text at the current cursor position (used by path picker).
+    pub fn insert_at_cursor(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    /// Delete the last character (used when path picker replaces @).
+    pub fn delete_last_char(&mut self) {
+        if let Some(c) = self.text.chars().last() {
+            let len = c.len_utf8();
+            self.text.truncate(self.text.len() - len);
+            if self.cursor > self.text.len() {
+                self.cursor = self.text.len();
+            }
+        }
+    }
+
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -266,6 +283,29 @@ impl Component for Editor {
                 ..
             } => {
                 self.insert_char('\n');
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Char('@'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.insert_char('@');
+                return Some(Action::ShowPathPicker);
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Char('/'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.insert_char('/');
+                // Only open picker if at start of line or after whitespace.
+                if self.text.trim().is_empty()
+                    || self.text.ends_with(' ')
+                    || self.text.ends_with('\n')
+                    || self.text == "/"
+                {
+                    return Some(Action::ShowCommandPicker);
+                }
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Char(c),

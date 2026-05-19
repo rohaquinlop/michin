@@ -10,8 +10,10 @@ use tokio::sync::mpsc;
 
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
+use crate::components::command_picker::{CommandEntry, CommandPicker};
 use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
+use crate::components::path_picker::PathPicker;
 use crate::components::session_picker::{SessionInfo, SessionPicker};
 use crate::components::status::StatusBar;
 use crate::components::{Action, Component};
@@ -36,6 +38,8 @@ pub enum TuiAction {
     NewSession,
     /// Show the session picker.
     ShowSessions,
+    /// Start Codex OAuth flow (triggered from login_flow).
+    StartCodexOAuth,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -69,7 +73,23 @@ pub enum TuiEvent {
     },
     /// Show the session picker with the given sessions.
     SessionPicker(Vec<SessionInfo>),
+    /// A new session was created lazily on first message.
+    SessionCreated {
+        id: String,
+        model: String,
+    },
+    /// Informational system message (not an error).
+    Info(String),
     Error(String),
+    /// Load session history into the chat display.
+    LoadHistory(Vec<HistoryEntry>),
+}
+
+/// A historical message entry for session resume.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub role: String, // "user", "assistant", "tool", "system"
+    pub text: String,
 }
 
 /// Which view is currently active.
@@ -86,6 +106,8 @@ pub struct App {
     status: StatusBar,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
+    path_picker: PathPicker,
+    command_picker: CommandPicker,
     keybindings: Vec<Keybinding>,
     focus_idx: usize,
     running: bool,
@@ -102,9 +124,25 @@ pub struct App {
     current_tool: Option<String>,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
+    /// Available slash commands + skills for the command picker.
+    all_commands: Vec<CommandEntry>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
+    /// Activate the login flow from outside the app (e.g. on startup when auth is missing).
+    pub fn start_login_flow(
+        &mut self,
+        providers: Vec<crate::components::login_flow::ProviderEntry>,
+    ) {
+        self.login_flow = Some(LoginFlow::new(self.theme.clone(), providers));
+    }
+
+    /// Update the session ID in the status bar (for lazy session creation).
+    pub fn set_session_id(&mut self, id: String) {
+        self.status.session_id = id;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
@@ -112,6 +150,8 @@ impl App {
         session_id: &str,
         thinking: &str,
         models: Vec<ModelEntry>,
+        commands: Vec<CommandEntry>,
+        working_dir: std::path::PathBuf,
         event_rx: mpsc::UnboundedReceiver<TuiEvent>,
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
@@ -122,13 +162,18 @@ impl App {
         status.thinking = thinking.to_string();
         status.set_agent_state("idle");
 
+        let mut editor = Editor::new(theme.clone());
+        editor.focus(true); // Editor starts focused.
+
         Self {
             chat: Chat::new(theme.clone()),
-            editor: Editor::new(theme.clone()),
+            editor,
             status,
             theme: theme.clone(),
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
+            path_picker: PathPicker::new(theme.clone(), working_dir),
+            command_picker: CommandPicker::new(theme.clone()),
             keybindings: default_bindings(),
             focus_idx: 0,
             running: true,
@@ -139,6 +184,7 @@ impl App {
             streaming: false,
             current_tool: None,
             login_flow: None,
+            all_commands: commands,
         }
     }
 
@@ -185,6 +231,12 @@ impl App {
             // Don't render anything else while selector is open.
             return;
         }
+
+        // Path picker overlay.
+        self.path_picker.render(area, frame);
+
+        // Command picker overlay.
+        self.command_picker.render(area, frame);
 
         // Session picker mode.
         if self.mode == AppMode::SessionPicker
@@ -263,6 +315,76 @@ impl App {
             return;
         }
 
+        // Path picker mode — handle keys exclusively.
+        if self.path_picker.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.path_picker.hide();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if self.path_picker.selected_is_dir() {
+                            self.path_picker.enter_directory();
+                        } else if let Some(path) = self.path_picker.take_selection()
+                        {
+                            self.editor.insert_at_cursor(&format!("@{path} "));
+                        }
+                    }
+                    crossterm::event::KeyCode::Tab => {
+                        if let Some(path) = self.path_picker.take_selection() {
+                            self.editor.insert_at_cursor(&format!("@{path} "));
+                        }
+                        self.path_picker.hide();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.path_picker.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.path_picker.select_down();
+                    }
+                    crossterm::event::KeyCode::Backspace => {
+                        self.path_picker.pop_query();
+                    }
+                    crossterm::event::KeyCode::Char(c) => {
+                        self.path_picker.push_query(c);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Command picker mode — handle keys exclusively.
+        if self.command_picker.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.command_picker.hide();
+                    }
+                    crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Tab => {
+                        if let Some(cmd) = self.command_picker.take_selection() {
+                            // The editor already has / from the trigger keypress.
+                            self.editor.insert_at_cursor(&format!("{cmd} "));
+                        }
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.command_picker.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.command_picker.select_down();
+                    }
+                    crossterm::event::KeyCode::Backspace => {
+                        self.command_picker.pop_query();
+                    }
+                    crossterm::event::KeyCode::Char(c) => {
+                        self.command_picker.push_query(c);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         // Session picker mode — handle picker keys exclusively.
         if self.mode == AppMode::SessionPicker {
             if let crossterm::event::Event::Key(key) = event {
@@ -308,15 +430,21 @@ impl App {
                 if !login.is_cancelled()
                     && let Some((provider, token)) = login.take_result()
                 {
-                    let _ = self
-                        .action_tx
-                        .send(TuiAction::LoginResult { provider, token });
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::System,
-                        text: "Token saved successfully.".into(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
+                    if token == "oauth" {
+                        // Subscription provider: trigger OAuth flow in action handler.
+                        // The action handler will show progress messages.
+                        let _ = self.action_tx.send(TuiAction::StartCodexOAuth);
+                    } else {
+                        let _ = self
+                            .action_tx
+                            .send(TuiAction::LoginResult { provider, token });
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::System,
+                            text: "Token saved successfully.".into(),
+                            tool_name: None,
+                            is_streaming: false,
+                        });
+                    }
                 }
                 self.login_flow = None;
             }
@@ -371,6 +499,12 @@ impl App {
             }
             Action::ShowModelSelector => {
                 self.model_selector.show();
+            }
+            Action::ShowPathPicker => {
+                self.path_picker.show();
+            }
+            Action::ShowCommandPicker => {
+                self.command_picker.show(self.all_commands.clone());
             }
             _ => {}
         }
@@ -553,10 +687,22 @@ impl App {
                 self.session_picker = Some(SessionPicker::new(sessions, self.theme.clone()));
                 self.mode = AppMode::SessionPicker;
             }
+            TuiEvent::SessionCreated { id, model } => {
+                self.status.session_id = id;
+                self.status.model = model;
+            }
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.streaming = false;
                 self.status.set_agent_state("idle");
+            }
+            TuiEvent::Info(msg) => {
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: msg,
+                    tool_name: None,
+                    is_streaming: false,
+                });
             }
             TuiEvent::Error(msg) => {
                 self.chat.add_message(ChatMessage {
@@ -566,6 +712,22 @@ impl App {
                     is_streaming: false,
                 });
                 self.status.set_agent_state("error");
+            }
+            TuiEvent::LoadHistory(entries) => {
+                for entry in entries {
+                    let role = match entry.role.as_str() {
+                        "user" => ChatRole::User,
+                        "assistant" => ChatRole::Assistant,
+                        "tool" => ChatRole::Tool,
+                        _ => ChatRole::System,
+                    };
+                    self.chat.messages.push(ChatMessage {
+                        role,
+                        text: entry.text,
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
             }
         }
     }

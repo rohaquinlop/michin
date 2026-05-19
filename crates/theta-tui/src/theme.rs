@@ -27,6 +27,10 @@ pub struct Theme {
     pub user_bubble: Color,
     /// Assistant message bubble.
     pub assistant_bubble: Color,
+    /// Code block foreground (optional, falls back to Cyan).
+    pub code_fg: Option<Color>,
+    /// Code block background.
+    pub code_bg: Color,
 }
 
 impl Default for Theme {
@@ -43,6 +47,8 @@ impl Default for Theme {
             highlight: Color::Rgb(70, 70, 140),
             user_bubble: Color::Rgb(40, 50, 70),
             assistant_bubble: Color::Reset,
+            code_fg: None, // falls back to accent
+            code_bg: Color::Rgb(30, 30, 40),
         }
     }
 }
@@ -62,6 +68,8 @@ impl Theme {
             highlight: Color::Rgb(73, 72, 62),
             user_bubble: Color::Rgb(58, 58, 48),
             assistant_bubble: Color::Rgb(39, 40, 34),
+            code_fg: Some(Color::Rgb(230, 219, 116)), // yellow for monokai
+            code_bg: Color::Rgb(58, 58, 48),
         }
     }
 }
