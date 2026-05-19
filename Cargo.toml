@@ -17,6 +17,7 @@ repository = "https://github.com/user/theta"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 futures = "0.3"
 
 # HTTP
@@ -52,6 +53,9 @@ serde_yaml = "0.9"
 similar = "2"
 tempfile = "3"
 dirs = "6"
+base64 = "0.22"
+toml = "0.8"
+open = "5"
 
 # Internal crates
 theta-ai = { path = "crates/theta-ai" }

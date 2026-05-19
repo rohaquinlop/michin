@@ -1,0 +1,116 @@
+//! write tool: creates or overwrites files.
+
+use async_trait::async_trait;
+use theta_agent_core::error::AgentError;
+use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpdateSender};
+use theta_ai::ContentBlock;
+use tokio_util::sync::CancellationToken;
+
+use super::{ToolContext, resolve_path};
+
+pub struct WriteTool {
+    ctx: ToolContext,
+}
+
+impl WriteTool {
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+}
+
+#[async_trait]
+impl AgentTool for WriteTool {
+    fn name(&self) -> &str {
+        "write"
+    }
+
+    fn description(&self) -> &str {
+        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. \
+         Automatically creates parent directories."
+    }
+
+    fn label(&self) -> &str {
+        "write"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to write (relative or absolute)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file"
+                }
+            }
+        })
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        // Write is sequential: must run after reads for correctness.
+        // Actually, write is independent of reads so could be parallel,
+        // but pi treats it as sequential for safety (avoid race on same file).
+        ToolExecutionMode::Sequential
+    }
+
+    async fn execute(
+        &self,
+        tool_call_id: &str,
+        args: serde_json::Value,
+        _signal: Option<CancellationToken>,
+        _on_update: Option<ToolUpdateSender>,
+    ) -> Result<ToolResult, AgentError> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| AgentError::ToolExecution {
+                tool_name: "write".into(),
+                message: "missing required 'path' parameter".into(),
+            })?;
+        let content = args["content"]
+            .as_str()
+            .ok_or_else(|| AgentError::ToolExecution {
+                tool_name: "write".into(),
+                message: "missing required 'content' parameter".into(),
+            })?;
+
+        let file_path = resolve_path(&self.ctx, path);
+
+        // Create parent directories.
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "write".into(),
+                    message: format!("failed to create parent directories: {e}"),
+                })?;
+        }
+
+        tokio::fs::write(&file_path, content)
+            .await
+            .map_err(|e| AgentError::ToolExecution {
+                tool_name: "write".into(),
+                message: format!("failed to write file: {e}"),
+            })?;
+
+        Ok(ToolResult {
+            tool_call_id: tool_call_id.into(),
+            tool_name: "write".into(),
+            content: vec![ContentBlock::Text {
+                text: format!(
+                    "Successfully wrote {} bytes to {}",
+                    content.len(),
+                    file_path.display()
+                ),
+            }],
+            details: Some(serde_json::json!({
+                "bytes_written": content.len(),
+                "path": file_path.to_string_lossy().to_string(),
+            })),
+            is_error: false,
+        })
+    }
+}
