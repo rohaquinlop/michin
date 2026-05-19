@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
+use crate::components::model_selector::{ModelEntry, ModelSelector};
+use crate::components::session_picker::{SessionInfo, SessionPicker};
 use crate::components::status::StatusBar;
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
@@ -28,6 +30,12 @@ pub enum TuiAction {
     ForkSession,
     /// Login result from the login flow.
     LoginResult { provider: String, token: String },
+    /// Resume a specific session by ID.
+    ResumeSession(String),
+    /// Create a new session (dismiss session picker).
+    NewSession,
+    /// Show the session picker.
+    ShowSessions,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -35,13 +43,40 @@ pub enum TuiAction {
 pub enum TuiEvent {
     TextDelta(String),
     ThinkingDelta(String),
-    ToolStart { name: String, id: String },
-    ToolProgress { name: String, message: String },
-    ToolEnd { name: String, output: String },
+    ToolStart {
+        name: String,
+        id: String,
+    },
+    ToolProgress {
+        name: String,
+        message: String,
+    },
+    ToolEnd {
+        name: String,
+        output: String,
+    },
     TurnStart,
-    TurnEnd { stop_reason: String },
+    TurnEnd {
+        stop_reason: String,
+    },
     AgentEnd,
+    ContextCompacted {
+        trimmed_count: u32,
+    },
+    Retrying {
+        attempt: u32,
+        delay_ms: u64,
+    },
+    /// Show the session picker with the given sessions.
+    SessionPicker(Vec<SessionInfo>),
     Error(String),
+}
+
+/// Which view is currently active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    Chat,
+    SessionPicker,
 }
 
 /// The main TUI application.
@@ -49,9 +84,12 @@ pub struct App {
     chat: Chat,
     editor: Editor,
     status: StatusBar,
+    session_picker: Option<SessionPicker>,
+    model_selector: ModelSelector,
     keybindings: Vec<Keybinding>,
     focus_idx: usize,
     running: bool,
+    mode: AppMode,
     /// Send user messages to the agent.
     pub message_tx: mpsc::UnboundedSender<String>,
     /// Send structured actions back to the interactive handler.
@@ -67,11 +105,13 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
         model: &str,
         session_id: &str,
         thinking: &str,
+        models: Vec<ModelEntry>,
         event_rx: mpsc::UnboundedReceiver<TuiEvent>,
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
@@ -87,9 +127,12 @@ impl App {
             editor: Editor::new(theme.clone()),
             status,
             theme: theme.clone(),
+            session_picker: None,
+            model_selector: ModelSelector::new(models, theme.clone()),
             keybindings: default_bindings(),
             focus_idx: 0,
             running: true,
+            mode: AppMode::Chat,
             message_tx,
             action_tx,
             event_rx,
@@ -136,6 +179,26 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
+        // Model selector overlay — renders on top of everything.
+        self.model_selector.render(area, frame);
+        if self.model_selector.visible {
+            // Don't render anything else while selector is open.
+            return;
+        }
+
+        // Session picker mode.
+        if self.mode == AppMode::SessionPicker
+            && let Some(ref mut picker) = self.session_picker
+        {
+            let main = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(8)])
+                .split(area);
+            self.status.render(main[0], frame);
+            picker.render(main[1], frame);
+            return;
+        }
+
         if let Some(ref mut login) = self.login_flow {
             let main = Layout::default()
                 .direction(Direction::Vertical)
@@ -161,6 +224,83 @@ impl App {
     }
 
     fn handle_input_event(&mut self, event: &crossterm::event::Event) {
+        // Model selector mode — handle keys exclusively.
+        if self.model_selector.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.model_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(entry) = self.model_selector.selected_model() {
+                            let _ = self
+                                .action_tx
+                                .send(TuiAction::SwitchModel(entry.id.clone()));
+                            self.chat.add_message(ChatMessage {
+                                role: ChatRole::System,
+                                text: format!("Switching model to {}...", entry.id),
+                                tool_name: None,
+                                is_streaming: false,
+                            });
+                        }
+                        self.model_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.model_selector.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.model_selector.select_down();
+                    }
+                    crossterm::event::KeyCode::Backspace => {
+                        self.model_selector.pop_query();
+                    }
+                    crossterm::event::KeyCode::Char(c) => {
+                        self.model_selector.push_query(c);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Session picker mode — handle picker keys exclusively.
+        if self.mode == AppMode::SessionPicker {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                        if let Some(ref mut picker) = self.session_picker {
+                            picker.select_down();
+                        }
+                    }
+                    crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                        if let Some(ref mut picker) = self.session_picker {
+                            picker.select_up();
+                        }
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(ref picker) = self.session_picker
+                            && let Some(info) = picker.selected_session()
+                        {
+                            let _ = self
+                                .action_tx
+                                .send(TuiAction::ResumeSession(info.id.clone()));
+                        } else {
+                            let _ = self.action_tx.send(TuiAction::NewSession);
+                        }
+                        self.mode = AppMode::Chat;
+                        self.session_picker = None;
+                    }
+                    crossterm::event::KeyCode::Char('n') | crossterm::event::KeyCode::Esc => {
+                        let _ = self.action_tx.send(TuiAction::NewSession);
+                        self.mode = AppMode::Chat;
+                        self.session_picker = None;
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         // If login flow is active, handle its events exclusively.
         if let Some(ref mut login) = self.login_flow {
             let _ = login.handle_event(event);
@@ -229,6 +369,9 @@ impl App {
             Action::Quit => {
                 self.running = false;
             }
+            Action::ShowModelSelector => {
+                self.model_selector.show();
+            }
             _ => {}
         }
     }
@@ -248,7 +391,7 @@ impl App {
                     "  /clear         Clear the chat display",
                     "  /session       Show current session info",
                     "  /fork          Fork the current session",
-                    "  /login         Configure provider authentication",
+                    "  /sessions      List recent sessions to resume",
                     "  /help          Show this help",
                 ]
                 .join("\n");
@@ -315,6 +458,9 @@ impl App {
                 // Start the login flow.
                 let providers = known_providers(false, false, false, false);
                 self.login_flow = Some(LoginFlow::new(self.theme.clone(), providers));
+            }
+            "sessions" => {
+                let _ = self.action_tx.send(TuiAction::ShowSessions);
             }
             "fork" => {
                 let _ = self.action_tx.send(TuiAction::ForkSession);
@@ -386,6 +532,26 @@ impl App {
                 self.streaming = false;
                 self.status
                     .set_agent_state(&format!("idle (stopped: {stop_reason})"));
+            }
+            TuiEvent::ContextCompacted { trimmed_count } => {
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: if trimmed_count == 1 {
+                        format!("[compact] trimmed {trimmed_count} old message")
+                    } else {
+                        format!("[compact] trimmed {trimmed_count} old messages")
+                    },
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
+            TuiEvent::Retrying { attempt, delay_ms } => {
+                self.status
+                    .set_agent_state(&format!("retrying (attempt {attempt}) in {delay_ms}ms..."));
+            }
+            TuiEvent::SessionPicker(sessions) => {
+                self.session_picker = Some(SessionPicker::new(sessions, self.theme.clone()));
+                self.mode = AppMode::SessionPicker;
             }
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);

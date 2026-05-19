@@ -115,14 +115,32 @@ impl Agent {
     }
 
     /// Switch the active model.
+    /// Set the model and record a ModelChange in the transcript.
     pub async fn set_model(&self, model: Model) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         let mut state = self.state.write().await;
+        state.messages.push(Message::ModelChange {
+            provider: Some(model.provider),
+            model_id: Some(model.id.clone()),
+            timestamp: now_ms,
+        });
         state.model = model;
     }
 
-    /// Set the thinking level.
+    /// Set the thinking level and record a ThinkingLevelChange in the transcript.
     pub async fn set_thinking_level(&self, level: theta_ai::ThinkingLevel) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         let mut state = self.state.write().await;
+        state.messages.push(Message::ThinkingLevelChange {
+            level,
+            timestamp: now_ms,
+        });
         state.thinking_level = level;
     }
 

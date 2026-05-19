@@ -4,6 +4,7 @@
 //! event emission, and the nested prompt/continue loop.
 
 pub mod agent;
+pub mod compact;
 pub mod error;
 pub mod events;
 pub mod hooks;
@@ -18,6 +19,6 @@ pub use events::AgentEvent;
 pub use hooks::{Hooks, NoopHooks};
 pub use state::AgentState;
 pub use types::{
-    AgentLoopConfig, AgentTool, ToolCall, ToolExecutionMode, ToolResult, ToolUpdate,
-    ToolUpdateSender, ToolUpdateStatus,
+    AgentLoopConfig, AgentTool, CompactionConfig, RetryConfig, ToolCall, ToolExecutionMode,
+    ToolResult, ToolUpdate, ToolUpdateSender, ToolUpdateStatus,
 };

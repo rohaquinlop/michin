@@ -23,7 +23,7 @@ Three layers, mirroring pi:
 
 ```
 theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes  [Done]
-theta-agent-core (lib)  — agent runtime: loop, tool calling, events, state          [Done]
+theta-agent-core (lib)  — agent runtime: loop, tool calling, compaction, events    [Done]
 theta-ai (lib)          — unified LLM API: types, provider trait, streaming          [Done]
 theta-tui (lib)         — terminal UI (ratatui + crossterm)                          [Done]
 theta-models (lib)      — built-in model catalog (compile-time)                      [Done]
@@ -41,8 +41,8 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 | 2. Agent Runtime | Done | `theta-agent-core` |
 | 3. CLI + Tools | Done | `theta` binary with built-in tools |
 | 4. TUI | Done | `theta-tui` + interactive mode |
-| 5. Extensibility | Done | Skills, templates, continue/resume, model switching, slash commands, extension traits |
-| 6. Polish | Next | Compaction, docs, releases |
+| 5. Extensibility | Done | Skills, templates, continue/resume, slash commands, login flow |
+| 6. Polish | In Progress | Compaction, retry, session picker, model selector, theme config |
 
 ## Rust Conventions
 
@@ -88,11 +88,13 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 
 ## Session Format
 
-**Pi-compatible JSONL.** Theta reads and writes the same session format as pi. This means:
+**Pi-compatible JSONL.** Theta reads and writes the same session format as pi.
 
 - Users can switch between Pi and Theta on the same project.
 - Sessions are portable.
-- The format is a JSONL file with entries like `{"type":"user",...}`, `{"type":"assistant",...}`, `{"type":"toolResult",...}`, `{"type":"model_change",...}`, etc.
+- Format is JSONL with entries like `{"type":"user",...}`, `{"type":"assistant",...}`, `{"type":"toolResult",...}`, `{"type":"model_change",...}`, etc.
+- **Storage:** Sessions live in `~/.theta/sessions/` (centralized, not per-project). Session index at `~/.theta/sessions/index.json`.
+- `model_change` and `thinking_level_change` entries are emitted automatically when agent switches models or thinking levels.
 
 **Do not invent a new format.** Copy pi's entry types exactly. See pi's `SessionManager` for the contract.
 
@@ -167,6 +169,18 @@ The agent loop uses a nested pattern:
 **Event flow:** `broadcast::channel(256)` — consumers subscribe via `agent.subscribe()`. `AgentEnd` is always emitted (even on error).
 
 **Hooks** (`beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`) — all `#[async_trait]` with default no-ops.
+
+## Compaction
+
+- **Algorithm:** Truncation (oldest user+assistant pairs first). LLM-based summarization deferred.
+- **Tunable:** `compaction.enabled` and `compaction.reserve_tokens` in `~/.theta/config.toml`.
+- **Event:** `AgentEvent::ContextCompacted { trimmed_count, tokens_before, tokens_after }` sent to TUI.
+
+## Retry
+
+- **Backoff:** Exponential. Configurable via `retry.max_retries` and `retry.base_delay_ms` in `~/.theta/config.toml`.
+- **Event:** `AgentEvent::Retrying { attempt, delay_ms }` sent to TUI.
+- **Retryable:** 429, 5xx, connection/timeout errors. Non-retryable (4xx non-429) fail immediately.
 
 ## Testing
 

@@ -58,4 +58,22 @@ pub enum AgentEvent {
 
     /// An error occurred during execution.
     Error { message: String },
+
+    /// Context was compacted (old messages trimmed to fit context window).
+    ContextCompacted {
+        /// Number of user/assistant/tool-result messages trimmed.
+        trimmed_count: u32,
+        /// Tokens before compaction.
+        tokens_before: u32,
+        /// Tokens after compaction.
+        tokens_after: u32,
+    },
+
+    /// Retrying a failed provider call.
+    Retrying {
+        /// Current attempt number (1-based).
+        attempt: u32,
+        /// Delay in milliseconds before retry.
+        delay_ms: u64,
+    },
 }

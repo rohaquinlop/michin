@@ -28,6 +28,18 @@ pub struct ThetaConfig {
     /// Working directory override.
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
+
+    /// TUI theme name ("default" or "monokai").
+    #[serde(default)]
+    pub theme: Option<String>,
+
+    /// Context compaction settings.
+    #[serde(default)]
+    pub compaction: CompactionSettings,
+
+    /// Provider retry settings.
+    #[serde(default)]
+    pub retry: RetrySettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -44,6 +56,59 @@ pub struct ModelDefaults {
 pub struct ThinkingDefaults {
     /// Default thinking level (off, low, medium, high).
     pub default: Option<String>,
+}
+
+/// Compaction settings loaded from config.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionSettings {
+    /// Whether automatic compaction is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Tokens to reserve for the model's response.
+    #[serde(default = "default_reserve_tokens")]
+    pub reserve_tokens: u32,
+}
+
+impl Default for CompactionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reserve_tokens: 4096,
+        }
+    }
+}
+
+/// Retry settings loaded from config.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrySettings {
+    /// Maximum retry attempts (0 = no retry).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Base delay in milliseconds before first retry.
+    #[serde(default = "default_base_delay")]
+    pub base_delay_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            base_delay_ms: 1000,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_reserve_tokens() -> u32 {
+    4096
+}
+fn default_max_retries() -> u32 {
+    2
+}
+fn default_base_delay() -> u64 {
+    1000
 }
 
 /// Provider auth tokens loaded from ~/.theta/auth.json or env vars.
@@ -114,6 +179,21 @@ impl AuthConfig {
                 obtained_at: now,
             });
         }
+    }
+}
+
+/// Build an AgentLoopConfig from the Theta toml config.
+pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
+    theta_agent_core::AgentLoopConfig {
+        compaction: theta_agent_core::CompactionConfig {
+            enabled: tc.compaction.enabled,
+            reserve_tokens: tc.compaction.reserve_tokens,
+        },
+        retry: theta_agent_core::RetryConfig {
+            max_retries: tc.retry.max_retries,
+            base_delay_ms: tc.retry.base_delay_ms,
+        },
+        ..Default::default()
     }
 }
 

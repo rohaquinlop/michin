@@ -10,6 +10,7 @@ use theta_ai::{ContentBlock, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
 use theta_tui::App;
 use theta_tui::app::{TuiAction, TuiEvent};
+use theta_tui::components::{ModelEntry, SessionInfo};
 use theta_tui::theme::Theme;
 use tokio::sync::mpsc;
 
@@ -29,6 +30,19 @@ pub async fn run_tui(
 ) -> anyhow::Result<()> {
     // Resolve model.
     let catalog = BuiltInCatalog::new();
+
+    // Build model entries for the model selector (before catalog is moved).
+    let model_entries: Vec<ModelEntry> = catalog
+        .list()
+        .into_iter()
+        .map(|m| ModelEntry {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            provider: format!("{:?}", m.provider).to_lowercase(),
+            context_window: m.context_window,
+        })
+        .collect();
+
     let model = find_model_by_id(&catalog, model_id)
         .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
         .clone();
@@ -48,7 +62,8 @@ pub async fn run_tui(
 
     // Create agent.
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
@@ -72,6 +87,23 @@ pub async fn run_tui(
         .as_ref()
         .map(|m| m.id.clone())
         .unwrap_or_default();
+
+    // Send list of recent sessions for the session picker if no initial prompt.
+    if initial_prompt.is_none()
+        && let Ok(sessions) = session_mgr.list().await
+    {
+        let infos: Vec<SessionInfo> = sessions
+            .into_iter()
+            .map(|m| SessionInfo {
+                id: m.id,
+                title: m.title.unwrap_or_else(|| "(untitled)".into()),
+                model: m.model,
+                created_at: m.created_at,
+                message_count: m.message_count,
+            })
+            .collect();
+        let _ = event_tx.send(TuiEvent::SessionPicker(infos));
+    }
 
     // Spawn the event bridge — subscribes to agent events, forwards to TUI.
     // Does NOT break on AgentEnd — persists across prompts for multi-turn.
@@ -114,6 +146,12 @@ pub async fn run_tui(
                 Ok(AgentEvent::AgentEnd { .. }) => {
                     let _ = bridge_event_tx.send(TuiEvent::AgentEnd);
                     // Don't break — agent can start another prompt later.
+                }
+                Ok(AgentEvent::ContextCompacted { trimmed_count, .. }) => {
+                    let _ = bridge_event_tx.send(TuiEvent::ContextCompacted { trimmed_count });
+                }
+                Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
+                    let _ = bridge_event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
                 }
                 Ok(AgentEvent::Error { message }) => {
                     let _ = bridge_event_tx.send(TuiEvent::Error(message));
@@ -225,6 +263,50 @@ pub async fn run_tui(
                         }
                     }
                 }
+                TuiAction::ShowSessions => {
+                    let session_mgr = SessionManager::new(&action_working_dir);
+                    if let Ok(sessions) = session_mgr.list().await {
+                        let infos: Vec<SessionInfo> = sessions
+                            .into_iter()
+                            .map(|m| SessionInfo {
+                                id: m.id,
+                                title: m.title.unwrap_or_else(|| "(untitled)".into()),
+                                model: m.model,
+                                created_at: m.created_at,
+                                message_count: m.message_count,
+                            })
+                            .collect();
+                        let _ = action_bridge_tx.send(TuiEvent::SessionPicker(infos));
+                    }
+                }
+                TuiAction::ResumeSession(id) => {
+                    let session_mgr = SessionManager::new(&action_working_dir);
+                    match session_mgr.open_by_id(&id).await {
+                        Ok(session) => {
+                            // Load messages into agent.
+                            action_agent.load_messages(session.messages.clone()).await;
+                            // Rebuild system prompt with model from session.
+                            let model_id = action_agent
+                                .state()
+                                .await
+                                .last_model_id()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| action_model_id.clone());
+                            let blocks =
+                                build_system_prompt(&action_working_dir, &model_id, None).await;
+                            action_agent.set_system_prompt(blocks).await;
+                            let _ = action_bridge_tx
+                                .send(TuiEvent::Error(format!("Resumed session {id}")));
+                        }
+                        Err(e) => {
+                            let _ = action_bridge_tx
+                                .send(TuiEvent::Error(format!("Failed to resume session: {e}")));
+                        }
+                    }
+                }
+                TuiAction::NewSession => {
+                    // No-op: session picker dismissed, continue with current session.
+                }
                 TuiAction::LoginResult { provider, token } => {
                     match crate::config::load_auth(None).await {
                         Ok(mut auth) => {
@@ -253,12 +335,16 @@ pub async fn run_tui(
     }
 
     // Build and run the TUI.
-    let theme = Theme::default();
+    let theme = match config.theme.as_deref() {
+        Some("monokai") => Theme::monokai(),
+        _ => Theme::default(),
+    };
     let mut app = App::new(
         theme,
         &model.id,
         &session_id,
         thinking,
+        model_entries,
         event_rx,
         message_tx,
         action_tx,

@@ -175,8 +175,22 @@ async fn run_single_turn(
             break;
         }
 
-        // Build the LLM context from current state.
-        let context = build_context(state);
+        // Build the LLM context from current state, with compaction.
+        let context = build_context(state, config);
+
+        // Emit compaction event if messages were trimmed.
+        // We need to re-run the calculation to get the trimmed count — compact_messages
+        // was already called inside build_context. We track it by comparing context.messages
+        // length to state.llm_messages() length.
+        let llm_count = state.llm_messages().len() as u32;
+        let ctx_count = context.messages.len() as u32;
+        if ctx_count < llm_count {
+            let _ = event_tx.send(AgentEvent::ContextCompacted {
+                trimmed_count: llm_count - ctx_count,
+                tokens_before: state.token_count(),
+                tokens_after: context.messages.iter().map(|m| m.token_count()).sum(),
+            });
+        }
 
         tracing::debug!(
             turn = turn_index,
@@ -205,6 +219,7 @@ async fn run_single_turn(
             provider,
             &context,
             &stream_options,
+            config,
             event_tx,
             abort_token.clone(),
             steering_abort.clone(),
@@ -261,17 +276,52 @@ async fn run_single_turn(
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.
 /// Returns the assembled assistant message and stop reason.
+/// Includes retry logic with exponential backoff for transient provider errors.
+#[allow(clippy::too_many_arguments)]
 async fn run_llm_stream(
     state: &AgentState,
     provider: &dyn LlmProvider,
     context: &Context,
     options: &StreamOptions,
+    config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
 ) -> Result<(Message, Option<StopReason>), AgentError> {
+    let retry = &config.retry;
+
+    // Retry loop for provider.stream().
+    let mut stream;
+    let mut attempt: u32 = 0;
+
+    loop {
+        match provider.stream(&state.model, context, options).await {
+            Ok(s) => {
+                stream = s;
+                break;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if !retry.is_retryable(&msg) || attempt >= retry.max_retries {
+                    return Err(AgentError::Llm(e));
+                }
+                attempt += 1;
+                let delay_ms = retry
+                    .base_delay_ms
+                    .saturating_mul(2u64.pow(attempt.saturating_sub(1)));
+                let _ = event_tx.send(AgentEvent::Retrying { attempt, delay_ms });
+                tracing::warn!(
+                    attempt = attempt,
+                    delay_ms = delay_ms,
+                    error = %msg,
+                    "provider call failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
     let mut accumulator = EventAccumulator::new();
-    let mut stream = provider.stream(&state.model, context, options).await?;
 
     // Consume the stream, emitting events as we go.
     while let Some(event) = stream.next().await {
@@ -333,15 +383,37 @@ async fn run_llm_stream(
     Ok((assistant_msg, accumulator.stop_reason()))
 }
 
-/// Build the LLM Context from the current agent state.
-fn build_context(state: &AgentState) -> Context {
+/// Build the LLM Context from the current agent state, with optional
+/// context compaction to stay within the model's context window.
+fn build_context(state: &AgentState, config: &AgentLoopConfig) -> Context {
     let system = if state.system_prompt.is_empty() {
         None
     } else {
         Some(state.system_prompt.clone())
     };
 
-    let messages: Vec<Message> = state.llm_messages().into_iter().cloned().collect();
+    // Approximate system prompt tokens.
+    let sys_tokens: u32 = system
+        .as_ref()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|b| {
+                    theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+
+    let all_messages = state.llm_messages();
+    let all_slice: Vec<theta_ai::Message> = all_messages.into_iter().cloned().collect();
+
+    let compact_result = crate::compact::compact_messages(
+        &all_slice,
+        sys_tokens,
+        state.model.context_window,
+        &config.compaction,
+    );
 
     let tools: Vec<theta_ai::Tool> = state
         .tools
@@ -355,7 +427,7 @@ fn build_context(state: &AgentState) -> Context {
 
     Context {
         system,
-        messages,
+        messages: compact_result.messages,
         tools,
         thinking_level: Some(state.thinking_level),
     }

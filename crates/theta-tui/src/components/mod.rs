@@ -6,9 +6,13 @@ use ratatui::{Frame, layout::Rect};
 pub mod chat;
 pub mod editor;
 pub mod login_flow;
+pub mod model_selector;
+pub mod session_picker;
 pub mod status;
 
 pub use login_flow::LoginFlow;
+pub use model_selector::{ModelEntry, ModelSelector};
+pub use session_picker::{SessionInfo, SessionPicker};
 
 /// Actions that components can request from the App.
 #[derive(Debug, Clone)]
@@ -21,6 +25,7 @@ pub enum Action {
     SessionInfo,
     ForkSession,
     ShowHelp,
+    ShowModelSelector,
     None,
 }
 

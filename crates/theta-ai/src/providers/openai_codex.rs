@@ -152,10 +152,11 @@ impl Provider for OpenAiCodexProvider {
 
 /// Get the ChatGPT Plus session token from environment.
 fn get_codex_token() -> Option<String> {
-    std::env::var(CODEX_TOKEN_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var(FALLBACK_ENV).ok().filter(|s| !s.is_empty()))
+    get_codex_token_impl(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+}
+
+fn get_codex_token_impl(get_env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    get_env(CODEX_TOKEN_ENV).or_else(|| get_env(FALLBACK_ENV))
 }
 
 /// Build the request body for the codex API.
@@ -252,38 +253,31 @@ fn build_codex_request_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn env_map(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
 
     #[test]
     fn test_get_codex_token_not_set() {
-        // Ensure test environment doesn't leak a real token.
-        unsafe {
-            std::env::remove_var(CODEX_TOKEN_ENV);
-            std::env::remove_var(FALLBACK_ENV);
-        }
-        assert!(get_codex_token().is_none());
+        let get = env_map(&[]);
+        assert!(get_codex_token_impl(&get).is_none());
     }
 
     #[test]
     fn test_get_codex_token_from_codex_env() {
-        unsafe {
-            std::env::set_var(CODEX_TOKEN_ENV, "test-codex-token");
-        }
-        assert_eq!(get_codex_token(), Some("test-codex-token".into()));
-        unsafe {
-            std::env::remove_var(CODEX_TOKEN_ENV);
-        }
+        let get = env_map(&[(CODEX_TOKEN_ENV, "test-codex-token")]);
+        assert_eq!(get_codex_token_impl(&get), Some("test-codex-token".into()));
     }
 
     #[test]
     fn test_get_codex_token_falls_back_to_openai_key() {
-        unsafe {
-            // Ensure codex env is not leaking from other tests
-            std::env::remove_var(CODEX_TOKEN_ENV);
-            std::env::set_var(FALLBACK_ENV, "fallback-key");
-        }
-        assert_eq!(get_codex_token(), Some("fallback-key".into()));
-        unsafe {
-            std::env::remove_var(FALLBACK_ENV);
-        }
+        let get = env_map(&[(FALLBACK_ENV, "fallback-key")]);
+        assert_eq!(get_codex_token_impl(&get), Some("fallback-key".into()));
     }
 }

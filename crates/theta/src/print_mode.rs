@@ -45,12 +45,13 @@ pub async fn run_prompt_print_mode(
 
     // Register tools.
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
 
-    // Build and set the system prompt.
+    // Build and set the system prompt for prompt mode.
     let system_blocks = build_system_prompt(working_dir, model_id, Some("medium")).await;
     agent.set_system_prompt(system_blocks).await;
 
@@ -179,7 +180,8 @@ pub async fn run_continue_print_mode(
 
     // Register tools.
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
@@ -309,7 +311,8 @@ pub async fn run_resume_print_mode(
     registry.set_api_key(model.provider, &api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }

@@ -81,9 +81,25 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new session manager for the given working directory.
-    pub fn new(working_dir: &Path) -> Self {
-        let sessions_dir = working_dir.join(".theta").join("sessions");
+    /// Create a new session manager.
+    ///
+    /// If `sessions_dir` is provided, uses that path. Otherwise defaults to
+    /// `~/.theta/sessions/`. The `working_dir` parameter is kept for API
+    /// compatibility but is only used when `sessions_dir` is set.
+    pub fn new(_working_dir: &Path) -> Self {
+        let sessions_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".theta")
+            .join("sessions");
+        let index_path = sessions_dir.join("index.json");
+        Self {
+            sessions_dir,
+            index_path,
+        }
+    }
+
+    /// Create a session manager with a custom sessions directory (for testing).
+    pub fn with_dir(sessions_dir: PathBuf) -> Self {
         let index_path = sessions_dir.join("index.json");
         Self {
             sessions_dir,
@@ -357,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_open_session() {
         let tmp = TempDir::new().unwrap();
-        let mgr = SessionManager::new(tmp.path());
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
 
         let session = mgr.create(Some("test-model")).await.unwrap();
         assert_eq!(session.messages.len(), 0);
@@ -378,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_and_reload() {
         let tmp = TempDir::new().unwrap();
-        let mgr = SessionManager::new(tmp.path());
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
 
         let mut session = mgr.create(None).await.unwrap();
 
@@ -394,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_fork() {
         let tmp = TempDir::new().unwrap();
-        let mgr = SessionManager::new(tmp.path());
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
 
         let mut session = mgr.create(None).await.unwrap();
         mgr.append_entry(&mut session, &make_user_msg("original"))
@@ -409,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn test_resume_latest() {
         let tmp = TempDir::new().unwrap();
-        let mgr = SessionManager::new(tmp.path());
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
 
         let _session_a = mgr.create(None).await.unwrap();
         let session_b = mgr.create(None).await.unwrap();
@@ -424,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_sessions() {
         let tmp = TempDir::new().unwrap();
-        let mgr = SessionManager::new(tmp.path());
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
 
         mgr.create(None).await.unwrap();
         mgr.create(Some("gpt-5.5")).await.unwrap();

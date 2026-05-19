@@ -90,6 +90,10 @@ pub struct AgentLoopConfig {
     pub temperature: Option<f64>,
     /// Whether to request usage info in streams.
     pub include_usage: bool,
+    /// Context compaction settings.
+    pub compaction: CompactionConfig,
+    /// Provider retry settings.
+    pub retry: RetryConfig,
 }
 
 impl Default for AgentLoopConfig {
@@ -99,7 +103,62 @@ impl Default for AgentLoopConfig {
             max_tokens: None,
             temperature: None,
             include_usage: false,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         }
+    }
+}
+
+/// Context compaction settings.
+#[derive(Debug, Clone)]
+pub struct CompactionConfig {
+    /// Whether automatic compaction is enabled.
+    pub enabled: bool,
+    /// Tokens to reserve for the model's response.
+    pub reserve_tokens: u32,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reserve_tokens: 4096,
+        }
+    }
+}
+
+/// Provider retry settings.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum retry attempts (0 = no retry).
+    pub max_retries: u32,
+    /// Base delay in milliseconds before first retry.
+    pub base_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            base_delay_ms: 1000,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Whether this error is retryable (429, 5xx).
+    pub fn is_retryable(&self, error_msg: &str) -> bool {
+        let lower = error_msg.to_lowercase();
+        lower.contains("429")
+            || lower.contains("rate limit")
+            || lower.contains("too many requests")
+            || lower.contains("500")
+            || lower.contains("502")
+            || lower.contains("503")
+            || lower.contains("504")
+            || lower.contains("server error")
+            || lower.contains("timeout")
+            || lower.contains("connection")
     }
 }
 
