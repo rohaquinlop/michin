@@ -60,33 +60,37 @@ impl Editor {
 
     fn delete_before(&mut self) {
         if self.cursor > 0
-            && let Some(prev) = self.text[..self.cursor].chars().last() {
-                let len = prev.len_utf8();
-                self.text.replace_range(self.cursor - len..self.cursor, "");
-                self.cursor -= len;
-            }
+            && let Some(prev) = self.text[..self.cursor].chars().last()
+        {
+            let len = prev.len_utf8();
+            self.text.replace_range(self.cursor - len..self.cursor, "");
+            self.cursor -= len;
+        }
     }
 
     fn delete_after(&mut self) {
         if self.cursor < self.text.len()
-            && let Some(next) = self.text[self.cursor..].chars().next() {
-                self.text
-                    .replace_range(self.cursor..self.cursor + next.len_utf8(), "");
-            }
+            && let Some(next) = self.text[self.cursor..].chars().next()
+        {
+            self.text
+                .replace_range(self.cursor..self.cursor + next.len_utf8(), "");
+        }
     }
 
     fn move_left(&mut self) {
         if self.cursor > 0
-            && let Some(prev) = self.text[..self.cursor].chars().last() {
-                self.cursor -= prev.len_utf8();
-            }
+            && let Some(prev) = self.text[..self.cursor].chars().last()
+        {
+            self.cursor -= prev.len_utf8();
+        }
     }
 
     fn move_right(&mut self) {
         if self.cursor < self.text.len()
-            && let Some(next) = self.text[self.cursor..].chars().next() {
-                self.cursor += next.len_utf8();
-            }
+            && let Some(next) = self.text[self.cursor..].chars().next()
+        {
+            self.cursor += next.len_utf8();
+        }
     }
 
     fn move_word_left(&mut self) {

@@ -69,6 +69,20 @@ impl AgentState {
             .collect()
     }
 
+    /// Load past messages from a session (for continue/resume).
+    /// Preserves system prompt, tools, and model; only replaces the transcript.
+    pub fn load_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
+    /// Find the model ID from the last assistant message in the transcript, if any.
+    pub fn last_model_id(&self) -> Option<&str> {
+        self.messages.iter().rev().find_map(|m| match m {
+            Message::Assistant { model, .. } => model.as_deref(),
+            _ => None,
+        })
+    }
+
     /// Approximate total token count across all messages.
     pub fn token_count(&self) -> u32 {
         let msg_tokens: u32 = self.messages.iter().map(|m| m.token_count()).sum();

@@ -1470,6 +1470,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "futures",
+ "open",
  "ratatui",
  "thiserror",
  "tokio",

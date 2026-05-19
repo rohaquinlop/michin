@@ -136,14 +136,259 @@ fn provider_to_string(provider: theta_ai::Provider) -> String {
     }
 }
 
-/// Find a model by ID across all providers in the catalog.
-fn find_model_by_id<'a>(
-    catalog: &'a dyn ModelCatalog,
+/// Continue the latest session in print mode.
+pub async fn run_continue_print_mode(
+    config: &ThetaConfig,
+    working_dir: &Path,
     model_id: &str,
-) -> Option<&'a theta_ai::Model> {
+    follow_up: Option<&str>,
+) -> anyhow::Result<()> {
+    let session_mgr = SessionManager::new(working_dir);
+    let mut session = session_mgr.resume().await?;
+    let _sid = session
+        .meta
+        .as_ref()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+
+    // Detect model from session's last assistant message, or use provided one.
+    let effective_model = session
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            theta_ai::Message::Assistant { model, .. } => model.clone(),
+            _ => None,
+        })
+        .unwrap_or_else(|| model_id.to_string());
+
+    let catalog = BuiltInCatalog::new();
+    let model = find_model_by_id(&catalog, &effective_model)
+        .ok_or_else(|| anyhow::anyhow!("model not found: {effective_model}"))?
+        .clone();
+
+    // Auth token.
+    let provider_str = provider_to_string(model.provider);
+    let api_key = config.auth.get_token(&provider_str).ok_or_else(|| {
+        anyhow::anyhow!("no auth token for '{provider_str}'. Set env var or run `theta login`")
+    })?;
+
+    // Provider registry.
+    let mut registry = ProviderRegistry::new();
+    registry.set_api_key(model.provider, &api_key);
+
+    // Register tools.
+    let tool_ctx = ToolContext::new(working_dir.to_path_buf());
+    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    for tool in builtin_tools(tool_ctx) {
+        agent.add_tool(tool).await;
+    }
+
+    // Build and set system prompt.
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
+    agent.set_system_prompt(system_blocks).await;
+
+    // Load past messages into agent state.
+    agent.load_messages(session.messages.clone()).await;
+
+    let agent = Arc::new(agent);
+    let mut events = agent.subscribe();
+
+    // Spawn agent: either prompt with follow-up or continue_.
+    let agent_for_spawn = agent.clone();
+    let agent_handle = if let Some(text) = follow_up {
+        let text = text.to_string();
+        tokio::spawn(async move {
+            agent_for_spawn
+                .prompt(vec![ContentBlock::Text { text }])
+                .await
+        })
+    } else {
+        tokio::spawn(async move { agent_for_spawn.continue_().await })
+    };
+
+    // Consume events.
+    let mut aborted = false;
+    loop {
+        match events.recv().await {
+            Ok(event) => match event {
+                AgentEvent::TextDelta { text } => {
+                    print!("{text}");
+                }
+                AgentEvent::ThinkingDelta { thinking } => {
+                    eprintln!("[thinking] {thinking}");
+                }
+                AgentEvent::ToolCallStart { name, .. } => {
+                    eprintln!("[tool:{name}] calling...");
+                }
+                AgentEvent::ToolExecutionEnd { result } => {
+                    let status = if result.is_error { "error" } else { "done" };
+                    eprintln!("[tool:{}] {status}", result.tool_name);
+                }
+                AgentEvent::Error { message } => {
+                    eprintln!("[error] {message}");
+                }
+                AgentEvent::AgentEnd { aborted: a } => {
+                    aborted = a;
+                    break;
+                }
+                _ => {}
+            },
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("[warning] event lag: {n} messages skipped");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                break;
+            }
+        }
+    }
+
+    let result = agent_handle.await?;
+    if aborted {
+        eprintln!("\n[aborted]");
+    }
+    result.map_err(|e| anyhow::anyhow!("agent error: {e}"))?;
+
+    // Save new messages to session.
+    let state = agent.state().await;
+    let saved_count = session.messages.len();
+    for msg in &state.messages[saved_count..] {
+        session_mgr.append_entry(&mut session, msg).await?;
+    }
+
+    Ok(())
+}
+
+/// Resume a specific session in print mode.
+pub async fn run_resume_print_mode(
+    config: &ThetaConfig,
+    working_dir: &Path,
+    session_id: &str,
+    follow_up: Option<&str>,
+) -> anyhow::Result<()> {
+    let session_mgr = SessionManager::new(working_dir);
+
+    let sessions = session_mgr.list().await?;
+    let meta = sessions
+        .iter()
+        .find(|m| m.id == session_id)
+        .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+
+    let mut session = session_mgr.open_by_id(session_id).await?;
+
+    // Detect model from session, or use config default.
+    let effective_model = meta
+        .model
+        .clone()
+        .or_else(|| {
+            session.messages.iter().rev().find_map(|m| match m {
+                theta_ai::Message::Assistant { model, .. } => model.clone(),
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| {
+            config
+                .model
+                .default
+                .clone()
+                .unwrap_or_else(|| "gpt-5.5".into())
+        });
+
+    let catalog = BuiltInCatalog::new();
+    let model = find_model_by_id(&catalog, &effective_model)
+        .ok_or_else(|| anyhow::anyhow!("model not found: {effective_model}"))?
+        .clone();
+
+    let provider_str = provider_to_string(model.provider);
+    let api_key = config
+        .auth
+        .get_token(&provider_str)
+        .ok_or_else(|| anyhow::anyhow!("no auth token for '{provider_str}'"))?;
+
+    let mut registry = ProviderRegistry::new();
+    registry.set_api_key(model.provider, &api_key);
+
+    let tool_ctx = ToolContext::new(working_dir.to_path_buf());
+    let agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    for tool in builtin_tools(tool_ctx) {
+        agent.add_tool(tool).await;
+    }
+
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
+    agent.set_system_prompt(system_blocks).await;
+
+    agent.load_messages(session.messages.clone()).await;
+
+    let agent = Arc::new(agent);
+    let mut events = agent.subscribe();
+
+    let agent_for_spawn = agent.clone();
+    let agent_handle = if let Some(text) = follow_up {
+        let text = text.to_string();
+        tokio::spawn(async move {
+            agent_for_spawn
+                .prompt(vec![ContentBlock::Text { text }])
+                .await
+        })
+    } else {
+        tokio::spawn(async move { agent_for_spawn.continue_().await })
+    };
+
+    let mut aborted = false;
+    loop {
+        match events.recv().await {
+            Ok(event) => match event {
+                AgentEvent::TextDelta { text } => {
+                    print!("{text}");
+                }
+                AgentEvent::ThinkingDelta { thinking } => {
+                    eprintln!("[thinking] {thinking}");
+                }
+                AgentEvent::ToolCallStart { name, .. } => {
+                    eprintln!("[tool:{name}] calling...");
+                }
+                AgentEvent::ToolExecutionEnd { result } => {
+                    let status = if result.is_error { "error" } else { "done" };
+                    eprintln!("[tool:{}] {status}", result.tool_name);
+                }
+                AgentEvent::Error { message } => {
+                    eprintln!("[error] {message}");
+                }
+                AgentEvent::AgentEnd { aborted: a } => {
+                    aborted = a;
+                    break;
+                }
+                _ => {}
+            },
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("[warning] event lag: {n} messages skipped");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                break;
+            }
+        }
+    }
+
+    let result = agent_handle.await?;
+    if aborted {
+        eprintln!("\n[aborted]");
+    }
+    result.map_err(|e| anyhow::anyhow!("agent error: {e}"))?;
+
+    let state = agent.state().await;
+    let saved_count = session.messages.len();
+    for msg in &state.messages[saved_count..] {
+        session_mgr.append_entry(&mut session, msg).await?;
+    }
+
+    Ok(())
+}
+
+/// Find a model by ID across all providers in the catalog.
+fn find_model_by_id(catalog: &BuiltInCatalog, model_id: &str) -> Option<theta_ai::Model> {
     catalog
         .list()
         .into_iter()
-        .find(|&model| model.id == model_id)
-        .map(|v| v as _)
+        .find(|m| m.id == model_id)
+        .cloned()
 }

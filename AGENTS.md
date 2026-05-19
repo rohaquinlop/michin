@@ -1,6 +1,6 @@
 # Theta — Agent Rules
 
-> Rules for both humans and coding agents working on Theta.
+> Rules for coding agents working on Theta.
 
 ## Conversational Style
 
@@ -22,11 +22,11 @@ Users should extend Theta without forking internals: custom tools via Rust trait
 Three layers, mirroring pi:
 
 ```
-theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes  [Phase 3+]
-theta-agent-core (lib)  — agent runtime: loop, tool calling, events, state          [Phase 2 done]
-theta-ai (lib)          — unified LLM API: types, provider trait, streaming          [Phase 1 done]
-theta-tui (lib)         — terminal UI (ratatui + crossterm)                          [Phase 4+]
-theta-models (lib)      — built-in model catalog (compile-time)                      [Phase 1 done]
+theta (binary)          — CLI + TUI + sessions + built-in tools + skills + themes  [Done]
+theta-agent-core (lib)  — agent runtime: loop, tool calling, events, state          [Done]
+theta-ai (lib)          — unified LLM API: types, provider trait, streaming          [Done]
+theta-tui (lib)         — terminal UI (ratatui + crossterm)                          [Done]
+theta-models (lib)      — built-in model catalog (compile-time)                      [Done]
 ```
 
 **Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`)
@@ -41,8 +41,8 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 | 2. Agent Runtime | Done | `theta-agent-core` |
 | 3. CLI + Tools | Done | `theta` binary with built-in tools |
 | 4. TUI | Done | `theta-tui` + interactive mode |
-| 5. Extensibility | Next | Skills, templates, extension traits |
-| 6. Polish | Pending | Compaction, docs, releases |
+| 5. Extensibility | Done | Skills, templates, continue/resume, model switching, slash commands, extension traits |
+| 6. Polish | Next | Compaction, docs, releases |
 
 ## Rust Conventions
 
@@ -231,4 +231,4 @@ When a new provider is needed beyond the first four:
 - Phase estimates shift significantly
 - New crates are added or merged
 
-Keep it concise. It is a guide for both humans and agents.
+Keep it concise. It is a guide for coding agents.

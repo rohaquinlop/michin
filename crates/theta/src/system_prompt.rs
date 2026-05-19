@@ -1,13 +1,14 @@
 //! System prompt construction.
 //!
 //! Builds the system prompt from project context files, tool descriptions,
-//! and runtime context.
+//! available skills, and runtime context.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use theta_ai::ContentBlock;
 
+use crate::skills;
 use crate::tools::{ToolContext, builtin_tools};
 
 pub async fn build_system_prompt(
@@ -19,6 +20,12 @@ pub async fn build_system_prompt(
 
     if let Some(ctx) = load_project_context(working_dir).await {
         parts.push(ctx);
+    }
+
+    // Available skills.
+    let discovered = skills::discover_skills(working_dir).await;
+    if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
+        parts.push(skills_block);
     }
 
     let tools_prompt = build_tools_prompt(working_dir);
@@ -213,6 +220,10 @@ fn build_guidelines() -> String {
         "- Read files before editing them.",
         "- Use edit (exact text replacement) not write for partial changes.",
         "- Report what you did after completing tool calls.",
+        "",
+        "The following skills provide specialized instructions for specific tasks.",
+        "Use the read tool to load a skill's SKILL.md file when the task matches its description.",
+        "When a skill file references a relative path, resolve it against the skill directory.",
     ]
     .join("\n")
 }

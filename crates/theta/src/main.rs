@@ -9,7 +9,7 @@ use theta::cli::{Cli, Command};
 use theta::config::{ThetaConfig, load_config};
 use theta::interactive::run_tui;
 use theta::login::login_provider;
-use theta::print_mode::run_prompt_print_mode;
+use theta::print_mode::{run_continue_print_mode, run_prompt_print_mode, run_resume_print_mode};
 use theta::session::SessionManager;
 
 #[tokio::main]
@@ -31,26 +31,31 @@ async fn main() -> anyhow::Result<()> {
     let config = load_config(cli.config.as_deref()).await?;
 
     match &cli.command {
-        Command::Prompt(args) => {
+        Some(Command::Prompt(args)) => {
             handle_prompt(&config, &working_dir, &cli, args).await?;
         }
-        Command::Continue(args) => {
+        Some(Command::Continue(args)) => {
             handle_continue(&config, &working_dir, &cli, args).await?;
         }
-        Command::Resume(args) => {
+        Some(Command::Resume(args)) => {
             handle_resume(&config, &working_dir, &cli, args).await?;
         }
-        Command::Fork(args) => {
+        Some(Command::Fork(args)) => {
             handle_fork(&config, &working_dir, &cli, args).await?;
         }
-        Command::Sessions => {
+        Some(Command::Sessions) => {
             handle_list_sessions(&working_dir).await?;
         }
-        Command::Login(args) => {
+        Some(Command::Login(args)) => {
             handle_login(&config, &working_dir, args).await?;
         }
-        Command::Tui(args) => {
+        Some(Command::Tui(args)) => {
             handle_tui(&config, &working_dir, &cli, args).await?;
+        }
+        None => {
+            // Default: interactive TUI mode.
+            let tui_args = theta::cli::TuiArgs { text: vec![] };
+            handle_tui(&config, &working_dir, &cli, &tui_args).await?;
         }
     }
 
@@ -88,37 +93,39 @@ async fn handle_prompt(
 }
 
 async fn handle_continue(
-    _config: &ThetaConfig,
+    config: &ThetaConfig,
     working_dir: &Path,
-    _cli: &Cli,
-    _args: &theta::cli::ContinueArgs,
+    cli: &Cli,
+    args: &theta::cli::ContinueArgs,
 ) -> anyhow::Result<()> {
-    let session_mgr = SessionManager::new(working_dir);
-    let session = session_mgr.resume().await?;
-    println!(
-        "Continuing session {}",
-        session.meta.as_ref().map(|m| m.id.as_str()).unwrap_or("?")
-    );
+    let model = cli
+        .model
+        .as_deref()
+        .or(config.model.default.as_deref())
+        .unwrap_or("gpt-5.5");
+    let follow_up = if args.text.is_empty() {
+        None
+    } else {
+        Some(args.text.join(" "))
+    };
+    let follow_up_ref: Option<&str> = follow_up.as_deref();
+    run_continue_print_mode(config, working_dir, model, follow_up_ref).await?;
     Ok(())
 }
 
 async fn handle_resume(
-    _config: &ThetaConfig,
+    config: &ThetaConfig,
     working_dir: &Path,
     _cli: &Cli,
     args: &theta::cli::ResumeArgs,
 ) -> anyhow::Result<()> {
-    let session_mgr = SessionManager::new(working_dir);
-    let session = session_mgr.open_by_id(&args.id).await?;
-    println!(
-        "Resumed session {} ({})",
-        args.id,
-        session
-            .meta
-            .as_ref()
-            .and_then(|m| m.model.as_deref())
-            .unwrap_or("?")
-    );
+    let follow_up = if args.text.is_empty() {
+        None
+    } else {
+        Some(args.text.join(" "))
+    };
+    let follow_up_ref: Option<&str> = follow_up.as_deref();
+    run_resume_print_mode(config, working_dir, &args.id, follow_up_ref).await?;
     Ok(())
 }
 

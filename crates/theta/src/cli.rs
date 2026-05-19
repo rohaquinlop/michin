@@ -5,12 +5,19 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 /// Theta: minimal terminal coding agent harness in Rust.
+///
+/// Running `theta` without a subcommand starts interactive TUI multi-turn mode.
 #[derive(Debug, Parser)]
-#[command(name = "theta", version, about)]
+#[command(
+    name = "theta",
+    version,
+    about = "Minimal terminal coding agent harness",
+    after_help = "Running `theta` without a subcommand starts interactive TUI mode."
+)]
 pub struct Cli {
-    /// Subcommand.
+    /// Subcommand (defaults to interactive TUI mode if omitted).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     /// Model to use (e.g. gpt-5.5, o4, deepseek-v4-pro).
     #[arg(short, long, global = true)]

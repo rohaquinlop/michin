@@ -50,15 +50,5 @@ pub fn default_bindings() -> Vec<Keybinding> {
             action: Action::Quit,
             description: "Quit",
         },
-        Keybinding {
-            key: KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
-            action: Action::SwitchModel,
-            description: "Switch model",
-        },
-        Keybinding {
-            key: KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-            action: Action::ToggleThinking,
-            description: "Toggle thinking",
-        },
     ]
 }

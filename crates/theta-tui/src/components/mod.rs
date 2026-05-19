@@ -5,16 +5,22 @@ use ratatui::{Frame, layout::Rect};
 
 pub mod chat;
 pub mod editor;
+pub mod login_flow;
 pub mod status;
+
+pub use login_flow::LoginFlow;
 
 /// Actions that components can request from the App.
 #[derive(Debug, Clone)]
 pub enum Action {
     SendMessage(String),
     Quit,
-    SwitchModel,
-    ToggleThinking,
-    ListSessions,
+    SwitchModel(String),
+    SetThinking(String),
+    ClearChat,
+    SessionInfo,
+    ForkSession,
+    ShowHelp,
     None,
 }
 

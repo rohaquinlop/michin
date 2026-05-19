@@ -126,6 +126,17 @@ impl Agent {
         state.thinking_level = level;
     }
 
+    /// Load past messages from a session (for continue/resume).
+    pub async fn load_messages(&self, messages: Vec<Message>) {
+        let mut state = self.state.write().await;
+        state.load_messages(messages);
+    }
+
+    /// Get the number of messages currently in the transcript.
+    pub async fn message_count(&self) -> usize {
+        self.state.read().await.messages.len()
+    }
+
     // ── Run control ───────────────────────────────────────────
 
     /// Start a new agent run with a user prompt.

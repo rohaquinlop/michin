@@ -9,7 +9,7 @@ use theta_ai::providers::ProviderRegistry;
 use theta_ai::{ContentBlock, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
 use theta_tui::App;
-use theta_tui::app::TuiEvent;
+use theta_tui::app::{TuiAction, TuiEvent};
 use theta_tui::theme::Theme;
 use tokio::sync::mpsc;
 
@@ -62,6 +62,7 @@ pub async fn run_tui(
     // Create channels between TUI and agent bridge.
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
     // Create session.
     let session_mgr = SessionManager::new(working_dir);
@@ -73,6 +74,7 @@ pub async fn run_tui(
         .unwrap_or_default();
 
     // Spawn the event bridge — subscribes to agent events, forwards to TUI.
+    // Does NOT break on AgentEnd — persists across prompts for multi-turn.
     let bridge_agent = agent.clone();
     let bridge_event_tx = event_tx.clone();
     tokio::spawn(async move {
@@ -92,7 +94,7 @@ pub async fn run_tui(
                     tool_call_id: _,
                     output: _,
                 }) => {
-                    // Progress updates go to status bar — we use ToolStart/ToolEnd for boundaries.
+                    // Progress updates go to status bar.
                 }
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
                     let output = format_tool_result(&result);
@@ -111,7 +113,7 @@ pub async fn run_tui(
                 }
                 Ok(AgentEvent::AgentEnd { .. }) => {
                     let _ = bridge_event_tx.send(TuiEvent::AgentEnd);
-                    break;
+                    // Don't break — agent can start another prompt later.
                 }
                 Ok(AgentEvent::Error { message }) => {
                     let _ = bridge_event_tx.send(TuiEvent::Error(message));
@@ -128,26 +130,118 @@ pub async fn run_tui(
     });
 
     // Spawn agent message handler — receives messages from TUI, sends to agent.
+    // Saves session incrementally after each response (avoids duplicate entries).
     let handler_agent = agent.clone();
     let handler_session_mgr = SessionManager::new(working_dir);
     let handler_session_id = session_id.clone();
+    let handler_event_tx = event_tx.clone();
     tokio::spawn(async move {
+        let mut saved_count: usize = 0;
         while let Some(message) = message_rx.recv().await {
             let blocks = vec![ContentBlock::text(&message)];
             if let Err(e) = handler_agent.prompt(blocks).await {
                 tracing::error!("agent prompt failed: {e}");
-                let _ = event_tx.send(TuiEvent::Error(format!("{e}")));
+                let _ = handler_event_tx.send(TuiEvent::Error(format!("{e}")));
                 break;
             }
 
-            // Save session after each response.
+            // Save only new messages since last save.
             let state = handler_agent.state().await;
             if let Ok(mut session) = handler_session_mgr.open_by_id(&handler_session_id).await {
-                for msg in &state.messages {
+                for msg in &state.messages[saved_count..] {
                     handler_session_mgr
                         .append_entry(&mut session, msg)
                         .await
                         .ok();
+                }
+                saved_count = state.messages.len();
+            }
+        }
+    });
+
+    // Spawn action handler — processes slash commands from the TUI.
+    let action_agent = agent.clone();
+    let action_bridge_tx = event_tx.clone();
+    let action_session_id = session_id.clone();
+    let action_working_dir = working_dir.to_path_buf();
+    let action_model_id = model_id.to_string();
+    tokio::spawn(async move {
+        while let Some(action) = action_rx.recv().await {
+            match action {
+                TuiAction::SwitchModel(new_model) => {
+                    // Resolve and switch model.
+                    let catalog = BuiltInCatalog::new();
+                    if let Some(m) = find_model_by_id(&catalog, &new_model) {
+                        action_agent.set_model(m).await;
+                        // Rebuild system prompt with new model.
+                        let blocks =
+                            build_system_prompt(&action_working_dir, &new_model, None).await;
+                        action_agent.set_system_prompt(blocks).await;
+                        let _ = action_bridge_tx
+                            .send(TuiEvent::Error(format!("Switched to model {new_model}")));
+                    } else {
+                        let _ = action_bridge_tx
+                            .send(TuiEvent::Error(format!("Model not found: {new_model}")));
+                    }
+                }
+                TuiAction::SetThinking(level) => {
+                    let tl = match level.to_lowercase().as_str() {
+                        "off" => theta_ai::ThinkingLevel::Off,
+                        "low" => theta_ai::ThinkingLevel::Low,
+                        "medium" => theta_ai::ThinkingLevel::Medium,
+                        "high" => theta_ai::ThinkingLevel::High,
+                        _ => {
+                            let _ = action_bridge_tx.send(TuiEvent::Error(format!(
+                                "Invalid thinking level: {level}. Use off/low/medium/high"
+                            )));
+                            continue;
+                        }
+                    };
+                    action_agent.set_thinking_level(tl).await;
+                }
+                TuiAction::ForkSession => {
+                    let session_mgr = SessionManager::new(&action_working_dir);
+                    match session_mgr.open_by_id(&action_session_id).await {
+                        Ok(session) => {
+                            match session_mgr.fork(&session, Some(&action_model_id)).await {
+                                Ok(forked) => {
+                                    let new_id = forked
+                                        .meta
+                                        .as_ref()
+                                        .map(|m| m.id.clone())
+                                        .unwrap_or_default();
+                                    let _ = action_bridge_tx
+                                        .send(TuiEvent::Error(format!("Forked session: {new_id}")));
+                                }
+                                Err(e) => {
+                                    let _ = action_bridge_tx
+                                        .send(TuiEvent::Error(format!("Fork failed: {e}")));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = action_bridge_tx
+                                .send(TuiEvent::Error(format!("Cannot open session: {e}")));
+                        }
+                    }
+                }
+                TuiAction::LoginResult { provider, token } => {
+                    match crate::config::load_auth(None).await {
+                        Ok(mut auth) => {
+                            auth.set_token(&provider, &token, None);
+                            if let Err(e) = crate::config::save_auth(&auth, None).await {
+                                let _ = action_bridge_tx
+                                    .send(TuiEvent::Error(format!("Failed to save token: {e}")));
+                            } else {
+                                let _ = action_bridge_tx
+                                    .send(TuiEvent::Error(format!("Token saved for {provider}")));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = action_bridge_tx
+                                .send(TuiEvent::Error(format!("Failed to load auth: {e}")));
+                        }
+                    }
                 }
             }
         }
@@ -167,17 +261,10 @@ pub async fn run_tui(
         thinking,
         event_rx,
         message_tx,
+        action_tx,
     );
 
     app.run().await?;
-
-    // Save final transcript.
-    let state = agent.state().await;
-    if let Ok(mut session) = session_mgr.open_by_id(&session_id).await {
-        for msg in &state.messages {
-            session_mgr.append_entry(&mut session, msg).await.ok();
-        }
-    }
 
     Ok(())
 }

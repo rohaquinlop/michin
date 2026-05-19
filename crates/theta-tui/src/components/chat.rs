@@ -53,11 +53,13 @@ impl Chat {
 
     pub fn update_last(&mut self, text: &str, role: ChatRole, is_streaming: bool) {
         if let Some(last) = self.messages.last_mut()
-            && last.role == role && last.is_streaming {
-                last.text.push_str(text);
-                last.is_streaming = is_streaming;
-                return;
-            }
+            && last.role == role
+            && last.is_streaming
+        {
+            last.text.push_str(text);
+            last.is_streaming = is_streaming;
+            return;
+        }
         self.messages.push(ChatMessage {
             role,
             text: text.to_string(),
@@ -68,9 +70,10 @@ impl Chat {
 
     pub fn finish_last(&mut self, role: ChatRole) {
         if let Some(last) = self.messages.last_mut()
-            && last.role == role {
-                last.is_streaming = false;
-            }
+            && last.role == role
+        {
+            last.is_streaming = false;
+        }
     }
 
     fn format_line(&self, msg: &ChatMessage) -> Line<'static> {
@@ -150,9 +153,10 @@ impl Component for Chat {
 
         match key.code {
             crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down
-                if self.scroll > 0 => {
-                    self.scroll -= 1;
-                }
+                if self.scroll > 0 =>
+            {
+                self.scroll -= 1;
+            }
             crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
                 self.scroll = self.scroll.saturating_add(1);
             }
