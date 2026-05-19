@@ -228,6 +228,9 @@ pub struct StreamOptions {
     pub json_mode: bool,
     /// Seed for reproducible output.
     pub seed: Option<u64>,
+    /// Service tier for Codex: "flex" (half cost), "default", or
+    /// "priority" (higher throughput). Only applies to Codex provider.
+    pub service_tier: Option<String>,
 }
 
 /// Simplified stream options for non-tool-calling requests.

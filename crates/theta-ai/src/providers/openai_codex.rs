@@ -1,45 +1,40 @@
 //! OpenAI Codex provider — ChatGPT Plus subscription authentication.
 //!
-//! ChatGPT Plus subscribers get access to Codex, which exposes models
-//! through `https://chatgpt.com/backend-api`. Authentication uses the
-//! ChatGPT session token (JWT) instead of an API key.
+//! Codex uses the **Responses API** at `chatgpt.com/backend-api/codex/responses`.
+//! Transport: WebSocket (primary) with SSE fallback.
 //!
-//! ## Setup
-//!
-//! 1. Extract your ChatGPT session token from your browser:
-//!    - Open chatgpt.com → DevTools → Application → Cookies
-//!    - Find the `__Secure-next-auth.session-token` cookie
-//!    - Or use the `/login` flow in theta to authenticate via OAuth
-//!
-//! 2. Set environment variable:
-//!    ```bash
-//!    export OPENAI_CODEX_TOKEN="<your-session-token>"
-//!    ```
-//!
-//! 3. Use `--model codex-gpt-5.5` or set codex as default provider.
+//! ## Headers
+//! - `OpenAI-Beta: responses=experimental` — required
+//! - `chatgpt-account-id` — extracted from JWT
+//! - `originator: theta` — request origin
+//! - `x-client-request-id` — per-request trace ID
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::Client;
+use futures_util::SinkExt;
 use serde_json::Value;
-use tracing;
 
 use crate::error::ThetaError;
 use crate::event::AssistantMessageEvent;
 use crate::model::Model;
 use crate::provider::{EventStream, Provider};
-use crate::providers::openai_compat::{apply_thinking_params, convert_messages, parse_sse_line};
-use crate::types::{ContentBlock, Context, SimpleStreamOptions, StopReason, StreamOptions};
+use crate::types::{
+    ContentBlock, Context, SimpleStreamOptions, StopReason, StreamOptions, ThinkingLevel, Tool,
+};
 
-/// The OpenAI Codex provider — uses ChatGPT Plus session tokens.
+const CODEX_TOKEN_ENV: &str = "OPENAI_CODEX_TOKEN";
+
 pub struct OpenAiCodexProvider {
-    client: Client,
+    client: reqwest::Client,
+    token: tokio::sync::RwLock<Option<String>>,
 }
 
 impl OpenAiCodexProvider {
     pub fn new() -> Self {
+        let env_token = std::env::var(CODEX_TOKEN_ENV).ok();
         Self {
-            client: Client::new(),
+            client: reqwest::Client::new(),
+            token: tokio::sync::RwLock::new(env_token),
         }
     }
 }
@@ -50,88 +45,44 @@ impl Default for OpenAiCodexProvider {
     }
 }
 
-/// Environment variable for the ChatGPT Plus session token.
-const CODEX_TOKEN_ENV: &str = "OPENAI_CODEX_TOKEN";
-
-/// Fallback: also check the standard OpenAI API key env var,
-/// since some setups may use the same key for both.
-const FALLBACK_ENV: &str = "OPENAI_API_KEY";
-
 #[async_trait]
 impl Provider for OpenAiCodexProvider {
+    fn set_token(&mut self, token: &str) {
+        self.token = tokio::sync::RwLock::new(Some(token.to_string()));
+    }
+
     async fn stream<'a>(
         &'a self,
         model: &Model,
         context: &Context,
         options: &StreamOptions,
     ) -> Result<EventStream<'a>, ThetaError> {
-        let token = get_codex_token().ok_or_else(|| ThetaError::MissingApiKey {
-            provider: crate::types::Provider::OpenAiCodex,
+        let token = self.token.read().await.clone().ok_or_else(|| {
+            ThetaError::MissingApiKey {
+                provider: crate::types::Provider::OpenAiCodex,
+            }
         })?;
 
-        let request_body = build_codex_request_body(model, context, options)?;
-        let url = format!(
-            "{}/v1/chat/completions",
-            model.base_url.trim_end_matches('/')
-        );
+        let http_url = codex_url(&model.base_url);
+        let ws_url = codex_ws_url(&model.base_url);
+        let body = build_request_body(model, context, options);
+        let account_id = extract_account_id(&token).unwrap_or_default();
 
         tracing::debug!(
-            "POST {} (codex) with {} messages",
-            url,
+            "Codex model={} messages={}",
+            model.id,
             context.messages.len(),
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            // 401 often means expired session token.
-            if status.as_u16() == 401 {
-                return Err(ThetaError::ApiError {
-                    status: 401,
-                    message: format!(
-                        "ChatGPT session token expired or invalid. \
-                         Re-extract your __Secure-next-auth.session-token \
-                         cookie from chatgpt.com. Details: {}",
-                        body
-                    ),
-                });
+        // Try WebSocket first (lower latency), fall back to SSE.
+        match ws_stream(&ws_url, &body, &account_id, &token).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                tracing::warn!("Codex WebSocket failed, falling back to SSE: {e}");
             }
-            return Err(ThetaError::ApiError {
-                status: status.as_u16(),
-                message: body,
-            });
         }
 
-        let stream = response
-            .bytes_stream()
-            .map(|result| match result {
-                Ok(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes).to_string();
-                    parse_sse_line(&line)
-                }
-                Err(e) => Some(AssistantMessageEvent::Error {
-                    code: "stream".into(),
-                    message: e.to_string(),
-                }),
-            })
-            .filter_map(|opt| async move { opt })
-            .chain(futures::stream::once(async {
-                AssistantMessageEvent::Done {
-                    stop_reason: StopReason::Stop,
-                    usage: None,
-                }
-            }));
-
-        Ok(Box::pin(stream))
+        sse_stream(&self.client, &http_url, &body, &account_id, &token).await
     }
 
     async fn stream_simple<'a>(
@@ -140,144 +91,580 @@ impl Provider for OpenAiCodexProvider {
         context: &Context,
         options: &SimpleStreamOptions,
     ) -> Result<EventStream<'a>, ThetaError> {
-        let stream_opts = StreamOptions {
+        let opts = StreamOptions {
             max_tokens: options.max_tokens,
             temperature: options.temperature,
+            top_p: None,
+            stop: None,
+            thinking_level: None,
             include_usage: false,
-            ..Default::default()
+            json_mode: false,
+            seed: None,
+            service_tier: None,
         };
-        self.stream(model, context, &stream_opts).await
+        self.stream(model, context, &opts).await
     }
 }
 
-/// Get the ChatGPT Plus session token from environment.
-fn get_codex_token() -> Option<String> {
-    get_codex_token_impl(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+// ---------------------------------------------------------------------------
+// URL construction
+// ---------------------------------------------------------------------------
+
+fn codex_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/codex/responses") {
+        return base.to_string();
+    }
+    if base.ends_with("/codex") {
+        return format!("{base}/responses");
+    }
+    format!("{base}/codex/responses")
 }
 
-fn get_codex_token_impl(get_env: impl Fn(&str) -> Option<String>) -> Option<String> {
-    get_env(CODEX_TOKEN_ENV).or_else(|| get_env(FALLBACK_ENV))
+fn codex_ws_url(base_url: &str) -> String {
+    let http = codex_url(base_url);
+    if let Some(rest) = http.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = http.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        http
+    }
 }
 
-/// Build the request body for the codex API.
-/// Uses the same OpenAI-compatible format but targets chatgpt.com.
-fn build_codex_request_body(
-    model: &Model,
-    context: &Context,
-    options: &StreamOptions,
-) -> Result<Value, ThetaError> {
+// ---------------------------------------------------------------------------
+// SSE transport (fallback)
+// ---------------------------------------------------------------------------
+
+async fn sse_stream(
+    client: &reqwest::Client,
+    url: &str,
+    body: &Value,
+    account_id: &str,
+    token: &str,
+) -> Result<EventStream<'static>, ThetaError> {
+    let mut req = client
+        .post(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("accept", "text/event-stream")
+        .header("originator", "theta");
+
+    if !account_id.is_empty() {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+
+    let response = req.json(body).send().await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let retry_ms = response
+            .headers()
+            .get("retry-after-ms")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+        let body_text = response.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            return Err(ThetaError::ApiError {
+                status: 401,
+                message: "ChatGPT session token expired. Re-authenticate with `theta login`."
+                    .into(),
+                retry_after_ms: None,
+            });
+        }
+        return Err(ThetaError::ApiError {
+            status: status.as_u16(),
+            message: body_text,
+            retry_after_ms: retry_ms,
+        });
+    }
+
+    let stream = byte_stream_to_events(response.bytes_stream());
+    Ok(stream)
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket transport (primary)
+// ---------------------------------------------------------------------------
+
+async fn ws_stream(
+    url: &str,
+    body: &Value,
+    account_id: &str,
+    token: &str,
+) -> Result<EventStream<'static>, ThetaError> {
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    let mut req_builder = http::Request::builder()
+        .uri(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("originator", "theta");
+
+    if !account_id.is_empty() {
+        req_builder = req_builder.header("chatgpt-account-id", account_id);
+    }
+
+    let req = req_builder.body(()).unwrap();
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .map_err(|e| ThetaError::ApiError {
+            status: 500,
+            message: format!("WebSocket connect failed: {e}"),
+            retry_after_ms: None,
+        })?;
+    let (mut write, read) = ws_stream.split();
+
+    // Send the JSON body as a text frame.
+    let payload = serde_json::to_string(body)
+        .map_err(ThetaError::Json)?;
+    write
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|e| ThetaError::ApiError {
+            status: 500,
+            message: format!("WebSocket send failed: {e}"),
+            retry_after_ms: None,
+        })?;
+
+    // Read frames — each text frame is a complete JSON event.
+    let events = read
+        .filter_map(|msg| async move {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    let text = text.to_string();
+                    parse_codex_json(&text)
+                }
+                Ok(Message::Close(_)) => {
+                    Some(AssistantMessageEvent::Done {
+                        stop_reason: StopReason::Stop,
+                        usage: None,
+                    })
+                }
+                Err(e) => Some(AssistantMessageEvent::Error {
+                    code: "ws".into(),
+                    message: e.to_string(),
+                }),
+                _ => None,
+            }
+        })
+        .chain(futures::stream::once(async {
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            }
+        }))
+        .boxed();
+
+    Ok(events)
+}
+
+// ---------------------------------------------------------------------------
+// Shared stream processing
+// ---------------------------------------------------------------------------
+
+/// Convert a byte stream into buffered, newline-delimited events.
+fn byte_stream_to_events(
+    byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+        + Send
+        + Unpin
+        + 'static,
+) -> EventStream<'static> {
+    futures::stream::unfold(
+        (byte_stream, String::new(), false),
+        |(mut stream, mut buf, mut exhausted)| async move {
+            if exhausted {
+                return None;
+            }
+            loop {
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].to_string();
+                    buf = buf[pos + 1..].to_string();
+                    if let Some(event) = parse_codex_sse(&line) {
+                        return Some((event, (stream, buf, exhausted)));
+                    }
+                }
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        exhausted = true;
+                        return Some((
+                            AssistantMessageEvent::Error {
+                                code: "stream".into(),
+                                message: e.to_string(),
+                            },
+                            (stream, buf, exhausted),
+                        ));
+                    }
+                    None => {
+                        exhausted = true;
+                        return Some((
+                            AssistantMessageEvent::Done {
+                                stop_reason: StopReason::Stop,
+                                usage: None,
+                            },
+                            (stream, buf, exhausted),
+                        ));
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
+    let messages = convert_messages(model, context);
+    let instructions = extract_system_text(&context.system)
+        .unwrap_or_else(|| "You are a helpful assistant.".to_string());
+
     let mut body = serde_json::json!({
         "model": model.id,
+        "store": false,
         "stream": true,
+        "instructions": instructions,
+        "input": messages,
+        "text": { "verbosity": "low" },
+        "include": ["reasoning.encrypted_content"],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
     });
 
-    // Messages (reuse the shared conversion).
-    let messages = convert_messages(model, context);
-    body["messages"] = messages;
-
-    // System prompt
-    if let Some(system_blocks) = &context.system {
-        let system_text: String = system_blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if !system_text.is_empty() {
-            let mut msgs = vec![serde_json::json!({
-                "role": model.system_role(),
-                "content": system_text,
-            })];
-            if let Some(existing) = body["messages"].as_array() {
-                msgs.extend(existing.clone());
-            }
-            body["messages"] = Value::Array(msgs);
-        }
-    }
-
-    // Tools
     if !context.tools.is_empty() {
-        let tools: Vec<Value> = context
-            .tools
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                })
-            })
-            .collect();
-        body["tools"] = Value::Array(tools);
+        body["tools"] = serde_json::json!(convert_tools(&context.tools));
     }
-
-    // Max tokens
-    if let Some(max_tokens) = options.max_tokens {
-        body[model.max_tokens_field_name()] = serde_json::json!(max_tokens);
-    }
-
-    // Temperature
     if let Some(temp) = options.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-
-    // Top-p
-    if let Some(top_p) = options.top_p {
-        body["top_p"] = serde_json::json!(top_p);
+    if let Some(ref tier) = options.service_tier {
+        body["service_tier"] = serde_json::json!(tier);
     }
 
-    // Stop sequences
-    if let Some(stop) = &options.stop {
-        body["stop"] = serde_json::json!(stop);
+    let effort_level = options.thinking_level.or(context.thinking_level);
+    if let Some(level) = effort_level {
+        let effort = resolve_reasoning_effort(model, level);
+        if let Some(e) = effort {
+            body["reasoning"] = serde_json::json!({
+                "effort": e,
+                "summary": "auto",
+            });
+        }
     }
 
-    // JSON mode
-    if options.json_mode {
-        body["response_format"] = serde_json::json!({"type": "json_object"});
-    }
-
-    // Thinking
-    if let Some(level) = options.thinking_level {
-        apply_thinking_params(&mut body, model, level);
-    }
-
-    Ok(body)
+    body
 }
+
+fn extract_system_text(system: &Option<Vec<ContentBlock>>) -> Option<String> {
+    system.as_ref().and_then(|blocks| {
+        blocks.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn resolve_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<String> {
+    if level == ThinkingLevel::Off {
+        return None;
+    }
+    if let Some(mapped) = model.thinking_level_map.get(&level) {
+        return mapped.clone();
+    }
+    let fallback = map_default_effort(level);
+    if fallback.is_empty() { None } else { Some(fallback) }
+}
+
+fn map_default_effort(level: ThinkingLevel) -> String {
+    match level {
+        ThinkingLevel::Off => String::new(),
+        ThinkingLevel::Minimal => "minimal".into(),
+        ThinkingLevel::Low => "low".into(),
+        ThinkingLevel::Medium => "medium".into(),
+        ThinkingLevel::High => "high".into(),
+        ThinkingLevel::XHigh => "max".into(),
+    }
+}
+
+fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
+    let mut items = Vec::new();
+
+    if model.compat.supports_developer_role
+        && let Some(sp) = extract_system_text(&context.system)
+    {
+        items.push(serde_json::json!({
+            "role": "developer",
+            "content": sp,
+        }));
+    }
+
+    for msg in &context.messages {
+        match msg {
+            crate::types::Message::User { content, .. } => {
+                let text = blocks_to_text(content);
+                items.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }],
+                }));
+            }
+            crate::types::Message::Assistant { content, .. } => {
+                for block in content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": text,
+                                    "annotations": [],
+                                }],
+                                "status": "completed",
+                            }));
+                        }
+                        ContentBlock::ToolCall { id, name, arguments } => {
+                            let (call_id, item_id) = split_tool_call_id(id);
+                            let args_str =
+                                serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+                            items.push(serde_json::json!({
+                                "type": "function_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": args_str,
+                            }));
+                        }
+                        ContentBlock::Thinking { .. } => {}
+                        _ => {}
+                    }
+                }
+            }
+            crate::types::Message::ToolResult {
+                tool_call_id, content, ..
+            } => {
+                let text = blocks_to_text(content);
+                let call_id = tool_call_id.split('|').next().unwrap_or(tool_call_id);
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": text,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    items
+}
+
+fn blocks_to_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn split_tool_call_id(id: &str) -> (&str, &str) {
+    let parts: Vec<&str> = id.splitn(2, '|').collect();
+    if parts.len() == 2 { (parts[0], parts[1]) } else { (id, "") }
+}
+
+fn convert_tools(tools: &[Tool]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": false,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// SSE / JSON parsing
+// ---------------------------------------------------------------------------
+
+fn parse_codex_sse(line: &str) -> Option<AssistantMessageEvent> {
+    let line = line.trim();
+    if let Some(data) = line.strip_prefix("data: ") {
+        if data == "[DONE]" {
+            return None;
+        }
+        parse_codex_json(data)
+    } else {
+        None
+    }
+}
+
+fn parse_codex_json(json_str: &str) -> Option<AssistantMessageEvent> {
+    let data: Value = serde_json::from_str(json_str).ok()?;
+    parse_codex_event(&data)
+}
+
+fn parse_codex_event(data: &Value) -> Option<AssistantMessageEvent> {
+    let event_type = data["type"].as_str()?;
+
+    match event_type {
+        "response.created" => None,
+
+        "response.output_item.added" => {
+            let item_type = data["item"]["type"].as_str()?;
+            match item_type {
+                "reasoning" => Some(AssistantMessageEvent::ThinkingStart),
+                "message" => Some(AssistantMessageEvent::TextStart),
+                "function_call" => {
+                    let item = &data["item"];
+                    let name = item["name"].as_str().unwrap_or("unknown");
+                    let call_id = item["call_id"].as_str().unwrap_or("");
+                    let item_id = item["id"].as_str().unwrap_or("");
+                    Some(AssistantMessageEvent::ToolCallStart {
+                        id: format!("{call_id}|{item_id}"),
+                        name: name.to_string(),
+                    })
+                }
+                _ => None,
+            }
+        }
+
+        "response.output_text.delta" => {
+            let delta = data["delta"].as_str().unwrap_or("");
+            Some(AssistantMessageEvent::TextDelta { text: delta.to_string() })
+        }
+
+        "response.reasoning_text.delta"
+        | "response.reasoning_summary_text.delta" => {
+            let delta = data["delta"].as_str().unwrap_or("");
+            Some(AssistantMessageEvent::ThinkingDelta { thinking: delta.to_string() })
+        }
+
+        "response.function_call_arguments.delta" => {
+            let item = &data;
+            let delta = item["delta"].as_str().unwrap_or("");
+            let call_id = item["call_id"].as_str().unwrap_or("");
+            Some(AssistantMessageEvent::ToolCallDelta {
+                id: call_id.to_string(),
+                arguments: delta.to_string(),
+            })
+        }
+
+        "response.function_call_arguments.done" => {
+            let item = data;
+            let call_id = item["call_id"].as_str().unwrap_or("");
+            let item_id = item["id"].as_str().unwrap_or("");
+            Some(AssistantMessageEvent::ToolCallEnd {
+                id: format!("{call_id}|{item_id}"),
+            })
+        }
+
+        "response.output_item.done" => {
+            let item_type = data["item"]["type"].as_str();
+            match item_type {
+                Some("reasoning") => Some(AssistantMessageEvent::ThinkingEnd),
+                Some("message") => Some(AssistantMessageEvent::TextEnd),
+                _ => None,
+            }
+        }
+
+        "response.completed" | "response.done" => {
+            None // Done emitted by stream end handler
+        }
+
+        "error" => {
+            let code = data["code"].as_str().unwrap_or("unknown");
+            let message = data["message"].as_str().unwrap_or("unknown error");
+            Some(AssistantMessageEvent::Error {
+                code: code.to_string(),
+                message: message.to_string(),
+            })
+        }
+
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JWT account ID
+// ---------------------------------------------------------------------------
+
+fn extract_account_id(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = base64_url_decode(parts[1])?;
+    let parsed: Value = serde_json::from_str(&payload).ok()?;
+    parsed
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn base64_url_decode(input: &str) -> Option<String> {
+    let mut padded = input.to_string();
+    while !padded.len().is_multiple_of(4) {
+        padded.push('=');
+    }
+    let standard = padded.replace('-', "+").replace('_', "/");
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&standard)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    fn env_map(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = vars
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |key: &str| map.get(key).cloned()
+    #[test]
+    fn test_codex_url_resolution() {
+        assert_eq!(codex_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(codex_url("https://chatgpt.com/backend-api/"),
+            "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(codex_url("https://chatgpt.com/backend-api/codex"),
+            "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(codex_url("https://chatgpt.com/backend-api/codex/responses"),
+            "https://chatgpt.com/backend-api/codex/responses");
     }
 
     #[test]
-    fn test_get_codex_token_not_set() {
-        let get = env_map(&[]);
-        assert!(get_codex_token_impl(&get).is_none());
+    fn test_codex_ws_url() {
+        assert_eq!(codex_ws_url("https://chatgpt.com/backend-api"),
+            "wss://chatgpt.com/backend-api/codex/responses");
     }
 
     #[test]
-    fn test_get_codex_token_from_codex_env() {
-        let get = env_map(&[(CODEX_TOKEN_ENV, "test-codex-token")]);
-        assert_eq!(get_codex_token_impl(&get), Some("test-codex-token".into()));
+    fn test_split_tool_call_id() {
+        assert_eq!(split_tool_call_id("a|b"), ("a", "b"));
+        assert_eq!(split_tool_call_id("abc"), ("abc", ""));
+        assert_eq!(split_tool_call_id("a|b|c"), ("a", "b|c"));
     }
 
     #[test]
-    fn test_get_codex_token_falls_back_to_openai_key() {
-        let get = env_map(&[(FALLBACK_ENV, "fallback-key")]);
-        assert_eq!(get_codex_token_impl(&get), Some("fallback-key".into()));
+    fn test_parse_sse_done() {
+        let event = parse_codex_sse("data: [DONE]");
+        assert!(event.is_none());
     }
 }

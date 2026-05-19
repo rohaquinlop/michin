@@ -75,10 +75,16 @@ impl Provider for OpenAiCompatProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_ms = response
+                .headers()
+                .get("retry-after-ms")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok());
             let body = response.text().await.unwrap_or_default();
             return Err(ThetaError::ApiError {
                 status: status.as_u16(),
                 message: body,
+                retry_after_ms: retry_ms,
             });
         }
 

@@ -30,7 +30,12 @@ pub enum ThetaError {
 
     /// API returned an error response.
     #[error("API error ({status}): {message}")]
-    ApiError { status: u16, message: String },
+    ApiError {
+        status: u16,
+        message: String,
+        /// Optional `retry-after-ms` or `Retry-After` header value in ms.
+        retry_after_ms: Option<u64>,
+    },
 
     /// Request was aborted.
     #[error("Request aborted")]

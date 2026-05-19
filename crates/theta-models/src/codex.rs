@@ -5,7 +5,7 @@
 //! ChatGPT session token (set via `OPENAI_CODEX_TOKEN` env var).
 //!
 //! Models connect to `https://chatgpt.com/backend-api` instead of
-//! `https://api.openai.com`.
+//! `https://chatgpt.com/backend-api`.
 
 use theta_ai::model::{Model, ModelCompat};
 use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};

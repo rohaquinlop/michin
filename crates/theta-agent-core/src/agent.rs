@@ -245,6 +245,7 @@ impl Agent {
                 .ok_or_else(|| theta_ai::ThetaError::ApiError {
                     status: 500,
                     message: format!("no provider registered for API {provider_api:?}"),
+                    retry_after_ms: None,
                 })?;
 
         // Pass shared queue references into the loop so steer()
