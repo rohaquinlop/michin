@@ -1,5 +1,6 @@
 //! Session management: create, open, fork, resume, and append to Pi-compatible JSONL sessions.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -301,6 +302,10 @@ impl SessionManager {
         session: &mut Session,
         message: &Message,
     ) -> SessionResult<()> {
+        if matches!(message, Message::Assistant { content, .. } if content.is_empty()) {
+            return Ok(());
+        }
+
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -341,10 +346,64 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Append any state messages that are not already persisted in this session.
+    ///
+    /// Returns the number of newly appended messages.
+    pub async fn append_missing_entries(
+        &self,
+        session: &mut Session,
+        state_messages: &[Message],
+    ) -> SessionResult<usize> {
+        let mut persisted: HashSet<String> = session
+            .messages
+            .iter()
+            .map(message_fingerprint)
+            .collect::<HashSet<_>>();
+
+        let mut appended = 0usize;
+        for message in state_messages {
+            if matches!(message, Message::Assistant { content, .. } if content.is_empty()) {
+                continue;
+            }
+
+            let fingerprint = message_fingerprint(message);
+            if persisted.contains(&fingerprint) {
+                continue;
+            }
+
+            self.append_entry(session, message).await?;
+            persisted.insert(fingerprint);
+            appended += 1;
+        }
+
+        tracing::debug!(
+            appended,
+            latest_timestamp = state_messages.last().map(message_timestamp),
+            "appended missing session entries"
+        );
+
+        Ok(appended)
+    }
+
     /// List all sessions from the index.
     pub async fn list(&self) -> SessionResult<Vec<SessionMeta>> {
         let index = self.load_index().await?;
         Ok(index.sessions.clone())
+    }
+}
+
+fn message_fingerprint(message: &Message) -> String {
+    serde_json::to_string(message)
+        .unwrap_or_else(|e| format!("__fingerprint_error:{}:{}", message_timestamp(message), e))
+}
+
+fn message_timestamp(message: &Message) -> u64 {
+    match message {
+        Message::User { timestamp, .. }
+        | Message::Assistant { timestamp, .. }
+        | Message::ToolResult { timestamp, .. }
+        | Message::ModelChange { timestamp, .. }
+        | Message::ThinkingLevelChange { timestamp, .. } => *timestamp,
     }
 }
 
@@ -441,6 +500,34 @@ mod tests {
         }
     }
 
+    fn make_assistant_msg(text: &str) -> Message {
+        Message::Assistant {
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            api: None,
+            provider: None,
+            model: None,
+            usage: None,
+            stop_reason: None,
+            error_message: None,
+            timestamp: now_ms(),
+        }
+    }
+
+    fn make_empty_assistant_msg() -> Message {
+        Message::Assistant {
+            content: vec![],
+            api: None,
+            provider: None,
+            model: None,
+            usage: None,
+            stop_reason: None,
+            error_message: None,
+            timestamp: now_ms(),
+        }
+    }
+
     #[tokio::test]
     async fn test_create_and_open_session() {
         let tmp = TempDir::new().unwrap();
@@ -518,5 +605,81 @@ mod tests {
 
         let list = mgr.list().await.unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_append_missing_entries_skips_exact_duplicates() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+
+        let mut session = mgr.create(None).await.unwrap();
+        let a = make_user_msg("A");
+        let b = make_assistant_msg("B");
+        let c = make_user_msg("C");
+
+        mgr.append_entry(&mut session, &a).await.unwrap();
+        mgr.append_entry(&mut session, &b).await.unwrap();
+
+        let appended = mgr
+            .append_missing_entries(&mut session, &[a.clone(), b.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(appended, 1);
+
+        let reopened = mgr.open(&session.file_path).await.unwrap();
+        assert_eq!(reopened.messages.len(), 3);
+        assert!(matches!(reopened.messages[2], Message::User { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_append_missing_entries_skips_empty_assistant() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+
+        let mut session = mgr.create(None).await.unwrap();
+        let empty = make_empty_assistant_msg();
+        let user = make_user_msg("real");
+
+        let appended = mgr
+            .append_missing_entries(&mut session, &[empty, user])
+            .await
+            .unwrap();
+        assert_eq!(appended, 1);
+
+        let reopened = mgr.open(&session.file_path).await.unwrap();
+        assert_eq!(reopened.messages.len(), 1);
+        assert!(matches!(reopened.messages[0], Message::User { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_append_missing_entries_preserves_order() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
+
+        let mut session = mgr.create(None).await.unwrap();
+        let a = make_user_msg("1");
+        let b = make_assistant_msg("2");
+        let c = make_user_msg("3");
+
+        let appended = mgr
+            .append_missing_entries(&mut session, &[a.clone(), b.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(appended, 3);
+
+        let reopened = mgr.open(&session.file_path).await.unwrap();
+        assert_eq!(reopened.messages.len(), 3);
+        assert_eq!(
+            message_fingerprint(&reopened.messages[0]),
+            message_fingerprint(&a)
+        );
+        assert_eq!(
+            message_fingerprint(&reopened.messages[1]),
+            message_fingerprint(&b)
+        );
+        assert_eq!(
+            message_fingerprint(&reopened.messages[2]),
+            message_fingerprint(&c)
+        );
     }
 }

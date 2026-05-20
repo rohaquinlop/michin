@@ -29,7 +29,10 @@ use crate::theme::Theme;
 #[derive(Debug, Clone)]
 pub enum TuiAction {
     /// Switch to a different model.
-    SwitchModel(String),
+    SwitchModel {
+        model_id: String,
+        provider: Option<String>,
+    },
     /// Change thinking level.
     SetThinking(String),
     /// Fork the current session.
@@ -176,6 +179,22 @@ impl App {
     /// Update the session ID in the status bar (for lazy session creation).
     pub fn set_session_id(&mut self, id: String) {
         self.status.session_id = id;
+    }
+
+    /// Inject an initial user message (used for startup prompt text).
+    pub fn send_initial_message(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.chat.add_message(ChatMessage {
+            role: ChatRole::User,
+            text: text.clone(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        self.status.set_agent_state("streaming");
+        self.streaming = true;
+        let _ = self.message_tx.send(text);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -333,11 +352,11 @@ impl App {
 
         // Render autocomplete popup on top (after editor so it overlays).
         if self.editor.autocomplete_active() {
-            self.render_autocomplete(area, frame);
+            self.render_autocomplete(main[2], frame);
         }
     }
 
-    fn render_autocomplete(&mut self, area: ratatui::layout::Rect, frame: &mut Frame) {
+    fn render_autocomplete(&mut self, editor_area: ratatui::layout::Rect, frame: &mut Frame) {
         let items = self.editor.autocomplete_items();
         if items.is_empty() {
             return;
@@ -345,11 +364,11 @@ impl App {
         let selected = self.editor.autocomplete_selected();
 
         let popup_height = (items.len() as u16 + 2).min(8);
-        let popup_width = area.width.min(50);
-        // Position above the bottom of the screen (above the 3-line editor area).
-        let y = area.height.saturating_sub(popup_height + 3);
+        let popup_width = editor_area.width.min(50);
+        // Position directly above the current editor area.
+        let y = editor_area.y.saturating_sub(popup_height);
         let popup = ratatui::layout::Rect {
-            x: area.x,
+            x: editor_area.x,
             y,
             width: popup_width,
             height: popup_height,
@@ -397,9 +416,10 @@ impl App {
                     }
                     crossterm::event::KeyCode::Enter => {
                         if let Some(entry) = self.model_selector.selected_model() {
-                            let _ = self
-                                .action_tx
-                                .send(TuiAction::SwitchModel(entry.id.clone()));
+                            let _ = self.action_tx.send(TuiAction::SwitchModel {
+                                model_id: entry.id.clone(),
+                                provider: Some(entry.provider.clone()),
+                            });
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
                                 text: format!("Switching model to {}...", entry.id),
@@ -561,9 +581,21 @@ impl App {
                     if self.settings_selector.current_view().steering_mode == "follow-up" {
                         let _ = self.action_tx.send(TuiAction::FollowUp(text.clone()));
                         self.follow_up_queue_count += 1;
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::User,
+                            text: format!("[queued follow-up] {text}"),
+                            tool_name: None,
+                            is_streaming: false,
+                        });
                     } else {
                         let _ = self.action_tx.send(TuiAction::Steer(text.clone()));
                         self.steer_queue_count += 1;
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::User,
+                            text: format!("[steer] {text}"),
+                            tool_name: None,
+                            is_streaming: false,
+                        });
                     }
                 } else {
                     self.chat.add_message(ChatMessage {
@@ -659,7 +691,10 @@ impl App {
                 if arg.is_empty() {
                     self.model_selector.show();
                 } else {
-                    let _ = self.action_tx.send(TuiAction::SwitchModel(arg.to_string()));
+                    let _ = self.action_tx.send(TuiAction::SwitchModel {
+                        model_id: arg.to_string(),
+                        provider: None,
+                    });
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: format!("Switching model to {arg}..."),
@@ -928,6 +963,7 @@ impl App {
                 self.status.set_agent_state("error");
             }
             TuiEvent::LoadHistory(entries) => {
+                self.chat.messages.clear();
                 for entry in entries {
                     let role = match entry.role.as_str() {
                         "user" => ChatRole::User,
@@ -935,7 +971,7 @@ impl App {
                         "tool" => ChatRole::Tool,
                         _ => ChatRole::System,
                     };
-                    self.chat.messages.push(ChatMessage {
+                    self.chat.add_message(ChatMessage {
                         role,
                         text: entry.text,
                         tool_name: None,

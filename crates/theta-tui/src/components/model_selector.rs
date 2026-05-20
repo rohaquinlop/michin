@@ -201,7 +201,7 @@ impl ModelSelector {
                 } else {
                     format!("{}K", m.context_window / 1000)
                 };
-                let line = format!("{:20}  {:8}  {ctx:>6} ctx", m.id, m.provider);
+                let line = format!("{:18} {:13} {ctx:>6}  {}", m.id, m.provider, m.name);
                 ListItem::new(Span::raw(line))
             })
             .collect();

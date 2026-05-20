@@ -10,6 +10,7 @@ use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};
 pub fn models() -> Vec<Model> {
     vec![
         codex_model("gpt-5.5", "GPT-5.5 (Codex)", 272_000, 128_000, false),
+        codex_model("gpt-5.3-codex", "GPT-5.3 Codex", 272_000, 128_000, false),
         codex_model(
             "gpt-5.5-instant",
             "GPT-5.5 Instant (Codex)",

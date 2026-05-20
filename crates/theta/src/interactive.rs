@@ -158,7 +158,6 @@ pub async fn run_tui(
     let msg_model_id = model_id.to_string();
     let msg_skills = skills.clone();
     tokio::spawn(async move {
-        let mut saved_count: usize = 0;
         // Wait for agent to be available (block until login completes).
         let agent = wait_for_agent(&msg_agent_cell).await;
         let session_mgr = SessionManager::new(&msg_working_dir);
@@ -230,16 +229,28 @@ pub async fn run_tui(
                 }
             }
 
-            // Save only new messages since last save.
+            // Persist any state messages not yet in session storage.
             let Some(ref sid) = *msg_session_id_cell.read().await else {
                 continue;
             };
             let state = agent.state().await;
-            if let Ok(mut session) = session_mgr.open_by_id(sid).await {
-                for msg in &state.messages[saved_count..] {
-                    session_mgr.append_entry(&mut session, msg).await.ok();
+            match session_mgr.open_by_id(sid).await {
+                Ok(mut session) => {
+                    if let Err(e) = session_mgr
+                        .append_missing_entries(&mut session, &state.messages)
+                        .await
+                    {
+                        tracing::error!("failed to persist session entries: {e}");
+                        let _ = msg_event_tx
+                            .send(TuiEvent::Error(format!("Failed to persist session: {e}")));
+                    }
                 }
-                saved_count = state.messages.len();
+                Err(e) => {
+                    tracing::error!("failed to open session {sid} for persistence: {e}");
+                    let _ = msg_event_tx.send(TuiEvent::Error(format!(
+                        "Failed to open active session for persistence: {e}"
+                    )));
+                }
             }
         }
     });
@@ -303,8 +314,6 @@ pub async fn run_tui(
 
     // Build and run the TUI.
     // ------------------------------------------------------------------
-    let msg_tx_for_prompt = message_tx.clone();
-
     let persisted = crate::settings::load_settings().await;
     let mut app = App::new(
         theme.clone(),
@@ -336,9 +345,9 @@ pub async fn run_tui(
         app.start_login_flow(providers);
     }
 
-    // Send initial prompt if provided.
+    // Send initial prompt if provided (and show it in chat as user message).
     if let Some(prompt) = initial_prompt {
-        let _ = msg_tx_for_prompt.send(prompt.to_string());
+        app.send_initial_message(prompt.to_string());
     }
 
     app.run().await?;
@@ -381,9 +390,14 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
     tokio::spawn(async move {
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut saw_assistant_text_delta = false;
         loop {
             match events.recv().await {
+                Ok(AgentEvent::MessageStart) => {
+                    saw_assistant_text_delta = false;
+                }
                 Ok(AgentEvent::TextDelta { text }) => {
+                    saw_assistant_text_delta = true;
                     let _ = event_tx.send(TuiEvent::TextDelta(text));
                 }
                 Ok(AgentEvent::ThinkingDelta { thinking }) => {
@@ -407,7 +421,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     });
                 }
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
-                    let summary = content_blocks_to_text(&result.content, 500);
+                    let summary = format_tool_summary(&result, 2200);
                     tool_names.remove(&result.tool_call_id);
                     let _ = event_tx.send(TuiEvent::ToolEnd {
                         id: result.tool_call_id,
@@ -415,6 +429,24 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         is_error: result.is_error,
                         summary,
                     });
+                }
+                Ok(AgentEvent::MessageEnd { message }) => {
+                    if !saw_assistant_text_delta
+                        && let theta_ai::Message::Assistant { content, .. } = message
+                    {
+                        let final_text = content
+                            .iter()
+                            .filter_map(|b| match b {
+                                theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !final_text.is_empty() {
+                            let _ = event_tx.send(TuiEvent::TextDelta(final_text));
+                        }
+                    }
+                    saw_assistant_text_delta = false;
                 }
                 Ok(AgentEvent::TurnStart { .. }) => {
                     let _ = event_tx.send(TuiEvent::TurnStart);
@@ -594,18 +626,23 @@ async fn handle_tui_action(
                 }
             }
         }
-        TuiAction::SwitchModel(new_model) => {
+        TuiAction::SwitchModel { model_id, provider } => {
             let Some(agent) = agent_cell.read().await.clone() else {
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
                 return;
             };
-            if let Some(m) = find_model_by_id(catalog, &new_model) {
+            let model = provider
+                .as_deref()
+                .and_then(|p| find_model_by_provider_and_id(catalog, p, &model_id))
+                .or_else(|| find_model_by_id(catalog, &model_id));
+
+            if let Some(m) = model {
                 let provider = provider_to_string(m.provider);
                 match crate::config::load_auth(None).await {
                     Ok(mut auth) => {
                         if auth.get_api_key(&provider).await.is_none() {
                             let _ = event_tx.send(TuiEvent::Error(format!(
-                                "Model {new_model} is unavailable: missing auth for {provider}"
+                                "Model {model_id} is unavailable: missing auth for {provider}"
                             )));
                             return;
                         }
@@ -617,15 +654,17 @@ async fn handle_tui_action(
                 }
 
                 agent.set_model(m).await;
-                let blocks = build_system_prompt(working_dir, &new_model, None).await;
+                let blocks = build_system_prompt(working_dir, &model_id, None).await;
                 agent.set_system_prompt(blocks).await;
-                let _ = event_tx.send(TuiEvent::Info(format!("Switched to {new_model}")));
+                let _ = event_tx.send(TuiEvent::Info(format!(
+                    "Switched to {model_id} ({provider})"
+                )));
                 // Persist model preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
-                s.last_model = Some(new_model.to_string());
+                s.last_model = Some(model_id.to_string());
                 crate::settings::save_settings(&s).await.ok();
             } else {
-                let _ = event_tx.send(TuiEvent::Error(format!("Model not found: {new_model}")));
+                let _ = event_tx.send(TuiEvent::Error(format!("Model not found: {model_id}")));
             }
         }
         TuiAction::SetThinking(level) => {
@@ -792,19 +831,25 @@ async fn handle_tui_action(
             }
         }
         TuiAction::NewSession => {
-            let session_mgr = SessionManager::new(working_dir);
-            if let Ok(session) = session_mgr.create(Some(model_id)).await {
-                let sid = session
-                    .meta
-                    .as_ref()
-                    .map(|m| m.id.clone())
-                    .unwrap_or_default();
-                *session_id_cell.write().await = Some(sid.clone());
-                let _ = event_tx.send(TuiEvent::SessionCreated {
-                    id: sid,
-                    model: model_id.to_string(),
-                });
-            }
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+
+            // Lazy session behavior: clear in-memory transcript, but do not
+            // create a session file until first real message.
+            agent.load_messages(Vec::new()).await;
+            let blocks = build_system_prompt(working_dir, model_id, None).await;
+            agent.set_system_prompt(blocks).await;
+
+            *session_id_cell.write().await = None;
+            let _ = event_tx.send(TuiEvent::SessionCreated {
+                id: "".to_string(),
+                model: model_id.to_string(),
+            });
+            let _ = event_tx.send(TuiEvent::Info(
+                "Started new unsaved session (saved on first message).".into(),
+            ));
         }
         TuiAction::Steer(text) => {
             let Some(agent) = agent_cell.read().await.clone() else {
@@ -847,26 +892,48 @@ async fn available_model_entries(
         );
     }
 
-    catalog
+    let mut entries: Vec<ModelEntry> = catalog
         .list()
         .into_iter()
-        .filter(|m| {
-            provider_has_auth
-                .get(&provider_to_string(m.provider))
-                .copied()
-                .unwrap_or(false)
+        .map(|m| {
+            let provider = provider_to_string(m.provider);
+            let auth_suffix = if provider_has_auth.get(&provider).copied().unwrap_or(false) {
+                ""
+            } else {
+                " [auth required]"
+            };
+            ModelEntry {
+                id: m.id.clone(),
+                name: format!("{}{auth_suffix}", m.name),
+                provider,
+                context_window: m.context_window,
+            }
         })
-        .map(|m| ModelEntry {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            provider: format!("{:?}", m.provider).to_lowercase(),
-            context_window: m.context_window,
-        })
-        .collect()
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.id.cmp(&b.id))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entries
 }
 
 fn find_model_by_id(catalog: &BuiltInCatalog, id: &str) -> Option<theta_ai::Model> {
     catalog.list().into_iter().find(|m| m.id == id).cloned()
+}
+
+fn find_model_by_provider_and_id(
+    catalog: &BuiltInCatalog,
+    provider: &str,
+    id: &str,
+) -> Option<theta_ai::Model> {
+    catalog
+        .list()
+        .into_iter()
+        .find(|m| provider_to_string(m.provider) == provider && m.id == id)
+        .cloned()
 }
 
 fn provider_to_string(provider: Provider) -> String {
@@ -877,6 +944,118 @@ fn provider_to_string(provider: Provider) -> String {
         Provider::OpenCode => "opencode".into(),
         Provider::OpenCodeGo => "opencode-go".into(),
     }
+}
+
+fn format_tool_summary(result: &theta_agent_core::types::ToolResult, max_chars: usize) -> String {
+    let details = result.details.as_ref();
+    let summary = match result.tool_name.as_str() {
+        "read" => {
+            if let Some(d) = details {
+                let path = d
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let total_lines = d.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
+                let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+                let lines_read = d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!(
+                    "read {path}\nlines {offset}-{end} of {total_lines}",
+                    end = offset.saturating_add(lines_read.saturating_sub(1))
+                )
+            } else {
+                "read done".to_string()
+            }
+        }
+        "edit" => {
+            if let Some(d) = details {
+                let path = d
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let changes = d.get("changes").and_then(|v| v.as_u64()).unwrap_or(0);
+                let diff = d.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+                if diff.is_empty() {
+                    format!("edit {path}\n{changes} change(s)")
+                } else {
+                    format!("edit {path}\n{changes} change(s)\n{diff}")
+                }
+            } else {
+                "edit done".to_string()
+            }
+        }
+        "bash" => {
+            if let Some(d) = details {
+                let exit = d
+                    .get("exit_code")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                let timed_out = d
+                    .get("timed_out")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if timed_out {
+                    "bash timeout".to_string()
+                } else {
+                    format!("bash done (exit={exit})")
+                }
+            } else {
+                "bash done".to_string()
+            }
+        }
+        "grep" => {
+            if let Some(d) = details {
+                let pattern = d
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let count = d.get("match_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("grep /{pattern}/\n{count} match(es)")
+            } else {
+                "grep done".to_string()
+            }
+        }
+        "ls" => {
+            if let Some(d) = details {
+                let path = d
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let count = d.get("entry_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!(
+                    "ls {path}\n{count} entr{suffix}",
+                    suffix = if count == 1 { "y" } else { "ies" }
+                )
+            } else {
+                "ls done".to_string()
+            }
+        }
+        "find" => {
+            if let Some(d) = details {
+                let pattern = d
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let count = d.get("match_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("find {pattern}\n{count} match(es)")
+            } else {
+                "find done".to_string()
+            }
+        }
+        "write" => {
+            if let Some(d) = details {
+                let path = d
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let bytes = d.get("bytes_written").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("write {path}\n{bytes} bytes")
+            } else {
+                "write done".to_string()
+            }
+        }
+        _ => content_blocks_to_text(&result.content, max_chars),
+    };
+    truncate_chars(&summary, max_chars)
 }
 
 fn content_blocks_to_text(content: &[theta_ai::ContentBlock], max_chars: usize) -> String {
@@ -970,22 +1149,55 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
                 })
             }
         }
-        theta_ai::Message::ToolResult {
-            tool_name, content, ..
-        } => {
-            let text = content
-                .iter()
-                .filter_map(|b| match b {
-                    theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some(HistoryEntry {
-                role: "tool".into(),
-                text: format!("[{tool_name}] {text}"),
-            })
-        }
+        theta_ai::Message::ToolResult { tool_name, .. } => Some(HistoryEntry {
+            role: "tool".into(),
+            text: format!("[{tool_name}] done"),
+        }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tool_summary;
+    use theta_agent_core::types::ToolResult;
+
+    #[test]
+    fn read_summary_is_compact() {
+        let result = ToolResult {
+            tool_call_id: "id".into(),
+            tool_name: "read".into(),
+            content: vec![],
+            details: Some(serde_json::json!({
+                "path": "/tmp/a.rs",
+                "total_lines": 100,
+                "offset": 11,
+                "lines_read": 20
+            })),
+            is_error: false,
+        };
+        let s = format_tool_summary(&result, 200);
+        assert!(s.contains("read /tmp/a.rs"));
+        assert!(s.contains("lines 11-30 of 100"));
+        assert!(!s.contains("fn "));
+    }
+
+    #[test]
+    fn edit_summary_includes_diff() {
+        let result = ToolResult {
+            tool_call_id: "id".into(),
+            tool_name: "edit".into(),
+            content: vec![],
+            details: Some(serde_json::json!({
+                "path": "/tmp/a.rs",
+                "changes": 1,
+                "diff": "@@ -1 +1 @@\n-a\n+b"
+            })),
+            is_error: false,
+        };
+        let s = format_tool_summary(&result, 200);
+        assert!(s.contains("edit /tmp/a.rs"));
+        assert!(s.contains("1 change(s)"));
+        assert!(s.contains("@@ -1 +1 @@"));
     }
 }
