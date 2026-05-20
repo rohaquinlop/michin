@@ -165,37 +165,7 @@ pub async fn run_tui(
             // Reload agent in case it was replaced (model switch, etc.).
             let agent = msg_agent_cell.read().await.clone().unwrap_or(agent.clone());
 
-            let expanded_message = if let Some(skill_cmd) = message.strip_prefix("/skill:") {
-                let space_index = skill_cmd.find(' ');
-                let skill_name = match space_index {
-                    Some(idx) => &skill_cmd[..idx],
-                    None => skill_cmd,
-                };
-                let args = match space_index {
-                    Some(idx) => skill_cmd[idx + 1..].trim(),
-                    None => "",
-                };
-
-                if let Some(skill) = msg_skills.iter().find(|s| s.name == skill_name) {
-                    let base_dir = skill.location.parent().unwrap_or(skill.location.as_path());
-                    let skill_block = format!(
-                        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
-                        skill.name,
-                        skill.location.display(),
-                        base_dir.display(),
-                        skill.body.trim()
-                    );
-                    if args.is_empty() {
-                        skill_block
-                    } else {
-                        format!("{skill_block}\n\n{args}")
-                    }
-                } else {
-                    message.clone()
-                }
-            } else {
-                message.clone()
-            };
+            let expanded_message = expand_skill_message(&message, &msg_skills);
 
             let blocks =
                 crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
@@ -1081,6 +1051,43 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn expand_skill_message(message: &str, skills: &[crate::skills::Skill]) -> String {
+    let Some(skill_cmd) = message.strip_prefix("/skill:") else {
+        return message.to_string();
+    };
+
+    let space_index = skill_cmd.find(' ');
+    let skill_name = match space_index {
+        Some(idx) => &skill_cmd[..idx],
+        None => skill_cmd,
+    };
+    let args = match space_index {
+        Some(idx) => skill_cmd[idx + 1..].trim(),
+        None => "",
+    };
+
+    let Some(skill) = skills.iter().find(|s| s.name == skill_name) else {
+        return message.to_string();
+    };
+
+    let base_dir = skill.location.parent().unwrap_or(skill.location.as_path());
+    let skill_block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+        skill.name,
+        skill.location.display(),
+        base_dir.display(),
+        skill.body.trim()
+    );
+
+    if args.is_empty() {
+        format!(
+            "{skill_block}\n\nExecute this skill now for the current request. Do not only acknowledge loading the skill."
+        )
+    } else {
+        format!("{skill_block}\n\n{args}")
+    }
+}
+
 fn session_recap(session: &crate::session::Session) -> String {
     let meta = session.meta.as_ref();
     let title = meta
@@ -1159,7 +1166,10 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_tool_summary;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use super::{expand_skill_message, format_tool_summary};
     use theta_agent_core::types::ToolResult;
 
     #[test]
@@ -1199,5 +1209,34 @@ mod tests {
         assert!(s.contains("edit /tmp/a.rs"));
         assert!(s.contains("1 change(s)"));
         assert!(s.contains("@@ -1 +1 @@"));
+    }
+
+    #[test]
+    fn skill_command_without_args_executes_now() {
+        let skill = crate::skills::Skill {
+            name: "git-commit".into(),
+            description: "Commit workflow".into(),
+            location: PathBuf::from("/tmp/skills/git-commit/SKILL.md"),
+            body: "Do commit workflow".into(),
+            extra: HashMap::new(),
+        };
+        let s = expand_skill_message("/skill:git-commit", &[skill]);
+        assert!(s.contains("<skill name=\"git-commit\""));
+        assert!(s.contains("Execute this skill now"));
+        assert!(s.contains("Do not only acknowledge loading the skill"));
+    }
+
+    #[test]
+    fn skill_command_with_args_preserves_args_only() {
+        let skill = crate::skills::Skill {
+            name: "git-commit".into(),
+            description: "Commit workflow".into(),
+            location: PathBuf::from("/tmp/skills/git-commit/SKILL.md"),
+            body: "Do commit workflow".into(),
+            extra: HashMap::new(),
+        };
+        let s = expand_skill_message("/skill:git-commit commit all staged", &[skill]);
+        assert!(s.contains("commit all staged"));
+        assert!(!s.contains("Do not only acknowledge loading the skill"));
     }
 }
