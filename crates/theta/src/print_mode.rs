@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
+use theta_ai::ModelCatalog;
 use theta_ai::providers::default_registry;
-use theta_ai::{ContentBlock, ModelCatalog};
 use theta_models::BuiltInCatalog;
 use tokio::sync::broadcast;
 
@@ -55,11 +55,12 @@ pub async fn run_prompt_print_mode(
     // Spawn the agent loop.
     let prompt_owned = prompt.to_string();
     let agent_for_spawn = agent.clone();
+    let mention_working_dir = working_dir.to_path_buf();
     let agent_handle = tokio::spawn(async move {
         agent_for_spawn
-            .prompt(vec![ContentBlock::Text {
-                text: prompt_owned.clone(),
-            }])
+            .prompt(
+                crate::mentions::expand_file_mentions(&mention_working_dir, &prompt_owned).await,
+            )
             .await
     });
 
@@ -235,9 +236,10 @@ pub async fn run_continue_print_mode(
     let agent_for_spawn = agent.clone();
     let agent_handle = if let Some(text) = follow_up {
         let text = text.to_string();
+        let mention_working_dir = working_dir.to_path_buf();
         tokio::spawn(async move {
             agent_for_spawn
-                .prompt(vec![ContentBlock::Text { text }])
+                .prompt(crate::mentions::expand_file_mentions(&mention_working_dir, &text).await)
                 .await
         })
     } else {
@@ -363,9 +365,10 @@ pub async fn run_resume_print_mode(
     let agent_for_spawn = agent.clone();
     let agent_handle = if let Some(text) = follow_up {
         let text = text.to_string();
+        let mention_working_dir = working_dir.to_path_buf();
         tokio::spawn(async move {
             agent_for_spawn
-                .prompt(vec![ContentBlock::Text { text }])
+                .prompt(crate::mentions::expand_file_mentions(&mention_working_dir, &text).await)
                 .await
         })
     } else {

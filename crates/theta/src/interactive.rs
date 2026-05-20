@@ -7,7 +7,7 @@ use std::sync::Arc;
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
 use theta_ai::providers::default_registry;
-use theta_ai::{ContentBlock, Model, ModelCatalog, Provider};
+use theta_ai::{Model, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
 use theta_tui::App;
 use theta_tui::app::{HistoryEntry, TuiAction, TuiEvent};
@@ -94,7 +94,7 @@ pub async fn run_tui(
 
     // Create channels between TUI and agent bridge.
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+    let (message_tx, mut message_rx) = mpsc::unbounded_channel::<String>();
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
     // Lazy session: created on first message, None until then.
@@ -173,7 +173,7 @@ pub async fn run_tui(
         while let Some(message) = message_rx.recv().await {
             // Reload agent in case it was replaced (model switch, etc.).
             let agent = msg_agent_cell.read().await.clone().unwrap_or(agent.clone());
-            let blocks = vec![ContentBlock::text(&message)];
+            let blocks = crate::mentions::expand_file_mentions(&msg_working_dir, &message).await;
             if let Err(e) = agent.prompt(blocks).await {
                 tracing::error!("agent prompt failed: {e}");
                 let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));

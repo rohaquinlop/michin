@@ -7,8 +7,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
+use theta_ai::ModelCatalog;
 use theta_ai::providers::default_registry;
-use theta_ai::{ContentBlock, ModelCatalog};
 use theta_models::BuiltInCatalog;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
@@ -140,9 +140,10 @@ async fn prompt(
     let mut events = agent.subscribe();
     let agent_for_spawn = agent.clone();
     let text = text.to_string();
+    let mention_working_dir = working_dir.to_path_buf();
     let handle = tokio::spawn(async move {
         agent_for_spawn
-            .prompt(vec![ContentBlock::Text { text }])
+            .prompt(crate::mentions::expand_file_mentions(&mention_working_dir, &text).await)
             .await
     });
 

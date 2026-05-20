@@ -15,4 +15,3 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 open = { workspace = true }
-regex = { workspace = true }

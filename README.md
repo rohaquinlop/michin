@@ -22,7 +22,8 @@ cargo run -- rpc
 
 ## TUI
 
-- `@` opens recursive file autocomplete. Query is a regex over relative paths.
+- `@` opens Codex-style file autocomplete: gitignore-aware recursive paths, fuzzy-ranked.
+- Sending `@path/to/file` appends that file's contents to the prompt context.
 - `/sessions` opens the session picker.
 - `Ctrl+P` opens model selector.
 - `Ctrl+T` cycles themes.

@@ -8,7 +8,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
-use regex::Regex;
 use std::path::PathBuf;
 
 use crate::components::fuzzy::fuzzy_filter;
@@ -278,7 +277,7 @@ impl Editor {
         }
 
         ac.items = match trigger {
-            '@' => fuzzy_file_matches(&self.working_dir, &ac.query),
+            '@' => file_mention_matches(&self.working_dir, &ac.query),
             '/' => fuzzy_command_matches(&self.slash_commands, &ac.query),
             _ => Vec::new(),
         };
@@ -704,41 +703,58 @@ impl Component for Editor {
 // Fuzzy file matching
 // ---------------------------------------------------------------------------
 
-/// Return matching file paths from `base_dir`.
-/// The query is treated as a regex over relative paths; invalid regex falls
-/// back to fuzzy matching so partial typing still produces useful results.
-fn fuzzy_file_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
-    let mut entries: Vec<String> = Vec::new();
-    let include_hidden = query.starts_with('.');
-    collect_file_paths(base_dir, base_dir, include_hidden, &mut entries);
+/// Return Codex-style file mention matches:
+/// gitignore-aware, recursive, relative paths, fuzzy-ranked.
+fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
+    let mut entries = git_tracked_and_untracked_files(base_dir)
+        .unwrap_or_else(|| recursive_file_paths(base_dir, query.starts_with('.')));
     entries.sort();
+    entries.dedup();
 
     let trimmed = query.trim();
     if trimmed.is_empty() {
-        return entries;
+        return entries.into_iter().take(50).collect();
     }
 
-    if let Ok(regex) = Regex::new(trimmed) {
-        return entries
-            .into_iter()
-            .filter(|path| regex.is_match(path))
-            .collect();
-    }
-
-    let fuzzy_query: String = trimmed
-        .chars()
-        .filter(|c| {
-            !matches!(
-                c,
-                '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '^' | '$' | '|' | '\\'
-            )
-        })
-        .collect();
-
-    fuzzy_filter(&entries, fuzzy_query.trim(), |s| s)
+    let mut filtered = fuzzy_filter(&entries, trimmed, |s| s)
         .into_iter()
         .cloned()
-        .collect()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        filtered = entries
+            .into_iter()
+            .filter(|path| path.contains(trimmed))
+            .collect();
+    }
+    filtered.into_iter().take(50).collect()
+}
+
+fn git_tracked_and_untracked_files(base_dir: &std::path::Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_dir)
+        .arg("ls-files")
+        .arg("--cached")
+        .arg("--others")
+        .arg("--exclude-standard")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let files = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    if files.is_empty() { None } else { Some(files) }
+}
+
+fn recursive_file_paths(base_dir: &std::path::Path, include_hidden: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_file_paths(base_dir, base_dir, include_hidden, &mut out);
+    out
 }
 
 fn collect_file_paths(
@@ -754,6 +770,12 @@ fn collect_file_paths(
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+        if matches!(
+            name.as_str(),
+            "target" | "node_modules" | ".git" | ".theta" | "dist" | "build"
+        ) {
             continue;
         }
 
@@ -843,33 +865,27 @@ mod tests {
     }
 
     #[test]
-    fn file_matches_recurse_and_apply_regex_to_relative_paths() {
-        let root = temp_root("regex");
+    fn file_mentions_recurse_and_fuzzy_match_relative_paths() {
+        let root = temp_root("fuzzy-path");
         std::fs::create_dir_all(root.join("src/components")).unwrap();
         std::fs::write(root.join("src/main.rs"), "").unwrap();
         std::fs::write(root.join("src/components/chat.rs"), "").unwrap();
         std::fs::write(root.join("README.md"), "").unwrap();
 
-        let matches = fuzzy_file_matches(&root, r"src/.+\.rs$");
+        let matches = file_mention_matches(&root, "src chat");
 
-        assert_eq!(
-            matches,
-            vec![
-                "src/components/chat.rs".to_string(),
-                "src/main.rs".to_string()
-            ]
-        );
+        assert_eq!(matches, vec!["src/components/chat.rs".to_string()]);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn file_matches_empty_query_returns_all_visible_files() {
+    fn file_mentions_empty_query_returns_visible_files() {
         let root = temp_root("empty");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "").unwrap();
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
 
-        let matches = fuzzy_file_matches(&root, "");
+        let matches = file_mention_matches(&root, "");
 
         assert_eq!(
             matches,
@@ -879,26 +895,33 @@ mod tests {
     }
 
     #[test]
-    fn file_matches_invalid_regex_falls_back_to_fuzzy() {
-        let root = temp_root("fuzzy");
+    fn file_mentions_use_git_exclude_standard_when_available() {
+        let root = temp_root("git-aware");
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/session_picker.rs"), "").unwrap();
-        std::fs::write(root.join("README.md"), "").unwrap();
+        std::fs::write(root.join("src/visible.rs"), "").unwrap();
+        std::fs::write(root.join("ignored.log"), "").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("init")
+            .output();
 
-        let matches = fuzzy_file_matches(&root, "s[");
+        let matches = file_mention_matches(&root, "");
 
-        assert_eq!(matches, vec!["src/session_picker.rs".to_string()]);
+        assert!(matches.contains(&"src/visible.rs".to_string()));
+        assert!(!matches.contains(&"ignored.log".to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn file_matches_skips_hidden_paths_by_default() {
+    fn file_mentions_skips_hidden_paths_by_default() {
         let root = temp_root("hidden");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/config"), "").unwrap();
         std::fs::write(root.join("visible.rs"), "").unwrap();
 
-        let matches = fuzzy_file_matches(&root, "");
+        let matches = file_mention_matches(&root, "");
 
         assert_eq!(matches, vec!["visible.rs".to_string()]);
         let _ = std::fs::remove_dir_all(root);

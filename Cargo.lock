@@ -1819,7 +1819,6 @@ dependencies = [
  "futures",
  "open",
  "ratatui",
- "regex",
  "thiserror",
  "tokio",
  "tracing",
