@@ -157,6 +157,8 @@ pub async fn run_tui(
         crate::settings::save_settings(&s).await.ok();
     }
 
+    let skills = crate::skills::discover_skills(working_dir).await;
+
     // ------------------------------------------------------------------
     // Spawn message handler — waits for agent, creates session lazily.
     // ------------------------------------------------------------------
@@ -165,6 +167,7 @@ pub async fn run_tui(
     let msg_working_dir = working_dir.to_path_buf();
     let msg_session_id_cell = session_id_cell.clone();
     let msg_model_id = model_id.to_string();
+    let msg_skills = skills.clone();
     tokio::spawn(async move {
         let mut saved_count: usize = 0;
         // Wait for agent to be available (block until login completes).
@@ -173,7 +176,41 @@ pub async fn run_tui(
         while let Some(message) = message_rx.recv().await {
             // Reload agent in case it was replaced (model switch, etc.).
             let agent = msg_agent_cell.read().await.clone().unwrap_or(agent.clone());
-            let blocks = crate::mentions::expand_file_mentions(&msg_working_dir, &message).await;
+
+            let expanded_message = if let Some(skill_cmd) = message.strip_prefix("/skill:") {
+                let space_index = skill_cmd.find(' ');
+                let skill_name = match space_index {
+                    Some(idx) => &skill_cmd[..idx],
+                    None => skill_cmd,
+                };
+                let args = match space_index {
+                    Some(idx) => skill_cmd[idx + 1..].trim(),
+                    None => "",
+                };
+
+                if let Some(skill) = msg_skills.iter().find(|s| s.name == skill_name) {
+                    let base_dir = skill.location.parent().unwrap_or(skill.location.as_path());
+                    let skill_block = format!(
+                        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+                        skill.name,
+                        skill.location.display(),
+                        base_dir.display(),
+                        skill.body.trim()
+                    );
+                    if args.is_empty() {
+                        skill_block
+                    } else {
+                        format!("{skill_block}\n\n{args}")
+                    }
+                } else {
+                    message.clone()
+                }
+            } else {
+                message.clone()
+            };
+
+            let blocks =
+                crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
             if let Err(e) = agent.prompt(blocks).await {
                 tracing::error!("agent prompt failed: {e}");
                 let _ = msg_event_tx.send(TuiEvent::Error(format!("{e}")));
@@ -220,7 +257,6 @@ pub async fn run_tui(
 
     // ------------------------------------------------------------------
     // Build available commands + skills for the / picker.
-    let skills = crate::skills::discover_skills(working_dir).await;
     let mut commands = vec![
         CommandEntry {
             name: "help".into(),
@@ -254,12 +290,16 @@ pub async fn run_tui(
             name: "login".into(),
             description: "Log in to a provider".into(),
         },
+        CommandEntry {
+            name: "skills".into(),
+            description: "List available skills".into(),
+        },
     ];
 
-    // Skills.
+    // Skills as /skill:<name> commands.
     for skill in &skills {
         commands.push(CommandEntry {
-            name: skill.name.clone(),
+            name: format!("skill:{}", skill.name),
             description: skill.description.clone(),
         });
     }

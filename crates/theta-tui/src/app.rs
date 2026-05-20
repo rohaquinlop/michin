@@ -110,6 +110,8 @@ pub struct App {
     status: StatusBar,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
+    commands: Vec<CommandEntry>,
+    skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
     running: bool,
     mode: AppMode,
@@ -167,6 +169,10 @@ impl App {
             working_dir.clone(),
             commands.iter().map(|c| c.name.clone()).collect(),
         );
+        let skill_commands = commands
+            .iter()
+            .filter_map(|c| c.name.strip_prefix("skill:").map(str::to_string))
+            .collect();
         editor.focus(true); // Editor starts focused.
 
         Self {
@@ -177,6 +183,8 @@ impl App {
             theme_idx: 0,
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
+            commands,
+            skill_commands,
             keybindings: default_bindings(),
             running: true,
             mode: AppMode::Chat,
@@ -504,14 +512,16 @@ impl App {
             "help" | "h" => {
                 let help_text = [
                     "Slash commands:",
-                    "  /model <id>    Switch to a different model",
+                    "  /model <id>     Switch to a different model",
                     "  /thinking <lvl> Set thinking level (off, low, medium, high)",
-                    "  /clear         Clear the chat display",
-                    "  /session       Show current session info",
-                    "  /fork          Fork the current session",
-                    "  /sessions      List recent sessions to resume",
-                    "  /exit          Exit Theta",
-                    "  /help          Show this help",
+                    "  /clear          Clear the chat display",
+                    "  /session        Show current session info",
+                    "  /fork           Fork the current session",
+                    "  /sessions       List recent sessions to resume",
+                    "  /skills         List available skills",
+                    "  /skill:<name>   Invoke a skill",
+                    "  /exit           Exit Theta",
+                    "  /help           Show this help",
                 ]
                 .join("\n");
                 self.chat.add_message(ChatMessage {
@@ -581,6 +591,35 @@ impl App {
             "sessions" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessions);
             }
+            "skills" => {
+                if self.skill_commands.is_empty() {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "No skills found in ~/.agents/skills, ~/.theta/skills, ./.agents/skills, or ./.theta/skills".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                } else {
+                    let mut rows = vec!["Available skills:".to_string()];
+                    for command_name in &self.skill_commands {
+                        if let Some(entry) = self
+                            .commands
+                            .iter()
+                            .find(|c| c.name == format!("skill:{command_name}"))
+                        {
+                            rows.push(format!("  /skill:{} - {}", command_name, entry.description));
+                        } else {
+                            rows.push(format!("  /skill:{}", command_name));
+                        }
+                    }
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: rows.join("\n"),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+            }
             "fork" => {
                 let _ = self.action_tx.send(TuiAction::ForkSession);
                 self.chat.add_message(ChatMessage {
@@ -592,6 +631,36 @@ impl App {
             }
             "exit" => {
                 self.running = false;
+            }
+            _ if command.starts_with("skill:") => {
+                let Some(skill_name) = command.strip_prefix("skill:") else {
+                    return;
+                };
+                if self.skill_commands.iter().any(|n| n == skill_name) {
+                    let full = if arg.is_empty() {
+                        format!("/{command}")
+                    } else {
+                        format!("/{command} {arg}")
+                    };
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::User,
+                        text: full.clone(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    self.status.set_agent_state("streaming");
+                    self.streaming = true;
+                    let _ = self.message_tx.send(full);
+                } else {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: format!(
+                            "Unknown skill: {skill_name}. Type /skills to list available skills."
+                        ),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
             }
             _ => {
                 self.chat.add_message(ChatMessage {

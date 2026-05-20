@@ -7,7 +7,7 @@
 //! Each skill is a Markdown file with YAML frontmatter between `---` delimiters.
 //! The frontmatter must contain `name` and `description` fields.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -80,24 +80,38 @@ impl Skill {
 }
 
 /// Discover all skills from global and project directories.
+///
+/// Search roots:
+/// - ~/.agents/skills
+/// - ~/.theta/skills
+/// - ./.agents/skills
+/// - ./.theta/skills
 pub async fn discover_skills(working_dir: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
 
-    // Global skills: ~/.theta/skills/
+    let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        let global = home.join(".theta").join("skills");
-        load_skills_from_dir(&global, &mut skills);
+        roots.push(home.join(".agents").join("skills"));
+        roots.push(home.join(".theta").join("skills"));
     }
+    roots.push(working_dir.join(".agents").join("skills"));
+    roots.push(working_dir.join(".theta").join("skills"));
 
-    // Project-local skills: .theta/skills/
-    let local = working_dir.join(".theta").join("skills");
-    load_skills_from_dir(&local, &mut skills);
+    for root in roots {
+        load_skills_from_dir_recursive(&root, &mut skills, &mut seen_names);
+    }
 
     skills
 }
 
-/// Load all `SKILL.md` files from a directory (non-recursive for now).
-fn load_skills_from_dir(dir: &Path, skills: &mut Vec<Skill>) {
+/// Recursively load skills.
+/// If a directory contains SKILL.md, treat that directory as one skill root and do not recurse deeper.
+fn load_skills_from_dir_recursive(
+    dir: &Path,
+    skills: &mut Vec<Skill>,
+    seen_names: &mut HashSet<String>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -106,15 +120,22 @@ fn load_skills_from_dir(dir: &Path, skills: &mut Vec<Skill>) {
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_dir() {
-            // Check for SKILL.md inside the directory.
             let skill_md = path.join("SKILL.md");
-            if skill_md.exists()
-                && let Some(skill) = Skill::from_file(&skill_md)
-            {
-                skills.push(skill);
+            if skill_md.exists() {
+                if let Some(skill) = Skill::from_file(&skill_md)
+                    && seen_names.insert(skill.name.clone())
+                {
+                    skills.push(skill);
+                }
+                continue;
             }
-        } else if path.file_name().map(|n| n == "SKILL.md").unwrap_or(false)
+            load_skills_from_dir_recursive(&path, skills, seen_names);
+            continue;
+        }
+
+        if path.file_name().map(|n| n == "SKILL.md").unwrap_or(false)
             && let Some(skill) = Skill::from_file(&path)
+            && seen_names.insert(skill.name.clone())
         {
             skills.push(skill);
         }

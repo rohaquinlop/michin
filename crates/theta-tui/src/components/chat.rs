@@ -100,30 +100,21 @@ impl Chat {
 
     /// Format a message into styled lines with markdown parsing.
     fn format_message(&self, msg: &ChatMessage) -> Vec<Line<'static>> {
-        let (label, prefix, role_style): (String, &'static str, Style) = match msg.role {
+        let (prefix, role_style): (&str, Style) = match msg.role {
             ChatRole::User => (
-                "You".into(),
-                "  ",
+                " ",
                 Style::default()
                     .fg(self.theme.fg)
                     .bg(self.theme.user_bubble),
             ),
             ChatRole::Assistant => (
-                "Theta".into(),
-                "  ",
+                "",
                 Style::default()
                     .fg(self.theme.fg)
                     .bg(self.theme.assistant_bubble),
             ),
-            ChatRole::Tool => (
-                msg.tool_name
-                    .as_ref()
-                    .map(|name| format!("Tool: {name}"))
-                    .unwrap_or_else(|| "Tool".into()),
-                "  ",
-                Style::default().fg(self.theme.warning),
-            ),
-            ChatRole::System => ("System".into(), "  ", Style::default().fg(self.theme.dim)),
+            ChatRole::Tool => ("  ", Style::default().fg(self.theme.warning)),
+            ChatRole::System => ("  ", Style::default().fg(self.theme.dim)),
         };
 
         let text = if msg.role == ChatRole::Tool {
@@ -141,18 +132,13 @@ impl Chat {
             None
         };
 
-        let mut lines = vec![Line::from(vec![Span::styled(
-            format!(" {label} "),
-            Style::default()
-                .fg(match msg.role {
-                    ChatRole::User => self.theme.accent,
-                    ChatRole::Assistant => self.theme.success,
-                    ChatRole::Tool => self.theme.warning,
-                    ChatRole::System => self.theme.dim,
-                })
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        )])];
-        lines.extend(format_markdown(&text, role_style, &self.theme, prefix));
+        let mut lines = format_markdown(&text, role_style, &self.theme, prefix);
+
+        if msg.role == ChatRole::User {
+            for line in &mut lines {
+                line.spans.push(Span::styled(" ", role_style));
+            }
+        }
 
         if let Some(ref c) = cursor {
             if lines.is_empty() {
@@ -163,10 +149,9 @@ impl Chat {
             } else if let Some(last) = lines.last_mut() {
                 last.spans.push(c.clone());
             }
-            lines
-        } else {
-            lines
         }
+
+        lines
     }
 }
 
@@ -231,7 +216,7 @@ fn format_markdown(
     text: &str,
     base_style: Style,
     theme: &Theme,
-    prefix: &'static str,
+    prefix: &str,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
@@ -283,7 +268,7 @@ fn format_markdown(
                 .fg(theme.accent)
                 .add_modifier(ratatui::style::Modifier::BOLD);
             lines.push(Line::from(vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled(format!("\u{2592} {heading}"), h_style),
             ]));
             continue;
@@ -293,7 +278,7 @@ fn format_markdown(
                 .fg(theme.accent)
                 .add_modifier(ratatui::style::Modifier::BOLD);
             lines.push(Line::from(vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled(format!("\u{2593} {heading}"), h_style),
             ]));
             continue;
@@ -303,7 +288,7 @@ fn format_markdown(
                 .fg(theme.success)
                 .add_modifier(ratatui::style::Modifier::BOLD);
             lines.push(Line::from(vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled(format!("\u{2588} {heading}"), h_style),
             ]));
             continue;
@@ -315,7 +300,7 @@ fn format_markdown(
                 .fg(theme.dim)
                 .add_modifier(ratatui::style::Modifier::ITALIC);
             lines.push(Line::from(vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled(format!("  {quoted}"), q_style),
             ]));
             continue;
@@ -328,7 +313,7 @@ fn format_markdown(
         if let Some(item) = is_bullet {
             let bullet_style = Style::default().fg(theme.warning);
             let mut spans = vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled("  \u{2022} ", bullet_style),
             ];
             spans.extend(inline_format(item.to_string(), base_style));
@@ -347,7 +332,7 @@ fn format_markdown(
         {
             let num_style = Style::default().fg(theme.warning);
             lines.push(Line::from(vec![
-                Span::styled(prefix, base_style),
+                Span::styled(prefix.to_string(), base_style),
                 Span::styled(format!("  {trimmed}"), num_style),
             ]));
             continue;
