@@ -31,7 +31,7 @@ theta-models (lib)      — built-in model catalog (compile-time)               
 
 **Dependency order:** `theta-ai` ← `theta-agent-core` ← `theta` (+ `theta-tui`, `theta-models`)
 
-See `PLAN.md` for the full implementation plan and phase breakdown.
+Use this `AGENTS.md` as the canonical implementation guidance and phase status.
 
 ## Phase Completion Status
 
@@ -146,7 +146,7 @@ These are intentionally out of scope. Do not implement them:
 
 ## Implementation Order
 
-Follow the phases in `PLAN.md`. Build bottom-up:
+Follow the phases below. Build bottom-up:
 1. `theta-ai` → types + provider trait + OpenAI-compat provider
 2. `theta-models` → built-in model definitions
 3. `theta-agent-core` → Agent + loop + tool execution
@@ -235,14 +235,5 @@ When a new provider is needed beyond the first four:
 4. Add models to `theta-models/src/<provider>.rs`
 5. Add env var or auth token detection in the provider implementation
 6. Add default model to `theta/src/models.rs`
-7. Update `PLAN.md` and this file
+7. Update this file
 
-## The PLAN.md
-
-`PLAN.md` is the canonical implementation plan. It is NOT auto-generated documentation — it is a living design document. Update it when:
-- Architecture decisions change
-- New non-goals are agreed on
-- Phase estimates shift significantly
-- New crates are added or merged
-
-Keep it concise. It is a guide for coding agents.
