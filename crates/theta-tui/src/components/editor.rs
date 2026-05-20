@@ -354,6 +354,38 @@ impl Editor {
             ac.selected = ac.selected.saturating_sub(1);
         }
     }
+
+    fn refresh_slash_autocomplete(&mut self) {
+        let at_start = self.text.starts_with('/');
+        if !at_start || self.cursor == 0 {
+            return;
+        }
+
+        let upto_cursor = &self.text[..self.cursor];
+        if !upto_cursor.starts_with('/') {
+            return;
+        }
+
+        let in_first_token = !upto_cursor.contains(' ') && !upto_cursor.contains('\n');
+        if !in_first_token {
+            return;
+        }
+
+        let prefix_start = 1;
+        if self.autocomplete.is_none() {
+            self.autocomplete = Some(AutocompleteState {
+                items: Vec::new(),
+                selected: 0,
+                prefix_start,
+                query: String::new(),
+            });
+        }
+
+        if let Some(ref mut ac) = self.autocomplete {
+            ac.prefix_start = prefix_start;
+        }
+        self.update_autocomplete('/');
+    }
 }
 
 impl Component for Editor {
@@ -566,7 +598,9 @@ impl Component for Editor {
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
-                self.insert_char('\n');
+                if let Some(text) = self.submit() {
+                    return Some(Action::FollowUpMessage(text));
+                }
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Char('j'),
@@ -605,18 +639,21 @@ impl Component for Editor {
                 ..
             } => {
                 self.insert_char(*c);
+                self.refresh_slash_autocomplete();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             } => {
                 self.delete_before();
+                self.refresh_slash_autocomplete();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Delete,
                 ..
             } => {
                 self.delete_after();
+                self.refresh_slash_autocomplete();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Left,

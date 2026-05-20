@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, Clear, List, ListItem},
 };
 use tokio::sync::mpsc;
 
@@ -17,7 +17,9 @@ use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
+use crate::components::settings_selector::{SettingsSelector, SettingsView};
 use crate::components::status::StatusBar;
+use crate::components::tree_selector::{TreeFilter, TreeSelector};
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
 use crate::terminal;
@@ -33,13 +35,21 @@ pub enum TuiAction {
     /// Fork the current session.
     ForkSession,
     /// Login result from the login flow.
-    LoginResult { provider: String, token: String },
+    LoginResult {
+        provider: String,
+        token: String,
+    },
     /// Resume a specific session by ID.
     ResumeSession(String),
     /// Create a new session (dismiss session picker).
     NewSession,
     /// Show the session picker.
     ShowSessions,
+    ShowTree(String),
+    Steer(String),
+    FollowUp(String),
+    SaveSettings(SettingsPayload),
+    ShowSettings,
     /// Start Codex OAuth flow (triggered from login_flow).
     StartCodexOAuth,
 }
@@ -89,6 +99,14 @@ pub enum TuiEvent {
     LoadHistory(Vec<HistoryEntry>),
     /// Refresh available models (e.g. after login).
     UpdateModels(Vec<ModelEntry>),
+    QueueStatus {
+        steer: usize,
+        follow_up: usize,
+    },
+    TreeSessions {
+        sessions: Vec<SessionInfo>,
+        filter: String,
+    },
 }
 
 /// A historical message entry for session resume.
@@ -98,11 +116,20 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SettingsPayload {
+    pub steering_mode: String,
+    pub follow_up_mode: String,
+    pub transport_preference: String,
+    pub show_thinking: bool,
+}
+
 /// Which view is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppMode {
     Chat,
     SessionPicker,
+    TreePicker,
 }
 
 /// The main TUI application.
@@ -112,6 +139,8 @@ pub struct App {
     status: StatusBar,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
+    tree_selector: TreeSelector,
+    settings_selector: SettingsSelector,
     commands: Vec<CommandEntry>,
     skill_commands: Vec<String>,
     keybindings: Vec<Keybinding>,
@@ -128,6 +157,8 @@ pub struct App {
     theme_idx: usize,
     streaming: bool,
     current_tool: Option<String>,
+    steer_queue_count: usize,
+    follow_up_queue_count: usize,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
 }
@@ -153,6 +184,7 @@ impl App {
         model: &str,
         session_id: &str,
         thinking: &str,
+        settings: SettingsPayload,
         models: Vec<ModelEntry>,
         commands: Vec<CommandEntry>,
         working_dir: std::path::PathBuf,
@@ -185,6 +217,16 @@ impl App {
             theme_idx: 0,
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
+            tree_selector: TreeSelector::new(theme.clone()),
+            settings_selector: SettingsSelector::new(
+                theme.clone(),
+                SettingsView {
+                    steering_mode: settings.steering_mode,
+                    follow_up_mode: settings.follow_up_mode,
+                    transport_preference: settings.transport_preference,
+                    show_thinking: settings.show_thinking,
+                },
+            ),
             commands,
             skill_commands,
             keybindings: default_bindings(),
@@ -195,6 +237,8 @@ impl App {
             event_rx,
             streaming: false,
             current_tool: None,
+            steer_queue_count: 0,
+            follow_up_queue_count: 0,
             login_flow: None,
         }
     }
@@ -239,6 +283,14 @@ impl App {
         // Model selector overlay — renders on top of everything.
         self.model_selector.render(area, frame);
         if self.model_selector.visible {
+            return;
+        }
+        self.settings_selector.render(area, frame);
+        if self.settings_selector.visible {
+            return;
+        }
+        self.tree_selector.render(area, frame);
+        if self.tree_selector.visible {
             return;
         }
 
@@ -305,8 +357,10 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black))
             .border_style(Style::default().fg(self.theme.border));
         let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
 
         let visible_count = inner.height as usize;
@@ -323,7 +377,7 @@ impl App {
                 let style = if idx == selected {
                     Style::default().fg(self.theme.accent).bg(Color::DarkGray)
                 } else {
-                    Style::default()
+                    Style::default().bg(Color::Black)
                 };
                 ListItem::new(Line::from(Span::styled(text, style)))
             })
@@ -366,6 +420,47 @@ impl App {
                     }
                     crossterm::event::KeyCode::Char(c) => {
                         self.model_selector.push_query(c);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        if self.settings_selector.handle_event(event) {
+            if !self.settings_selector.visible {
+                let view = self.settings_selector.current_view();
+                let _ = self
+                    .action_tx
+                    .send(TuiAction::SaveSettings(SettingsPayload {
+                        steering_mode: view.steering_mode,
+                        follow_up_mode: view.follow_up_mode,
+                        transport_preference: view.transport_preference,
+                        show_thinking: view.show_thinking,
+                    }));
+            }
+            return;
+        }
+
+        if self.mode == AppMode::TreePicker {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+                        self.tree_selector.select_down()
+                    }
+                    crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+                        self.tree_selector.select_up()
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(s) = self.tree_selector.selected() {
+                            let _ = self.action_tx.send(TuiAction::ResumeSession(s.id.clone()));
+                        }
+                        self.tree_selector.visible = false;
+                        self.mode = AppMode::Chat;
+                    }
+                    crossterm::event::KeyCode::Esc => {
+                        self.tree_selector.visible = false;
+                        self.mode = AppMode::Chat;
                     }
                     _ => {}
                 }
@@ -444,6 +539,11 @@ impl App {
             return;
         }
 
+        if matches!(event, crossterm::event::Event::Mouse(_)) {
+            let _ = self.chat.handle_event(event);
+            return;
+        }
+
         if let Some(action) = self.editor.handle_event(event) {
             self.handle_action(action);
         }
@@ -457,21 +557,40 @@ impl App {
                     self.handle_slash_command(slash);
                     return;
                 }
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::User,
-                    text: text.clone(),
-                    tool_name: None,
-                    is_streaming: false,
-                });
-                self.status.set_agent_state("streaming");
-                self.streaming = true;
-                let _ = self.message_tx.send(text);
+                if self.streaming {
+                    if self.settings_selector.current_view().steering_mode == "follow-up" {
+                        let _ = self.action_tx.send(TuiAction::FollowUp(text.clone()));
+                        self.follow_up_queue_count += 1;
+                    } else {
+                        let _ = self.action_tx.send(TuiAction::Steer(text.clone()));
+                        self.steer_queue_count += 1;
+                    }
+                } else {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::User,
+                        text: text.clone(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    self.status.set_agent_state("streaming");
+                    self.streaming = true;
+                    let _ = self.message_tx.send(text);
+                }
             }
             Action::Quit => {
                 self.running = false;
             }
             Action::ShowModelSelector => {
                 self.model_selector.show();
+            }
+            Action::FollowUpMessage(text) => {
+                if self.settings_selector.current_view().follow_up_mode == "steer" {
+                    let _ = self.action_tx.send(TuiAction::Steer(text));
+                    self.steer_queue_count += 1;
+                } else {
+                    let _ = self.action_tx.send(TuiAction::FollowUp(text));
+                    self.follow_up_queue_count += 1;
+                }
             }
             Action::CycleTheme => {
                 self.cycle_theme();
@@ -520,6 +639,8 @@ impl App {
                     "  /session        Show current session info",
                     "  /fork           Fork the current session",
                     "  /sessions       List recent sessions to resume",
+                    "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
+                    "  /settings       Open settings selector",
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
                     "  /skill:<name>   Invoke a skill",
@@ -588,6 +709,13 @@ impl App {
             }
             "sessions" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessions);
+            }
+            "tree" => {
+                let filter = if arg.is_empty() { "default" } else { arg };
+                let _ = self.action_tx.send(TuiAction::ShowTree(filter.to_string()));
+            }
+            "settings" => {
+                self.settings_selector.show();
             }
             "skills" => {
                 if self.skill_commands.is_empty() {
@@ -817,6 +945,17 @@ impl App {
             }
             TuiEvent::UpdateModels(models) => {
                 self.model_selector.set_models(models);
+            }
+            TuiEvent::QueueStatus { steer, follow_up } => {
+                self.steer_queue_count = steer;
+                self.follow_up_queue_count = follow_up;
+                self.status
+                    .set_tool_progress(&format!("queue steer:{steer} follow-up:{follow_up}"));
+            }
+            TuiEvent::TreeSessions { sessions, filter } => {
+                self.tree_selector
+                    .set_sessions(sessions, TreeFilter::parse(&filter));
+                self.mode = AppMode::TreePicker;
             }
         }
     }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Persistent settings stored across sessions.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThetaSettings {
     /// Last used model ID.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,6 +17,51 @@ pub struct ThetaSettings {
     /// Last used thinking level.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_thinking: Option<String>,
+
+    /// Enter behavior while streaming: "steer" or "follow-up".
+    #[serde(default = "default_steering_mode")]
+    pub steering_mode: String,
+
+    /// Alt+Enter behavior while streaming: "follow-up" or "steer".
+    #[serde(default = "default_follow_up_mode")]
+    pub follow_up_mode: String,
+
+    /// Transport preference hint: "auto", "http", "sse".
+    #[serde(default = "default_transport_preference")]
+    pub transport_preference: String,
+
+    /// Show thinking by default in UI.
+    #[serde(default = "default_show_thinking")]
+    pub show_thinking: bool,
+}
+
+fn default_steering_mode() -> String {
+    "steer".to_string()
+}
+
+fn default_follow_up_mode() -> String {
+    "follow-up".to_string()
+}
+
+fn default_transport_preference() -> String {
+    "auto".to_string()
+}
+
+const fn default_show_thinking() -> bool {
+    true
+}
+
+impl Default for ThetaSettings {
+    fn default() -> Self {
+        Self {
+            last_model: None,
+            last_thinking: None,
+            steering_mode: default_steering_mode(),
+            follow_up_mode: default_follow_up_mode(),
+            transport_preference: default_transport_preference(),
+            show_thinking: default_show_thinking(),
+        }
+    }
 }
 
 /// Load settings from `~/.theta/settings.json`.

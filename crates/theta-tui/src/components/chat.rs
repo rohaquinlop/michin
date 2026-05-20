@@ -1,6 +1,6 @@
 //! Chat message display — scrollable conversation view with markdown styling.
 
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyCode, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -34,6 +34,7 @@ pub struct Chat {
     pub messages: Vec<ChatMessage>,
     scroll_from_bottom: usize,
     theme: Theme,
+    focused: bool,
 }
 
 impl Chat {
@@ -42,6 +43,7 @@ impl Chat {
             messages: Vec::new(),
             scroll_from_bottom: 0,
             theme,
+            focused: false,
         }
     }
 
@@ -161,10 +163,18 @@ impl Component for Chat {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
+            .border_style(Style::default().fg(if self.focused {
+                self.theme.accent
+            } else {
+                self.theme.border
+            }))
             .padding(Padding::horizontal(1))
             .title(title)
-            .title_style(Style::default().fg(self.theme.accent));
+            .title_style(Style::default().fg(if self.focused {
+                self.theme.accent
+            } else {
+                self.theme.dim
+            }));
 
         let mut lines: Vec<Line> = Vec::new();
         for (idx, msg) in self.messages.iter().enumerate() {
@@ -187,15 +197,44 @@ impl Component for Chat {
         frame.render_widget(para, area);
     }
 
-    fn handle_event(&mut self, _event: &Event) -> Option<Action> {
+    fn handle_event(&mut self, event: &Event) -> Option<Action> {
+        match event {
+            Event::Key(key) if self.focused => match key.code {
+                KeyCode::Up => self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(1),
+                KeyCode::Down => {
+                    self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(1)
+                }
+                KeyCode::PageUp => {
+                    self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(10)
+                }
+                KeyCode::PageDown => {
+                    self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(10)
+                }
+                KeyCode::Home => self.scroll_from_bottom = usize::MAX,
+                KeyCode::End => self.scroll_from_bottom = 0,
+                _ => {}
+            },
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(3)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(3)
+                }
+                _ => {}
+            },
+            _ => {}
+        }
         None
     }
 
     fn is_focused(&self) -> bool {
-        true
+        self.focused
     }
 
-    fn focus(&mut self, _focused: bool) {} // No-op: chat is always scrollable.
+    fn focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
 }
 
 fn truncate_output(text: &str, max_len: usize) -> String {

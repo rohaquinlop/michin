@@ -25,6 +25,10 @@ cargo run -- rpc
 - `@` opens Codex-style file autocomplete: gitignore-aware recursive paths, fuzzy-ranked.
 - Sending `@path/to/file` appends that file's contents to the prompt context.
 - `/sessions` opens the session picker.
+- `/tree [default|no-tools|user-only|labeled-only|all]` opens branch/session tree picker.
+- `/settings` opens runtime settings selector and persists choices.
+- `Enter` sends normally when idle; while streaming it queues a steering message.
+- `Alt+Enter` queues a follow-up message.
 - `Ctrl+P` opens model selector.
 - `Ctrl+T` cycles themes.
 - `Tab` switches focus between input and chat.

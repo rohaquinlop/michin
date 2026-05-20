@@ -331,6 +331,19 @@ impl Agent {
         queue.push((msg, now_ms()));
     }
 
+    /// Return pending queue lengths: (steering, follow-up).
+    pub fn queue_lengths(&self) -> (usize, usize) {
+        let steering = self
+            .steering_queue
+            .lock()
+            .expect("steering_queue lock poisoned");
+        let follow_up = self
+            .follow_up_queue
+            .lock()
+            .expect("follow_up_queue lock poisoned");
+        (steering.len(), follow_up.len())
+    }
+
     // ── Events ────────────────────────────────────────────────
 
     /// Subscribe to agent events. Returns a receiver that will get all

@@ -276,6 +276,14 @@ pub async fn run_tui(
             description: "List recent sessions to resume".into(),
         },
         CommandEntry {
+            name: "tree".into(),
+            description: "Open session tree selector".into(),
+        },
+        CommandEntry {
+            name: "settings".into(),
+            description: "Open settings selector".into(),
+        },
+        CommandEntry {
             name: "login".into(),
             description: "Log in to a provider".into(),
         },
@@ -297,11 +305,18 @@ pub async fn run_tui(
     // ------------------------------------------------------------------
     let msg_tx_for_prompt = message_tx.clone();
 
+    let persisted = crate::settings::load_settings().await;
     let mut app = App::new(
         theme.clone(),
         &model.id,
         "", // session created lazily on first message
         thinking,
+        theta_tui::app::SettingsPayload {
+            steering_mode: persisted.steering_mode,
+            follow_up_mode: persisted.follow_up_mode,
+            transport_preference: persisted.transport_preference,
+            show_thinking: persisted.show_thinking,
+        },
         model_entries,
         commands,
         working_dir.to_path_buf(),
@@ -687,6 +702,54 @@ async fn handle_tui_action(
                 let _ = event_tx.send(TuiEvent::SessionPicker(infos));
             }
         }
+        TuiAction::ShowTree(filter) => {
+            let session_mgr = SessionManager::new(working_dir);
+            if let Ok(sessions) = session_mgr.list().await {
+                let mut infos: Vec<SessionInfo> = Vec::new();
+                for m in sessions {
+                    let pass = match filter.as_str() {
+                        "default" => m.message_count > 0,
+                        "labeled-only" => m.title.as_deref().is_some_and(|t| !t.trim().is_empty()),
+                        "all" => true,
+                        "no-tools" | "user-only" => {
+                            if let Ok(s) = session_mgr.open_by_id(&m.id).await {
+                                let has_tool = s
+                                    .messages
+                                    .iter()
+                                    .any(|msg| matches!(msg, theta_ai::Message::ToolResult { .. }));
+                                let has_assistant = s
+                                    .messages
+                                    .iter()
+                                    .any(|msg| matches!(msg, theta_ai::Message::Assistant { .. }));
+                                if filter == "no-tools" {
+                                    !has_tool
+                                } else {
+                                    !has_assistant && !has_tool
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        _ => true,
+                    };
+                    if pass {
+                        infos.push(SessionInfo {
+                            id: m.id,
+                            title: m.title.unwrap_or_else(|| "(untitled)".into()),
+                            model: m.model,
+                            branch: m.branch,
+                            token_count: m.token_count,
+                            created_at: m.created_at,
+                            message_count: m.message_count,
+                        });
+                    }
+                }
+                let _ = event_tx.send(TuiEvent::TreeSessions {
+                    sessions: infos,
+                    filter,
+                });
+            }
+        }
         TuiAction::ResumeSession(id) => {
             let Some(agent) = agent_cell.read().await.clone() else {
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
@@ -743,6 +806,32 @@ async fn handle_tui_action(
                 });
             }
         }
+        TuiAction::Steer(text) => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                return;
+            };
+            agent.steer(vec![theta_ai::ContentBlock::Text { text }]);
+            let (steer, follow_up) = agent.queue_lengths();
+            let _ = event_tx.send(TuiEvent::QueueStatus { steer, follow_up });
+        }
+        TuiAction::FollowUp(text) => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                return;
+            };
+            agent.follow_up(vec![theta_ai::ContentBlock::Text { text }]);
+            let (steer, follow_up) = agent.queue_lengths();
+            let _ = event_tx.send(TuiEvent::QueueStatus { steer, follow_up });
+        }
+        TuiAction::SaveSettings(payload) => {
+            let mut s = crate::settings::load_settings().await;
+            s.steering_mode = payload.steering_mode;
+            s.follow_up_mode = payload.follow_up_mode;
+            s.transport_preference = payload.transport_preference;
+            s.show_thinking = payload.show_thinking;
+            let _ = crate::settings::save_settings(&s).await;
+            let _ = event_tx.send(TuiEvent::Info("Settings saved".into()));
+        }
+        TuiAction::ShowSettings => {}
     }
 }
 

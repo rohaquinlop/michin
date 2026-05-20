@@ -9,7 +9,9 @@ pub mod fuzzy;
 pub mod login_flow;
 pub mod model_selector;
 pub mod session_picker;
+pub mod settings_selector;
 pub mod status;
+pub mod tree_selector;
 
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use model_selector::{ModelEntry, ModelSelector};
@@ -28,6 +30,8 @@ pub struct CommandEntry {
 #[derive(Debug, Clone)]
 pub enum Action {
     SendMessage(String),
+    SteerMessage(String),
+    FollowUpMessage(String),
     Quit,
     SwitchModel(String),
     SetThinking(String),
@@ -37,6 +41,8 @@ pub enum Action {
     ShowHelp,
     ShowModelSelector,
     CycleTheme,
+    ShowTree,
+    ShowSettings,
     None,
 }
 
