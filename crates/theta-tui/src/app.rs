@@ -111,7 +111,6 @@ pub struct App {
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
     keybindings: Vec<Keybinding>,
-    focus_idx: usize,
     running: bool,
     mode: AppMode,
     /// Send user messages to the agent.
@@ -179,7 +178,6 @@ impl App {
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
             keybindings: default_bindings(),
-            focus_idx: 0,
             running: true,
             mode: AppMode::Chat,
             message_tx,
@@ -436,22 +434,7 @@ impl App {
             return;
         }
 
-        if let crossterm::event::Event::Key(key) = event
-            && key.code == crossterm::event::KeyCode::Tab
-        {
-            self.focus_idx = (self.focus_idx + 1) % 2;
-            self.editor.focus(self.focus_idx == 0);
-            self.chat.focus(self.focus_idx == 1);
-            return;
-        }
-
-        let action = if self.focus_idx == 0 {
-            self.editor.handle_event(event)
-        } else {
-            self.chat.handle_event(event)
-        };
-
-        if let Some(action) = action {
+        if let Some(action) = self.editor.handle_event(event) {
             self.handle_action(action);
         }
     }
@@ -527,6 +510,7 @@ impl App {
                     "  /session       Show current session info",
                     "  /fork          Fork the current session",
                     "  /sessions      List recent sessions to resume",
+                    "  /exit          Exit Theta",
                     "  /help          Show this help",
                 ]
                 .join("\n");
@@ -605,6 +589,9 @@ impl App {
                     tool_name: None,
                     is_streaming: false,
                 });
+            }
+            "exit" => {
+                self.running = false;
             }
             _ => {
                 self.chat.add_message(ChatMessage {

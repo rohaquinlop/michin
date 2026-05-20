@@ -33,7 +33,6 @@ pub enum ChatRole {
 pub struct Chat {
     pub messages: Vec<ChatMessage>,
     scroll_from_bottom: usize,
-    focused: bool,
     theme: Theme,
 }
 
@@ -42,7 +41,6 @@ impl Chat {
         Self {
             messages: Vec::new(),
             scroll_from_bottom: 0,
-            focused: false,
             theme,
         }
     }
@@ -174,11 +172,7 @@ impl Chat {
 
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let title = if self.focused {
-            " Chat (j/k, PgUp/PgDn) "
-        } else {
-            " Chat "
-        };
+        let title = " Chat ";
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -208,41 +202,15 @@ impl Component for Chat {
         frame.render_widget(para, area);
     }
 
-    fn handle_event(&mut self, event: &Event) -> Option<Action> {
-        if !self.focused {
-            return None;
-        }
-        let Event::Key(key) = event else {
-            return None;
-        };
-
-        match key.code {
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down
-                if self.scroll_from_bottom > 0 =>
-            {
-                self.scroll_from_bottom -= 1;
-            }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(1);
-            }
-            crossterm::event::KeyCode::PageDown => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(10);
-            }
-            crossterm::event::KeyCode::PageUp => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(10);
-            }
-            _ => {}
-        }
+    fn handle_event(&mut self, _event: &Event) -> Option<Action> {
         None
     }
 
     fn is_focused(&self) -> bool {
-        self.focused
+        true
     }
 
-    fn focus(&mut self, focused: bool) {
-        self.focused = focused;
-    }
+    fn focus(&mut self, _focused: bool) {} // No-op: chat is always scrollable.
 }
 
 fn truncate_output(text: &str, max_len: usize) -> String {

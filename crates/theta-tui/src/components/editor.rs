@@ -359,11 +359,7 @@ impl Editor {
 
 impl Component for Editor {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
-        let title = if self.focused {
-            " Input (Enter to send, Alt+Enter for newline) "
-        } else {
-            " Input "
-        };
+        let title = " Input ";
 
         let cursor_style = if self.focused {
             Style::default().fg(self.theme.accent).bg(Color::DarkGray)
@@ -687,7 +683,8 @@ impl Component for Editor {
             crossterm::event::KeyEvent {
                 code: KeyCode::Tab, ..
             } => {
-                self.insert_char('\t');
+                self.text.insert_str(self.cursor, "  ");
+                self.cursor += 2;
             }
             _ => {}
         }
