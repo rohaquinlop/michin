@@ -116,13 +116,34 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
 }
 
 /// Resolve a path relative to the tool context's working directory.
+/// Sanitizes against path traversal attacks (.. components).
 fn resolve_path(ctx: &ToolContext, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
+    let resolved = if p.is_absolute() {
+        p.clone()
     } else {
-        ctx.working_dir.join(p)
+        ctx.working_dir.join(&p)
+    };
+    // Canonicalize to resolve .. and symlinks, then verify it stays
+    // within the working directory. If canonicalization fails (path
+    // doesn't exist yet), fall back to component-level check.
+    if let Ok(canonical) = resolved.canonicalize() {
+        if canonical.starts_with(&ctx.working_dir) {
+            return canonical;
+        }
+    } else {
+        // Path doesn't exist yet — check components manually.
+        let normalized = resolved.components().collect::<Vec<_>>();
+        let working_components = ctx.working_dir.components().collect::<Vec<_>>();
+        if normalized.starts_with(&working_components) {
+            return resolved;
+        }
     }
+    // Path escapes working directory — clamp it.
+    ctx.working_dir.join(
+        p.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("denied")),
+    )
 }
 
 /// Create all seven built-in tools.

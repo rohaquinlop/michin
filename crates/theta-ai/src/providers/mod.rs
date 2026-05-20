@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::error::ThetaError;
 use super::model::Model;
@@ -14,9 +13,6 @@ pub use openai_compat::OpenAiCompatProvider;
 
 mod openai_codex;
 pub use openai_codex::OpenAiCodexProvider;
-
-/// Maximum retry attempts for transient failures.
-const MAX_RETRIES: u32 = 3;
 
 /// A provider factory function — used for lazy provider creation.
 pub type ProviderFactory = Arc<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
@@ -62,6 +58,8 @@ impl ProviderRegistry {
     }
 
     /// Stream using the provider matching the model's API.
+    /// No retry at this level — the agent loop handles retry with
+    /// configurable backoff.
     pub async fn stream<'a>(
         &'a self,
         model: &Model,
@@ -88,33 +86,7 @@ impl ProviderRegistry {
                     })?;
         }
 
-        // Retry loop for transient errors with exponential backoff.
-        let base_delay_ms = 1000u64;
-        let mut last_error = None;
-        for attempt in 0..MAX_RETRIES {
-            match provider.stream(model, context, options).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => {
-                    if !is_retryable(&e) || attempt == MAX_RETRIES - 1 {
-                        return Err(e);
-                    }
-                    // Respect server-provided retry-after header, fall back
-                    // to exponential backoff.
-                    let delay_ms = retry_delay_ms(&e, base_delay_ms, attempt);
-                    tracing::warn!(
-                        "Retry attempt {}/{} for model {}: {} (delay={delay_ms}ms)",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        model.id,
-                        e
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap())
+        provider.stream(model, context, options).await
     }
 
     /// Get a reference to a registered provider.
@@ -127,36 +99,6 @@ impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Determine if an error is retryable (rate limits, network hiccups).
-fn is_retryable(error: &ThetaError) -> bool {
-    match error {
-        ThetaError::Http(e) => {
-            e.status()
-                .map(|s| s.as_u16() == 429 || s.as_u16() >= 500)
-                .unwrap_or(true) // network errors are retryable
-        }
-        ThetaError::ApiError { status, .. } => {
-            *status == 429 || *status >= 500
-        }
-        ThetaError::StreamEndedEarly => true,
-        _ => false,
-    }
-}
-
-/// Compute the retry delay. Uses server-provided `retry-after-ms` if
-/// available, otherwise exponential backoff.
-fn retry_delay_ms(error: &ThetaError, base_ms: u64, attempt: u32) -> u64 {
-    if let ThetaError::ApiError {
-        retry_after_ms: Some(ms),
-        ..
-    } = error
-    {
-        return *ms;
-    }
-    // Exponential backoff: 1s, 2s, 4s...
-    base_ms * 2u64.pow(attempt)
 }
 
 /// Build a default registry with the OpenAI-compatible provider
@@ -194,34 +136,5 @@ mod tests {
     fn test_registry_creation() {
         let reg = ProviderRegistry::new();
         assert!(reg.get(&Api::OpenAiCompletions).is_none());
-    }
-
-    #[test]
-    fn test_is_retryable() {
-        // 429 (rate limit) is retryable
-        let err = ThetaError::ApiError {
-            status: 429,
-            message: "ratelimit".into(),
-            retry_after_ms: None,
-        };
-        assert!(is_retryable(&err));
-
-        // 500 is retryable
-        let err = ThetaError::ApiError {
-            status: 500,
-            message: "internal error".into(),
-            retry_after_ms: None,
-        };
-        assert!(is_retryable(&err));
-
-        // 400 is NOT retryable
-        let err = ThetaError::ApiError {
-            status: 400,
-            message: "bad request".into(),
-            retry_after_ms: None,
-        };
-        assert!(!is_retryable(&err));
-
-        assert!(is_retryable(&ThetaError::StreamEndedEarly));
     }
 }

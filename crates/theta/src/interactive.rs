@@ -74,9 +74,7 @@ pub async fn run_tui(
             }
             if let Some(key) = auth_config.get_api_key(prov_str).await
                 && let Some(m) = catalog.list().into_iter().find(|m| {
-                    m.provider == *prov
-                        && (m.id == model_id
-                            || m.id.starts_with(model_id))
+                    m.provider == *prov && (m.id == model_id || m.id.starts_with(model_id))
                 })
             {
                 found = Some((m.clone(), m.id.clone(), key));
@@ -366,7 +364,11 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::ThinkingDelta { thinking }) => {
                     let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
                 }
-                Ok(AgentEvent::ToolCallStart { id, name }) => {
+                Ok(AgentEvent::ToolCallStart { .. }) => {}
+                Ok(AgentEvent::ToolExecutionStart {
+                    tool_call_id: id,
+                    tool_name: name,
+                }) => {
                     let _ = event_tx.send(TuiEvent::ToolStart { name, id });
                 }
                 Ok(AgentEvent::ToolExecutionProgress {
@@ -374,10 +376,10 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     output: _,
                 }) => {}
                 Ok(AgentEvent::ToolExecutionEnd { result }) => {
-                    let output = format_tool_result(&result);
                     let _ = event_tx.send(TuiEvent::ToolEnd {
+                        id: result.tool_call_id,
                         name: result.tool_name,
-                        output,
+                        is_error: result.is_error,
                     });
                 }
                 Ok(AgentEvent::TurnStart { .. }) => {
@@ -437,8 +439,9 @@ async fn handle_tui_action(
     match action {
         TuiAction::StartCodexOAuth => {
             tracing::info!("Starting Codex OAuth login flow");
-            let _ =
-                event_tx.send(TuiEvent::Info("Sign in to ChatGPT in your browser...".into()));
+            let _ = event_tx.send(TuiEvent::Info(
+                "Sign in to ChatGPT in your browser...".into(),
+            ));
             match crate::oauth::codex::login_codex().await {
                 Ok(creds) => {
                     // Save OAuth credentials.
@@ -462,8 +465,7 @@ async fn handle_tui_action(
                                     .list()
                                     .into_iter()
                                     .find(|cm| {
-                                        cm.id == model_id
-                                            && cm.provider == Provider::OpenAiCodex
+                                        cm.id == model_id && cm.provider == Provider::OpenAiCodex
                                     })
                                     .cloned()
                                     .unwrap_or_else(|| model.clone());
@@ -734,12 +736,8 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
                 .iter()
                 .filter_map(|b| match b {
                     theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                    theta_ai::ContentBlock::Thinking { thinking, .. } => {
-                        Some(thinking.as_str())
-                    }
-                    theta_ai::ContentBlock::ToolCall { name, .. } => {
-                        Some(name.as_str())
-                    }
+                    theta_ai::ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                    theta_ai::ContentBlock::ToolCall { name, .. } => Some(name.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -753,7 +751,9 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
                 })
             }
         }
-        theta_ai::Message::ToolResult { tool_name, content, .. } => {
+        theta_ai::Message::ToolResult {
+            tool_name, content, ..
+        } => {
             let text = content
                 .iter()
                 .filter_map(|b| match b {
@@ -768,29 +768,5 @@ fn message_to_history(msg: &theta_ai::Message) -> Option<HistoryEntry> {
             })
         }
         _ => None,
-    }
-}
-
-fn format_tool_result(result: &theta_agent_core::ToolResult) -> String {
-    // Format content blocks into a readable summary.
-    let summary: String = result
-        .content
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.clone(),
-            ContentBlock::Image { .. } => "[image]".into(),
-            ContentBlock::ToolCall { name, .. } => format!("[tool_call: {name}]"),
-            ContentBlock::Thinking { thinking, .. } => thinking.clone(),
-            ContentBlock::ToolResult { tool_name, .. } => {
-                format!("[tool_result: {tool_name}]",)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if result.is_error {
-        format!("Error: {summary}")
-    } else {
-        summary
     }
 }

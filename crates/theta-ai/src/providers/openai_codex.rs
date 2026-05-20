@@ -57,11 +57,14 @@ impl Provider for OpenAiCodexProvider {
         context: &Context,
         options: &StreamOptions,
     ) -> Result<EventStream<'a>, ThetaError> {
-        let token = self.token.read().await.clone().ok_or_else(|| {
-            ThetaError::MissingApiKey {
+        let token = self
+            .token
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ThetaError::MissingApiKey {
                 provider: crate::types::Provider::OpenAiCodex,
-            }
-        })?;
+            })?;
 
         let http_url = codex_url(&model.base_url);
         let ws_url = codex_ws_url(&model.base_url);
@@ -208,18 +211,18 @@ async fn ws_stream(
 
     let req = req_builder.body(()).unwrap();
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(req)
-        .await
-        .map_err(|e| ThetaError::ApiError {
-            status: 500,
-            message: format!("WebSocket connect failed: {e}"),
-            retry_after_ms: None,
-        })?;
+    let (ws_stream, _) =
+        tokio_tungstenite::connect_async(req)
+            .await
+            .map_err(|e| ThetaError::ApiError {
+                status: 500,
+                message: format!("WebSocket connect failed: {e}"),
+                retry_after_ms: None,
+            })?;
     let (mut write, read) = ws_stream.split();
 
     // Send the JSON body as a text frame.
-    let payload = serde_json::to_string(body)
-        .map_err(ThetaError::Json)?;
+    let payload = serde_json::to_string(body).map_err(ThetaError::Json)?;
     write
         .send(Message::Text(payload.into()))
         .await
@@ -237,12 +240,10 @@ async fn ws_stream(
                     let text = text.to_string();
                     parse_codex_json(&text)
                 }
-                Ok(Message::Close(_)) => {
-                    Some(AssistantMessageEvent::Done {
-                        stop_reason: StopReason::Stop,
-                        usage: None,
-                    })
-                }
+                Ok(Message::Close(_)) => Some(AssistantMessageEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                }),
                 Err(e) => Some(AssistantMessageEvent::Error {
                     code: "ws".into(),
                     message: e.to_string(),
@@ -268,9 +269,9 @@ async fn ws_stream(
 /// Convert a byte stream into buffered, newline-delimited events.
 fn byte_stream_to_events(
     byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
-        + Send
-        + Unpin
-        + 'static,
+    + Send
+    + Unpin
+    + 'static,
 ) -> EventStream<'static> {
     futures::stream::unfold(
         (byte_stream, String::new(), false),
@@ -380,7 +381,11 @@ fn resolve_reasoning_effort(model: &Model, level: ThinkingLevel) -> Option<Strin
         return mapped.clone();
     }
     let fallback = map_default_effort(level);
-    if fallback.is_empty() { None } else { Some(fallback) }
+    if fallback.is_empty() {
+        None
+    } else {
+        Some(fallback)
+    }
 }
 
 fn map_default_effort(level: ThinkingLevel) -> String {
@@ -431,7 +436,11 @@ fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                                 "status": "completed",
                             }));
                         }
-                        ContentBlock::ToolCall { id, name, arguments } => {
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
                             let (call_id, item_id) = split_tool_call_id(id);
                             let args_str =
                                 serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
@@ -449,7 +458,9 @@ fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                 }
             }
             crate::types::Message::ToolResult {
-                tool_call_id, content, ..
+                tool_call_id,
+                content,
+                ..
             } => {
                 let text = blocks_to_text(content);
                 let call_id = tool_call_id.split('|').next().unwrap_or(tool_call_id);
@@ -479,7 +490,11 @@ fn blocks_to_text(blocks: &[ContentBlock]) -> String {
 
 fn split_tool_call_id(id: &str) -> (&str, &str) {
     let parts: Vec<&str> = id.splitn(2, '|').collect();
-    if parts.len() == 2 { (parts[0], parts[1]) } else { (id, "") }
+    if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        (id, "")
+    }
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<Value> {
@@ -545,13 +560,16 @@ fn parse_codex_event(data: &Value) -> Option<AssistantMessageEvent> {
 
         "response.output_text.delta" => {
             let delta = data["delta"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::TextDelta { text: delta.to_string() })
+            Some(AssistantMessageEvent::TextDelta {
+                text: delta.to_string(),
+            })
         }
 
-        "response.reasoning_text.delta"
-        | "response.reasoning_summary_text.delta" => {
+        "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
             let delta = data["delta"].as_str().unwrap_or("");
-            Some(AssistantMessageEvent::ThinkingDelta { thinking: delta.to_string() })
+            Some(AssistantMessageEvent::ThinkingDelta {
+                thinking: delta.to_string(),
+            })
         }
 
         "response.function_call_arguments.delta" => {
@@ -640,20 +658,30 @@ mod tests {
 
     #[test]
     fn test_codex_url_resolution() {
-        assert_eq!(codex_url("https://chatgpt.com/backend-api"),
-            "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(codex_url("https://chatgpt.com/backend-api/"),
-            "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(codex_url("https://chatgpt.com/backend-api/codex"),
-            "https://chatgpt.com/backend-api/codex/responses");
-        assert_eq!(codex_url("https://chatgpt.com/backend-api/codex/responses"),
-            "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(
+            codex_url("https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            codex_url("https://chatgpt.com/backend-api/"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            codex_url("https://chatgpt.com/backend-api/codex"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            codex_url("https://chatgpt.com/backend-api/codex/responses"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
     }
 
     #[test]
     fn test_codex_ws_url() {
-        assert_eq!(codex_ws_url("https://chatgpt.com/backend-api"),
-            "wss://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(
+            codex_ws_url("https://chatgpt.com/backend-api"),
+            "wss://chatgpt.com/backend-api/codex/responses"
+        );
     }
 
     #[test]

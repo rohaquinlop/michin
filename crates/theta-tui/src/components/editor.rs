@@ -10,8 +10,8 @@ use ratatui::{
 };
 use std::path::PathBuf;
 
-use crate::components::{Action, Component};
 use crate::components::fuzzy::fuzzy_filter;
+use crate::components::{Action, Component};
 use crate::theme::Theme;
 
 /// State for inline autocomplete (file paths or slash commands).
@@ -307,14 +307,16 @@ impl Editor {
 
     /// Return autocomplete items for external rendering.
     pub fn autocomplete_items(&self) -> Vec<String> {
-        self.autocomplete.as_ref()
+        self.autocomplete
+            .as_ref()
             .map(|ac| ac.items.clone())
             .unwrap_or_default()
     }
 
     /// Selected index in autocomplete items.
     pub fn autocomplete_selected(&self) -> usize {
-        self.autocomplete.as_ref()
+        self.autocomplete
+            .as_ref()
             .map(|ac| ac.selected)
             .unwrap_or(0)
     }
@@ -402,33 +404,27 @@ impl Component for Editor {
                 let spans: Vec<Span> = line
                     .iter()
                     .map(|&char_idx| {
-                        let c = self.text[char_idx..]
-                            .chars()
-                            .next()
-                            .unwrap_or(' ');
-                        let at_cursor =
-                            self.focused && char_idx == self.cursor;
+                        let c = self.text[char_idx..].chars().next().unwrap_or(' ');
+                        let at_cursor = self.focused && char_idx == self.cursor;
                         Span::styled(
                             c.to_string(),
-                            if at_cursor { cursor_style } else { Style::default() },
+                            if at_cursor {
+                                cursor_style
+                            } else {
+                                Style::default()
+                            },
                         )
                     })
                     .collect();
                 let mut spans = spans;
-                if self.focused
-                    && self.cursor >= self.text.len()
-                    && abs_line == cursor_line
-                {
+                if self.focused && self.cursor >= self.text.len() && abs_line == cursor_line {
                     spans.push(Span::styled(" ", cursor_style));
                 }
                 Line::from(spans)
             })
             .collect();
 
-        frame.render_widget(
-            Paragraph::new(Text::from(visible_lines)).block(block),
-            area,
-        );
+        frame.render_widget(Paragraph::new(Text::from(visible_lines)).block(block), area);
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -442,41 +438,86 @@ impl Component for Editor {
         // If autocomplete is active, handle its keys first.
         if self.autocomplete.is_some() {
             match key {
-                crossterm::event::KeyEvent { code: KeyCode::Tab, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Tab, ..
+                } => {
                     let trigger = if self.text.as_bytes().get(
-                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
-                    ) == Some(&b'@') { '@' } else { '/' };
+                        self.autocomplete
+                            .as_ref()
+                            .unwrap()
+                            .prefix_start
+                            .wrapping_sub(1),
+                    ) == Some(&b'@')
+                    {
+                        '@'
+                    } else {
+                        '/'
+                    };
                     self.accept_autocomplete(trigger);
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Esc, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Esc, ..
+                } => {
                     self.dismiss_autocomplete();
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Up, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Up, ..
+                } => {
                     self.select_prev();
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Down, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                } => {
                     self.select_next();
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Enter, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                } => {
                     let trigger = if self.text.as_bytes().get(
-                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
-                    ) == Some(&b'@') { '@' } else { '/' };
+                        self.autocomplete
+                            .as_ref()
+                            .unwrap()
+                            .prefix_start
+                            .wrapping_sub(1),
+                    ) == Some(&b'@')
+                    {
+                        '@'
+                    } else {
+                        '/'
+                    };
                     self.accept_autocomplete(trigger);
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Char(c), .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Char(c),
+                    ..
+                } => {
                     self.insert_char(*c);
                     let trigger = if self.text.as_bytes().get(
-                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
-                    ) == Some(&b'@') { '@' } else { '/' };
+                        self.autocomplete
+                            .as_ref()
+                            .unwrap()
+                            .prefix_start
+                            .wrapping_sub(1),
+                    ) == Some(&b'@')
+                    {
+                        '@'
+                    } else {
+                        '/'
+                    };
                     self.update_autocomplete(trigger);
                     return None;
                 }
-                crossterm::event::KeyEvent { code: KeyCode::Backspace, .. } => {
+                crossterm::event::KeyEvent {
+                    code: KeyCode::Backspace,
+                    ..
+                } => {
                     if let Some(ref ac) = self.autocomplete
                         && self.cursor <= ac.prefix_start
                     {
@@ -486,8 +527,17 @@ impl Component for Editor {
                     }
                     self.delete_before();
                     let trigger = if self.text.as_bytes().get(
-                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
-                    ) == Some(&b'@') { '@' } else { '/' };
+                        self.autocomplete
+                            .as_ref()
+                            .unwrap()
+                            .prefix_start
+                            .wrapping_sub(1),
+                    ) == Some(&b'@')
+                    {
+                        '@'
+                    } else {
+                        '/'
+                    };
                     self.update_autocomplete(trigger);
                     return None;
                 }
@@ -651,9 +701,13 @@ impl Component for Editor {
 fn fuzzy_file_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
     // If query has a path separator, resolve the subdirectory.
     let (search_dir, name_filter) = if let Some(pos) = query.rfind('/') {
-        let dir_part = &query[..=pos];
+        let dir_part = &query[..pos];
         let name_part = &query[pos + 1..];
-        let resolved = base_dir.join(dir_part);
+        let resolved = if dir_part.is_empty() {
+            base_dir.to_path_buf()
+        } else {
+            base_dir.join(dir_part)
+        };
         (resolved, name_part.to_string())
     } else {
         (base_dir.to_path_buf(), query.to_string())

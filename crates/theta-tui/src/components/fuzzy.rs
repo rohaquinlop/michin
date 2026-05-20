@@ -44,9 +44,9 @@ fn match_query(query: &str, text: &str) -> FuzzyMatch {
         let qc = query.as_bytes()[query_idx] as char;
         if tc.eq_ignore_ascii_case(&qc) {
             let is_word_boundary = i == 0
-                || text_bytes.get(i.wrapping_sub(1)).is_none_or(|&b| {
-                    matches!(b as char, ' ' | '-' | '_' | '.' | '/' | ':')
-                });
+                || text_bytes
+                    .get(i.wrapping_sub(1))
+                    .is_none_or(|&b| matches!(b as char, ' ' | '-' | '_' | '.' | '/' | ':'));
 
             if last_match == i as isize - 1 {
                 consecutive += 1;
@@ -97,7 +97,10 @@ pub fn fuzzy_filter<'a, T>(
         return items.iter().collect();
     }
 
-    let tokens: Vec<&str> = trimmed.split_whitespace().filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = trimmed
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .collect();
     if tokens.is_empty() {
         return items.iter().collect();
     }

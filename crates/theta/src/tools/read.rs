@@ -74,7 +74,7 @@ impl AgentTool for ReadTool {
                 tool_name: "read".into(),
                 message: "missing required 'path' parameter".into(),
             })?;
-        let offset = args["offset"].as_u64().unwrap_or(0);
+        let offset = args["offset"].as_u64().unwrap_or(1);
         let limit = args["limit"].as_u64();
 
         let file_path = resolve_path(&self.ctx, path);
@@ -131,7 +131,8 @@ impl AgentTool for ReadTool {
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 
-        let start = offset as usize;
+        // Offset is 1-indexed; convert to 0-indexed.
+        let start = if offset > 0 { (offset - 1) as usize } else { 0 };
         let end = limit.map_or(total_lines, |l| {
             std::cmp::min(start + l as usize, total_lines)
         });

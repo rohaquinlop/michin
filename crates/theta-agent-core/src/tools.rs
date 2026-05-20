@@ -14,8 +14,8 @@ use crate::types::{AgentTool, ToolCall, ToolExecutionMode, ToolResult, ToolUpdat
 /// 1. All parallel tools run concurrently.
 /// 2. Sequential tools run one at a time after parallel tools finish.
 ///
-/// Tool results are added to state.messages as ToolResult messages.
-/// Events are emitted via the provided sender.
+/// Tool errors are converted to error ToolResult messages, never
+/// propagated as Err — a single tool failure should not abort the turn.
 pub async fn execute_tool_calls(
     state: &mut AgentState,
     tool_calls: &[ToolCall],
@@ -47,33 +47,33 @@ pub async fn execute_tool_calls(
                 let event_tx = event_tx.clone();
                 let abort = abort_token.clone();
                 let tc = (*tc).clone();
-                let tool_name = tc.name.clone();
-                let tool_call_id = tc.id.clone();
-                let handle = tokio::spawn(
+                tokio::spawn(
                     async move { execute_one(&state_snapshot, &tc, abort, &event_tx).await },
-                );
-                (handle, tool_call_id, tool_name)
+                )
             })
             .collect();
 
-        for (handle, tool_call_id, tool_name) in handles {
-            match handle.await {
-                Ok(Ok(result)) => {
-                    let msg = result_to_message(&result);
-                    state.add_tool_result(msg);
-                }
+        for (handle, tc) in handles.into_iter().zip(parallel.iter()) {
+            let result = match handle.await {
+                Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
                     let _ = event_tx.send(AgentEvent::Error {
                         message: e.to_string(),
                     });
-                    return Err(e);
+                    ToolResult {
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: vec![theta_ai::ContentBlock::text(format!("Error: {e}"))],
+                        details: None,
+                        is_error: true,
+                    }
                 }
-                Err(e) => {
-                    let msg = format!("tool task panicked: {e}");
+                Err(join_err) => {
+                    let msg = format!("tool task panicked: {join_err}");
                     let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
-                        result: crate::types::ToolResult {
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: tool_name.clone(),
+                        result: ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
                             content: vec![theta_ai::ContentBlock::text(msg.clone())],
                             details: None,
                             is_error: true,
@@ -82,26 +82,39 @@ pub async fn execute_tool_calls(
                     let _ = event_tx.send(AgentEvent::Error {
                         message: msg.clone(),
                     });
-                    return Err(AgentError::Other(msg));
+                    ToolResult {
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: vec![theta_ai::ContentBlock::text(msg)],
+                        details: None,
+                        is_error: true,
+                    }
                 }
-            }
+            };
+            let msg = result_to_message(&result);
+            state.add_tool_result(msg);
         }
     }
 
     // Execute sequential tools one at a time.
     for tc in &sequential {
-        match execute_one(&state.tools, tc, abort_token.clone(), event_tx).await {
-            Ok(result) => {
-                let msg = result_to_message(&result);
-                state.add_tool_result(msg);
-            }
+        let result = match execute_one(&state.tools, tc, abort_token.clone(), event_tx).await {
+            Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(AgentEvent::Error {
                     message: e.to_string(),
                 });
-                return Err(e);
+                ToolResult {
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    content: vec![theta_ai::ContentBlock::text(format!("Error: {e}"))],
+                    details: None,
+                    is_error: true,
+                }
             }
-        }
+        };
+        let msg = result_to_message(&result);
+        state.add_tool_result(msg);
     }
 
     Ok(())
@@ -200,7 +213,7 @@ fn result_to_message(result: &ToolResult) -> theta_ai::Message {
         is_error: result.is_error,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64,
     }
 }

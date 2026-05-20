@@ -148,7 +148,7 @@ fn build_runtime_context(
 ) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let date = chrono_now(now);

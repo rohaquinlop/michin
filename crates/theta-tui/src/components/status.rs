@@ -55,8 +55,8 @@ impl Component for StatusBar {
         ];
 
         let state_color = match self.agent_state.as_str() {
-            "streaming" | "tool executing" => self.theme.warning,
-            "error" => self.theme.error,
+            "streaming" | "thinking" | "tool executing" | "compacting" => self.theme.warning,
+            "error" | "tool error" => self.theme.error,
             _ => self.theme.success,
         };
 

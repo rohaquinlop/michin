@@ -92,7 +92,10 @@ impl Chat {
         };
 
         let cursor = if msg.is_streaming {
-            Some(Span::styled("\u{258c}", Style::default().fg(self.theme.accent)))
+            Some(Span::styled(
+                "\u{258c}",
+                Style::default().fg(self.theme.accent),
+            ))
         } else {
             None
         };
@@ -294,7 +297,8 @@ fn format_markdown(
         }
 
         // Bullet / list item.
-        let is_bullet = trimmed.strip_prefix("- ")
+        let is_bullet = trimmed
+            .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "));
         if let Some(item) = is_bullet {
             let bullet_style = Style::default().fg(theme.warning);
@@ -308,11 +312,7 @@ fn format_markdown(
         }
 
         // Numbered list.
-        if trimmed
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .count()
-            > 0
+        if trimmed.chars().take_while(|c| c.is_ascii_digit()).count() > 0
             && trimmed
                 .chars()
                 .skip_while(|c| c.is_ascii_digit())
@@ -396,12 +396,7 @@ mod tests {
     fn test_code_block() {
         let theme = Theme::default();
         let style = Style::default();
-        let lines = format_markdown(
-            "before\n```rust\nlet x = 1;\n```\nafter",
-            style,
-            &theme,
-            "",
-        );
+        let lines = format_markdown("before\n```rust\nlet x = 1;\n```\nafter", style, &theme, "");
         // before, code header, code line, after
         assert!(lines.len() >= 3);
     }

@@ -5,6 +5,7 @@
 //! `/v1/chat/completions` API with SSE streaming.
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -21,12 +22,14 @@ use crate::types::{
 /// The single OpenAI-compatible provider.
 pub struct OpenAiCompatProvider {
     client: Client,
+    api_key: Option<String>,
 }
 
 impl OpenAiCompatProvider {
     pub fn new() -> Self {
         Self {
             client: Client::new(),
+            api_key: None,
         }
     }
 }
@@ -58,16 +61,18 @@ impl Provider for OpenAiCompatProvider {
             context.tools.len(),
         );
 
+        let api_key = self
+            .api_key
+            .clone()
+            .or_else(|| std::env::var(api_key_env(model.provider)).ok())
+            .ok_or(ThetaError::MissingApiKey {
+                provider: model.provider,
+            })?;
+
         let response = self
             .client
             .post(&url)
-            .header(
-                "Authorization",
-                format!(
-                    "Bearer {}",
-                    std::env::var(api_key_env(model.provider)).unwrap_or_default()
-                ),
-            )
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -88,25 +93,18 @@ impl Provider for OpenAiCompatProvider {
             });
         }
 
+        let mut parser = OpenAiCompatStreamParser::new();
         let stream = response
             .bytes_stream()
-            .map(|result| match result {
-                Ok(bytes) => {
-                    let line = String::from_utf8_lossy(&bytes).to_string();
-                    parse_sse_line(&line)
-                }
-                Err(e) => Some(AssistantMessageEvent::Error {
+            .eventsource()
+            .map(move |result| match result {
+                Ok(event) => parser.parse_data(&event.data),
+                Err(e) => vec![AssistantMessageEvent::Error {
                     code: "stream".into(),
                     message: e.to_string(),
-                }),
+                }],
             })
-            .filter_map(|opt| async move { opt })
-            .chain(futures::stream::once(async {
-                AssistantMessageEvent::Done {
-                    stop_reason: StopReason::Stop,
-                    usage: None,
-                }
-            }));
+            .flat_map(futures::stream::iter);
 
         Ok(Box::pin(stream))
     }
@@ -125,6 +123,10 @@ impl Provider for OpenAiCompatProvider {
         };
 
         self.stream(model, context, &stream_opts).await
+    }
+
+    fn set_token(&mut self, token: &str) {
+        self.api_key = Some(token.to_string());
     }
 }
 
@@ -372,7 +374,7 @@ fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
         Message::ToolResult {
             tool_call_id,
             content,
-            is_error,
+            is_error: _,
             ..
         } => {
             let text = blocks_to_text(content);
@@ -380,7 +382,6 @@ fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": text,
-                "is_error": is_error,
             }))
         }
         // Skip model/thinking change events — not sent to LLM.
@@ -401,6 +402,7 @@ fn blocks_to_text(blocks: &[ContentBlock]) -> String {
 }
 
 /// Parse one SSE data line into an AssistantMessageEvent (or None for comments/empty).
+#[cfg(test)]
 pub fn parse_sse_line(line: &str) -> Option<AssistantMessageEvent> {
     // SSE format: "data: <json>\n\n"
     let line = line.trim();
@@ -416,7 +418,10 @@ pub fn parse_sse_line(line: &str) -> Option<AssistantMessageEvent> {
     }
 
     match serde_json::from_str::<Value>(data) {
-        Ok(chunk) => parse_chunk(&chunk),
+        Ok(chunk) => OpenAiCompatStreamParser::new()
+            .parse_chunk(&chunk)
+            .into_iter()
+            .next(),
         Err(e) => {
             tracing::warn!("Failed to parse SSE data: {} — {}", data, e);
             None
@@ -424,11 +429,52 @@ pub fn parse_sse_line(line: &str) -> Option<AssistantMessageEvent> {
     }
 }
 
+#[derive(Debug, Default)]
+struct OpenAiCompatStreamParser {
+    tool_calls: Vec<OpenAiToolCallState>,
+}
+
+#[derive(Debug, Default)]
+struct OpenAiToolCallState {
+    index: usize,
+    id: String,
+    name: String,
+    emitted_start: bool,
+    emitted_end: bool,
+}
+
+impl OpenAiCompatStreamParser {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn parse_data(&mut self, data: &str) -> Vec<AssistantMessageEvent> {
+        if data.trim().is_empty() || data == "[DONE]" {
+            return Vec::new();
+        }
+
+        match serde_json::from_str::<Value>(data) {
+            Ok(chunk) => self.parse_chunk(&chunk),
+            Err(e) => {
+                tracing::warn!("Failed to parse SSE data: {} — {}", data, e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Parse a single SSE JSON chunk into zero or more events.
+    fn parse_chunk(&mut self, chunk: &Value) -> Vec<AssistantMessageEvent> {
+        parse_chunk(self, chunk)
+    }
+}
+
 /// Parse a single SSE JSON chunk into events.
-fn parse_chunk(chunk: &Value) -> Option<AssistantMessageEvent> {
+fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<AssistantMessageEvent> {
+    let mut events = Vec::new();
+
     // Check for top-level error
     if let Some(error) = chunk.get("error") {
-        return Some(AssistantMessageEvent::Error {
+        events.push(AssistantMessageEvent::Error {
             code: error
                 .get("code")
                 .and_then(|c| c.as_str())
@@ -440,46 +486,81 @@ fn parse_chunk(chunk: &Value) -> Option<AssistantMessageEvent> {
                 .unwrap_or("unknown error")
                 .into(),
         });
+        return events;
     }
 
     // Check for usage info
     if let Some(usage) = chunk.get("usage") {
-        return Some(AssistantMessageEvent::Usage {
+        events.push(AssistantMessageEvent::Usage {
             usage: parse_usage(usage),
         });
+        return events;
     }
 
-    let choices = chunk.get("choices")?.as_array()?;
-    let choice = choices.first()?;
-    let delta = choice.get("delta")?;
+    let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) else {
+        return events;
+    };
+    let Some(choice) = choices.first() else {
+        return events;
+    };
 
     // Check finish reason
     let finish_reason = choice.get("finish_reason").and_then(|r| r.as_str());
 
+    let delta = choice.get("delta");
+
     // Tool call delta
-    if let Some(tool_calls) = delta.get("tool_calls")
+    if let Some(tool_calls) = delta.and_then(|d| d.get("tool_calls"))
         && let Some(tool_call_array) = tool_calls.as_array()
     {
         for tc_delta in tool_call_array {
-            let _index = tc_delta.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-            let id = tc_delta.get("id").and_then(|i| i.as_str()).unwrap_or("");
-            let function = tc_delta.get("function")?;
+            let index = tc_delta.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            let id = tc_delta.get("id").and_then(|i| i.as_str());
+            let function = tc_delta.get("function");
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str());
 
-            // New tool call starting
-            if !id.is_empty() {
-                let name = function.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                if !name.is_empty() {
-                    return Some(AssistantMessageEvent::ToolCallStart {
-                        id: id.to_string(),
-                        name: name.to_string(),
+            let state_idx = parser
+                .tool_calls
+                .iter()
+                .position(|tc| tc.index == index)
+                .unwrap_or_else(|| {
+                    parser.tool_calls.push(OpenAiToolCallState {
+                        index,
+                        ..Default::default()
                     });
-                }
+                    parser.tool_calls.len() - 1
+                });
+
+            let state = &mut parser.tool_calls[state_idx];
+            if let Some(id) = id
+                && !id.is_empty()
+            {
+                state.id = id.to_string();
+            }
+            if let Some(name) = name
+                && !name.is_empty()
+            {
+                state.name = name.to_string();
             }
 
-            // Tool call arguments delta
-            if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                return Some(AssistantMessageEvent::ToolCallDelta {
-                    id: id.to_string(),
+            if !state.emitted_start && !state.id.is_empty() && !state.name.is_empty() {
+                state.emitted_start = true;
+                events.push(AssistantMessageEvent::ToolCallStart {
+                    id: state.id.clone(),
+                    name: state.name.clone(),
+                });
+            }
+
+            if let Some(args) = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                && !args.is_empty()
+                && !state.id.is_empty()
+            {
+                events.push(AssistantMessageEvent::ToolCallDelta {
+                    id: state.id.clone(),
                     arguments: args.to_string(),
                 });
             }
@@ -487,21 +568,21 @@ fn parse_chunk(chunk: &Value) -> Option<AssistantMessageEvent> {
     }
 
     // Reasoning/thinking content (DeepSeek and o-series)
-    if let Some(reasoning) = delta.get("reasoning_content")
+    if let Some(reasoning) = delta.and_then(|d| d.get("reasoning_content"))
         && let Some(text) = reasoning.as_str()
         && !text.is_empty()
     {
-        return Some(AssistantMessageEvent::ThinkingDelta {
+        events.push(AssistantMessageEvent::ThinkingDelta {
             thinking: text.to_string(),
         });
     }
 
     // Regular text content
-    if let Some(content) = delta.get("content")
+    if let Some(content) = delta.and_then(|d| d.get("content"))
         && let Some(text) = content.as_str()
         && !text.is_empty()
     {
-        return Some(AssistantMessageEvent::TextDelta {
+        events.push(AssistantMessageEvent::TextDelta {
             text: text.to_string(),
         });
     }
@@ -509,26 +590,35 @@ fn parse_chunk(chunk: &Value) -> Option<AssistantMessageEvent> {
     // Handle finish reason
     if let Some(reason) = finish_reason {
         if reason == "tool_calls" {
-            return Some(AssistantMessageEvent::Done {
+            for state in &mut parser.tool_calls {
+                if state.emitted_start && !state.emitted_end {
+                    state.emitted_end = true;
+                    events.push(AssistantMessageEvent::ToolCallEnd {
+                        id: state.id.clone(),
+                    });
+                }
+            }
+        }
+
+        if reason == "tool_calls" {
+            events.push(AssistantMessageEvent::Done {
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             });
-        }
-        if reason == "length" {
-            return Some(AssistantMessageEvent::Done {
+        } else if reason == "length" {
+            events.push(AssistantMessageEvent::Done {
                 stop_reason: StopReason::Length,
                 usage: None,
             });
-        }
-        if reason == "stop" {
-            return Some(AssistantMessageEvent::Done {
+        } else if reason == "stop" {
+            events.push(AssistantMessageEvent::Done {
                 stop_reason: StopReason::Stop,
                 usage: None,
             });
         }
     }
 
-    None
+    events
 }
 
 /// Parse a usage object from the stream.
@@ -559,6 +649,7 @@ fn parse_usage(usage: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::EventAccumulator;
 
     #[test]
     fn test_api_key_env() {
@@ -647,5 +738,94 @@ mod tests {
         } else {
             panic!("Expected Error event");
         }
+    }
+
+    #[test]
+    fn test_parse_streamed_tool_call_arguments_by_index() {
+        let mut parser = OpenAiCompatStreamParser::new();
+        let mut accumulator = EventAccumulator::new();
+
+        let chunks = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"read","arguments":""}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\""}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Cargo.toml\"}"}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#,
+        ];
+
+        let events: Vec<AssistantMessageEvent> = chunks
+            .iter()
+            .flat_map(|chunk| parser.parse_data(chunk))
+            .collect();
+
+        assert!(matches!(
+            events.first(),
+            Some(AssistantMessageEvent::ToolCallStart { id, name })
+                if id == "call_123" && name == "read"
+        ));
+        assert!(matches!(
+            events.iter().rev().nth(1),
+            Some(AssistantMessageEvent::ToolCallEnd { id }) if id == "call_123"
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+
+        for event in &events {
+            accumulator.feed(event);
+        }
+
+        let blocks = accumulator.content_blocks();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, "call_123");
+                assert_eq!(name, "read");
+                assert_eq!(arguments["path"], "Cargo.toml");
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        assert_eq!(accumulator.stop_reason(), Some(StopReason::ToolUse));
+    }
+
+    #[test]
+    fn test_tool_result_conversion_omits_non_openai_fields() {
+        let model = Model {
+            id: "test-model".into(),
+            name: "Test Model".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::OpenAI,
+            base_url: "https://api.openai.com".into(),
+            reasoning: false,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let msg = Message::ToolResult {
+            tool_call_id: "call_123".into(),
+            tool_name: "read".into(),
+            content: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
+            details: None,
+            is_error: false,
+            timestamp: 0,
+        };
+
+        let converted = convert_message(&model, &msg).expect("tool result converts");
+        assert_eq!(converted["role"], "tool");
+        assert_eq!(converted["tool_call_id"], "call_123");
+        assert_eq!(converted["content"], "done");
+        assert!(converted.get("is_error").is_none());
     }
 }

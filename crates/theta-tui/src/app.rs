@@ -11,12 +11,12 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
+use crate::components::CommandEntry;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
 use crate::components::session_picker::{SessionInfo, SessionPicker};
-use crate::components::CommandEntry;
 use crate::components::status::StatusBar;
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
@@ -58,8 +58,9 @@ pub enum TuiEvent {
         message: String,
     },
     ToolEnd {
+        id: String,
         name: String,
-        output: String,
+        is_error: bool,
     },
     TurnStart,
     TurnEnd {
@@ -160,7 +161,11 @@ impl App {
         status.thinking = thinking.to_string();
         status.set_agent_state("idle");
 
-        let mut editor = Editor::new(theme.clone(), working_dir.clone(), commands.iter().map(|c| c.name.clone()).collect());
+        let mut editor = Editor::new(
+            theme.clone(),
+            working_dir.clone(),
+            commands.iter().map(|c| c.name.clone()).collect(),
+        );
         editor.focus(true); // Editor starts focused.
 
         Self {
@@ -591,58 +596,62 @@ impl App {
                 }
             }
             TuiEvent::ThinkingDelta(text) => {
-                self.chat
-                    .update_last(&format!("[thinking] {text}"), ChatRole::System, true);
+                let summary = text.lines().next().unwrap_or("").trim();
+                if summary.is_empty() {
+                    self.status.set_agent_state("thinking");
+                    self.status.set_tool_progress("");
+                } else {
+                    self.status.set_agent_state("thinking");
+                    self.status
+                        .set_tool_progress(&truncate_status_text(summary, 80));
+                }
             }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("tool executing");
                 self.status.set_tool_progress(&format!("running {name}..."));
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::Tool,
-                    text: format!("{name} executing..."),
-                    tool_name: Some(name),
-                    is_streaming: true,
-                });
             }
             TuiEvent::ToolProgress { message, .. } => {
-                self.status.set_tool_progress(&message);
+                self.status
+                    .set_tool_progress(&truncate_status_text(&message, 80));
             }
             TuiEvent::ToolEnd {
-                name: _name,
-                output,
+                id: _,
+                name,
+                is_error,
             } => {
-                self.current_tool = None;
-                self.status.set_tool_progress("");
-                self.status.set_agent_state("streaming");
-                if let Some(last) = self.chat.messages.last_mut()
-                    && last.role == ChatRole::Tool
-                {
-                    last.text = output;
-                    last.is_streaming = false;
+                if self.current_tool.as_deref() == Some(name.as_str()) {
+                    self.current_tool = None;
+                }
+                if is_error {
+                    self.status.set_agent_state("tool error");
+                    self.status.set_tool_progress(&format!("{name} failed"));
+                } else {
+                    self.status.set_agent_state("streaming");
+                    self.status.set_tool_progress(&format!("{name} done"));
                 }
             }
             TuiEvent::TurnStart => {
                 self.streaming = true;
                 self.status.set_agent_state("streaming");
+                self.status.set_tool_progress("");
             }
             TuiEvent::TurnEnd { stop_reason } => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.streaming = false;
                 self.status
                     .set_agent_state(&format!("idle (stopped: {stop_reason})"));
+                self.status.set_tool_progress("");
             }
             TuiEvent::ContextCompacted { trimmed_count } => {
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::System,
-                    text: if trimmed_count == 1 {
-                        format!("[compact] trimmed {trimmed_count} old message")
-                    } else {
-                        format!("[compact] trimmed {trimmed_count} old messages")
-                    },
-                    tool_name: None,
-                    is_streaming: false,
-                });
+                self.status.set_agent_state("compacting");
+                if trimmed_count == 1 {
+                    self.status
+                        .set_tool_progress(&format!("trimmed {trimmed_count} old message"));
+                } else {
+                    self.status
+                        .set_tool_progress(&format!("trimmed {trimmed_count} old messages"));
+                }
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
                 self.status
@@ -658,6 +667,11 @@ impl App {
             }
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);
+                for msg in &mut self.chat.messages {
+                    if msg.role == ChatRole::Tool && msg.is_streaming {
+                        msg.is_streaming = false;
+                    }
+                }
                 self.streaming = false;
                 self.current_tool = None;
                 self.status.set_tool_progress("");
@@ -697,5 +711,15 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn truncate_status_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }

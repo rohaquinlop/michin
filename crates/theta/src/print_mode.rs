@@ -160,10 +160,10 @@ async fn resolve_auth(
             continue;
         }
         if let Some(key) = auth_config.get_api_key(prov_str).await
-            && let Some(m) = catalog.list().into_iter().find(|m| {
-                m.provider == *prov
-                    && (m.id == model_id || m.id.starts_with(model_id))
-            })
+            && let Some(m) = catalog
+                .list()
+                .into_iter()
+                .find(|m| m.provider == *prov && (m.id == model_id || m.id.starts_with(model_id)))
         {
             return Ok((m.clone(), key));
         }

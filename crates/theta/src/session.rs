@@ -351,7 +351,7 @@ fn generate_session_id() -> String {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 

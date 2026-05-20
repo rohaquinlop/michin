@@ -167,22 +167,21 @@ impl EventAccumulator {
     }
 
     /// Build the final content blocks from accumulated deltas.
-    pub fn content_blocks(&self) -> Vec<ContentBlock> {
+    /// Clears internal buffers after building (single-use).
+    pub fn content_blocks(&mut self) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
 
         // Thinking block (if any reasoning was emitted).
         if !self.thinking_buffer.is_empty() {
             blocks.push(ContentBlock::Thinking {
-                thinking: self.thinking_buffer.clone(),
+                thinking: std::mem::take(&mut self.thinking_buffer),
                 signature: None,
             });
         }
 
         // Text block (if any text was emitted).
         if !self.text_buffer.is_empty() {
-            blocks.push(ContentBlock::text(std::mem::take(
-                &mut self.text_buffer.clone(),
-            )));
+            blocks.push(ContentBlock::text(std::mem::take(&mut self.text_buffer)));
         }
 
         // Tool call blocks (only completed ones with valid JSON).

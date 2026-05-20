@@ -220,13 +220,10 @@ async fn wait_for_callback(
     expected_state: &str,
 ) -> Result<String, OAuthError> {
     tracing::info!("Waiting for OAuth callback on port {CALLBACK_PORT}...");
-    let (mut stream, _addr) = listener
-        .accept()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to accept OAuth callback: {e}");
-            OAuthError::Callback(format!("failed to accept connection: {e}"))
-        })?;
+    let (mut stream, _addr) = listener.accept().await.map_err(|e| {
+        tracing::error!("Failed to accept OAuth callback: {e}");
+        OAuthError::Callback(format!("failed to accept connection: {e}"))
+    })?;
     tracing::info!("OAuth callback connection received");
 
     let (reader, mut writer) = stream.split();

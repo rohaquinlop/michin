@@ -119,7 +119,7 @@ impl Agent {
     pub async fn set_model(&self, model: Model) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
         let mut state = self.state.write().await;
         state.messages.push(Message::ModelChange {
@@ -134,7 +134,7 @@ impl Agent {
     pub async fn set_thinking_level(&self, level: theta_ai::ThinkingLevel) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
         let mut state = self.state.write().await;
         state.messages.push(Message::ThinkingLevelChange {
@@ -343,6 +343,6 @@ impl Agent {
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
