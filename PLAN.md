@@ -49,6 +49,8 @@ Extensions live in `theta/src/extensions/` (compiled-in traits, no separate crat
 ### TUI / UX
 - [x] Theme cycling keybinding
 - [x] Tool result snippets in chat transcript
+- [x] `/model` picker filtered to authenticated providers
+- [x] Skill command UX: `/skills`, `/skill:<name>`, fuzzy skill autocomplete
 
 ### Project
 - [x] README / CONTRIBUTING
@@ -75,7 +77,7 @@ Extensions live in `theta/src/extensions/` (compiled-in traits, no separate crat
 
 **9. Codex transport:** WebSocket (primary, lower latency) with SSE fallback. WebSocket sends JSON body as text frame, reads responses frame-by-frame. Both transports share the same `parse_codex_event()` parser.
 
-**10. Slash commands:** `/model`, `/thinking`, `/clear`, `/session`, `/fork`, `/sessions`, `/login`, `/help`. Ctrl+P for model selector overlay.
+**10. Slash commands:** `/model`, `/thinking`, `/clear`, `/session`, `/fork`, `/sessions`, `/skills`, `/skill:<name>`, `/login`, `/help`. Ctrl+P and `/model` both open model selector overlay.
 
 ## Non-Goals (MVP)
 

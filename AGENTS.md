@@ -73,9 +73,9 @@ See `PLAN.md` for the full implementation plan and phase breakdown.
 | `max_tokens_field` | `max_completion_tokens` vs `max_tokens` |
 
 **Current models** (from `theta-models`):
-- **OpenAI**: `gpt-5.5`, `gpt-5.5-instant`, `o4`, `o4-mini`
+- **OpenAI**: `gpt-5.5`, `gpt-5.5-instant`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5-chat-latest`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini`, `o4`, `o4-mini`, `o3`, `o3-mini`, `o1`, `o1-mini`
   — auth via `OPENAI_API_KEY`
-- **OpenAI Codex**: `gpt-5.5`, `gpt-5.5-instant`, `o4`, `o4-mini`
+- **OpenAI Codex**: `gpt-5.5`, `gpt-5.5-instant`, `gpt-5`, `gpt-5-mini`, `gpt-5-chat-latest`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o4`, `o4-mini`, `o3`, `o3-mini`, `o1`, `o1-mini`
   — auth via `OPENAI_CODEX_TOKEN` (ChatGPT Plus session token),
   targets `https://chatgpt.com/backend-api`, no API key needed
 - **DeepSeek**: `deepseek-v4-pro` (1M ctx), `deepseek-v4-flash` (1M ctx)
