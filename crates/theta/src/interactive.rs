@@ -10,7 +10,7 @@ use theta_ai::{ContentBlock, Model, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
 use theta_tui::App;
 use theta_tui::app::{HistoryEntry, TuiAction, TuiEvent};
-use theta_tui::components::command_picker::CommandEntry;
+use theta_tui::components::CommandEntry;
 use theta_tui::components::{ModelEntry, SessionInfo, known_providers};
 use theta_tui::theme::Theme;
 use tokio::sync::{RwLock, mpsc};

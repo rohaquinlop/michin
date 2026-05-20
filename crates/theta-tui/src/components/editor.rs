@@ -1,16 +1,31 @@
-//! Input editor component — multiline text input with history.
+//! Input editor — multiline text input with inline fuzzy autocomplete for @ files and / commands.
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
+use std::path::PathBuf;
 
 use crate::components::{Action, Component};
+use crate::components::fuzzy::fuzzy_filter;
 use crate::theme::Theme;
+
+/// State for inline autocomplete (file paths or slash commands).
+#[derive(Debug, Clone)]
+struct AutocompleteState {
+    /// Available items (file names or command names).
+    items: Vec<String>,
+    /// Currently selected index.
+    selected: usize,
+    /// Byte position in text where @ or / was typed.
+    prefix_start: usize,
+    /// The filter query (text between @ or / and cursor).
+    query: String,
+}
 
 /// Multiline text editor for user input.
 pub struct Editor {
@@ -21,7 +36,6 @@ pub struct Editor {
     /// Whether focused.
     focused: bool,
     /// Theme.
-    #[allow(dead_code)]
     theme: Theme,
     /// History of submitted messages.
     history: Vec<String>,
@@ -29,10 +43,18 @@ pub struct Editor {
     history_idx: usize,
     /// Temporary save for history browsing.
     saved_text: String,
+    /// Scroll offset in visual lines.
+    scroll: usize,
+    /// Inline autocomplete state (None = not active).
+    autocomplete: Option<AutocompleteState>,
+    /// Working directory for file autocomplete.
+    working_dir: PathBuf,
+    /// Known slash commands for command autocomplete.
+    slash_commands: Vec<String>,
 }
 
 impl Editor {
-    pub fn new(theme: Theme) -> Self {
+    pub fn new(theme: Theme, working_dir: PathBuf, slash_commands: Vec<String>) -> Self {
         Self {
             text: String::new(),
             cursor: 0,
@@ -41,6 +63,10 @@ impl Editor {
             history: Vec::new(),
             history_idx: 0,
             saved_text: String::new(),
+            scroll: 0,
+            autocomplete: None,
+            working_dir,
+            slash_commands,
         }
     }
 
@@ -59,7 +85,7 @@ impl Editor {
         self.cursor += s.len();
     }
 
-    /// Delete the last character (used when path picker replaces @).
+    /// Delete the last character.
     pub fn delete_last_char(&mut self) {
         if let Some(c) = self.text.chars().last() {
             let len = c.len_utf8();
@@ -69,6 +95,10 @@ impl Editor {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Text editing operations
+    // ------------------------------------------------------------------
 
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
@@ -165,6 +195,8 @@ impl Editor {
         let text = self.text.trim().to_string();
         self.text.clear();
         self.cursor = 0;
+        self.scroll = 0;
+        self.autocomplete = None;
         if text.is_empty() {
             return None;
         }
@@ -184,6 +216,7 @@ impl Editor {
             self.history_idx -= 1;
             self.text = self.history[self.history_idx].clone();
             self.cursor = self.text.len();
+            self.scroll = 0;
         }
     }
 
@@ -195,10 +228,118 @@ impl Editor {
             self.history_idx += 1;
             self.text = self.history[self.history_idx].clone();
             self.cursor = self.text.len();
+            self.scroll = 0;
         } else if self.history_idx == self.history.len() - 1 {
             self.history_idx += 1;
             self.text = self.saved_text.clone();
             self.cursor = self.text.len();
+            self.scroll = 0;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Autocomplete
+    // ------------------------------------------------------------------
+
+    /// Start autocomplete after typing @ or /.
+    fn start_autocomplete(&mut self, trigger: char) {
+        let prefix_start = self.cursor; // right after @ or /
+        self.autocomplete = Some(AutocompleteState {
+            items: Vec::new(),
+            selected: 0,
+            prefix_start,
+            query: String::new(),
+        });
+        self.update_autocomplete(trigger);
+    }
+
+    /// Update autocomplete items based on current query.
+    fn update_autocomplete(&mut self, trigger: char) {
+        let Some(ref mut ac) = self.autocomplete else {
+            return;
+        };
+
+        // Extract query: text between prefix_start and cursor.
+        if self.cursor >= ac.prefix_start {
+            ac.query = self.text[ac.prefix_start..self.cursor].to_string();
+        } else {
+            ac.query.clear();
+        }
+
+        ac.items = match trigger {
+            '@' => fuzzy_file_matches(&self.working_dir, &ac.query),
+            '/' => fuzzy_command_matches(&self.slash_commands, &ac.query),
+            _ => Vec::new(),
+        };
+
+        ac.selected = 0;
+    }
+
+    /// Apply the selected autocomplete item.
+    fn accept_autocomplete(&mut self, trigger: char) {
+        let Some(ref ac) = self.autocomplete else {
+            return;
+        };
+        let Some(item) = ac.items.get(ac.selected) else {
+            return;
+        };
+        let is_dir = item.ends_with('/');
+
+        // Replace query text with the selected item.
+        let start = ac.prefix_start;
+        let end = self.cursor;
+        self.text.replace_range(start..end, item);
+
+        if is_dir {
+            // Keep autocomplete open so user can keep navigating.
+            self.cursor = start + item.len();
+            self.autocomplete.as_mut().unwrap().prefix_start = start;
+            self.autocomplete.as_mut().unwrap().query.clear();
+            self.update_autocomplete(trigger);
+        } else {
+            // Insert space after file, dismiss autocomplete.
+            self.cursor = start + item.len();
+            self.text.insert(self.cursor, ' ');
+            self.cursor += 1;
+            self.autocomplete = None;
+        }
+    }
+
+    /// Return autocomplete items for external rendering.
+    pub fn autocomplete_items(&self) -> Vec<String> {
+        self.autocomplete.as_ref()
+            .map(|ac| ac.items.clone())
+            .unwrap_or_default()
+    }
+
+    /// Selected index in autocomplete items.
+    pub fn autocomplete_selected(&self) -> usize {
+        self.autocomplete.as_ref()
+            .map(|ac| ac.selected)
+            .unwrap_or(0)
+    }
+
+    /// Whether autocomplete is currently active.
+    pub fn autocomplete_active(&self) -> bool {
+        self.autocomplete.is_some()
+    }
+
+    /// Dismiss autocomplete without applying.
+    fn dismiss_autocomplete(&mut self) {
+        self.autocomplete = None;
+    }
+
+    fn select_next(&mut self) {
+        if let Some(ref mut ac) = self.autocomplete
+            && !ac.items.is_empty()
+        {
+            ac.selected = (ac.selected + 1).min(ac.items.len().saturating_sub(1));
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if let Some(ref mut ac) = self.autocomplete {
+            ac.selected = ac.selected.saturating_sub(1);
         }
     }
 }
@@ -227,26 +368,67 @@ impl Component for Editor {
                 Style::default().fg(self.theme.dim)
             });
 
-        // Build text with cursor indicator.
-        let mut spans = Vec::new();
-        for (i, c) in self.text.char_indices() {
-            let at_cursor = self.focused && i == self.cursor;
-            spans.push(Span::styled(
-                c.to_string(),
-                if at_cursor {
-                    cursor_style
-                } else {
-                    Style::default()
-                },
-            ));
-        }
-        if self.focused && self.cursor >= self.text.len() {
-            spans.push(Span::styled(" ", cursor_style));
+        let inner = block.inner(area);
+        let width = inner.width as usize;
+        let height = inner.height as usize;
+        if width == 0 || height == 0 {
+            let para = Paragraph::new("").block(block);
+            frame.render_widget(para, area);
+            return;
         }
 
-        let para = Paragraph::new(Line::from(spans)).block(block);
+        // Wrap text into visual lines.
+        let visual_lines = wrap_text(&self.text, width);
+        let total_lines = visual_lines.len();
 
-        frame.render_widget(para, area);
+        // Find cursor visual line.
+        let cursor_line = cursor_visual_line(&self.text, self.cursor, width);
+
+        // Auto-scroll.
+        if cursor_line < self.scroll {
+            self.scroll = cursor_line;
+        } else if cursor_line >= self.scroll + height {
+            self.scroll = cursor_line.saturating_sub(height.saturating_sub(1));
+        }
+        self.scroll = self.scroll.min(total_lines.saturating_sub(height));
+
+        // Build visible text lines.
+        let end = (self.scroll + height).min(total_lines);
+        let visible_lines: Vec<Line> = visual_lines[self.scroll..end]
+            .iter()
+            .enumerate()
+            .map(|(line_idx, line)| {
+                let abs_line = self.scroll + line_idx;
+                let spans: Vec<Span> = line
+                    .iter()
+                    .map(|&char_idx| {
+                        let c = self.text[char_idx..]
+                            .chars()
+                            .next()
+                            .unwrap_or(' ');
+                        let at_cursor =
+                            self.focused && char_idx == self.cursor;
+                        Span::styled(
+                            c.to_string(),
+                            if at_cursor { cursor_style } else { Style::default() },
+                        )
+                    })
+                    .collect();
+                let mut spans = spans;
+                if self.focused
+                    && self.cursor >= self.text.len()
+                    && abs_line == cursor_line
+                {
+                    spans.push(Span::styled(" ", cursor_style));
+                }
+                Line::from(spans)
+            })
+            .collect();
+
+        frame.render_widget(
+            Paragraph::new(Text::from(visible_lines)).block(block),
+            area,
+        );
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -257,8 +439,63 @@ impl Component for Editor {
             return None;
         };
 
+        // If autocomplete is active, handle its keys first.
+        if self.autocomplete.is_some() {
+            match key {
+                crossterm::event::KeyEvent { code: KeyCode::Tab, .. } => {
+                    let trigger = if self.text.as_bytes().get(
+                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
+                    ) == Some(&b'@') { '@' } else { '/' };
+                    self.accept_autocomplete(trigger);
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Esc, .. } => {
+                    self.dismiss_autocomplete();
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Up, .. } => {
+                    self.select_prev();
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Down, .. } => {
+                    self.select_next();
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Enter, .. } => {
+                    let trigger = if self.text.as_bytes().get(
+                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
+                    ) == Some(&b'@') { '@' } else { '/' };
+                    self.accept_autocomplete(trigger);
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Char(c), .. } => {
+                    self.insert_char(*c);
+                    let trigger = if self.text.as_bytes().get(
+                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
+                    ) == Some(&b'@') { '@' } else { '/' };
+                    self.update_autocomplete(trigger);
+                    return None;
+                }
+                crossterm::event::KeyEvent { code: KeyCode::Backspace, .. } => {
+                    if let Some(ref ac) = self.autocomplete
+                        && self.cursor <= ac.prefix_start
+                    {
+                        self.delete_before();
+                        self.dismiss_autocomplete();
+                        return None;
+                    }
+                    self.delete_before();
+                    let trigger = if self.text.as_bytes().get(
+                        self.autocomplete.as_ref().unwrap().prefix_start.wrapping_sub(1)
+                    ) == Some(&b'@') { '@' } else { '/' };
+                    self.update_autocomplete(trigger);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         match key {
-            // Enter on its own = submit (not Alt+Enter)
             crossterm::event::KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::NONE,
@@ -268,7 +505,6 @@ impl Component for Editor {
                     return Some(Action::SendMessage(text));
                 }
             }
-            // Alt+Enter inserts a literal newline.
             crossterm::event::KeyEvent {
                 code: KeyCode::Enter,
                 modifiers: KeyModifiers::ALT,
@@ -276,7 +512,6 @@ impl Component for Editor {
             } => {
                 self.insert_char('\n');
             }
-            // Ctrl+J also inserts a newline (common terminal binding)
             crossterm::event::KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
@@ -290,7 +525,8 @@ impl Component for Editor {
                 ..
             } => {
                 self.insert_char('@');
-                return Some(Action::ShowPathPicker);
+                self.start_autocomplete('@');
+                return None;
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Char('/'),
@@ -298,14 +534,14 @@ impl Component for Editor {
                 ..
             } => {
                 self.insert_char('/');
-                // Only open picker if at start of line or after whitespace.
                 if self.text.trim().is_empty()
                     || self.text.ends_with(' ')
                     || self.text.ends_with('\n')
                     || self.text == "/"
                 {
-                    return Some(Action::ShowCommandPicker);
+                    self.start_autocomplete('/');
                 }
+                return None;
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Char(c),
@@ -382,7 +618,6 @@ impl Component for Editor {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                // Delete word backward.
                 let old = self.cursor;
                 self.move_word_left();
                 let new = self.cursor;
@@ -405,4 +640,111 @@ impl Component for Editor {
     fn focus(&mut self, focused: bool) {
         self.focused = focused;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fuzzy file matching
+// ---------------------------------------------------------------------------
+
+/// Return fuzzy-matched file/directory names from `base_dir`.
+/// If query contains `/`, traverse into the specified subdirectory.
+fn fuzzy_file_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
+    // If query has a path separator, resolve the subdirectory.
+    let (search_dir, name_filter) = if let Some(pos) = query.rfind('/') {
+        let dir_part = &query[..=pos];
+        let name_part = &query[pos + 1..];
+        let resolved = base_dir.join(dir_part);
+        (resolved, name_part.to_string())
+    } else {
+        (base_dir.to_path_buf(), query.to_string())
+    };
+
+    let mut entries: Vec<String> = Vec::new();
+    if let Ok(read) = std::fs::read_dir(&search_dir) {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') && !name_filter.starts_with('.') {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let full_name = if query.contains('/') {
+                let dir_part = &query[..query.rfind('/').unwrap() + 1];
+                if is_dir {
+                    format!("{dir_part}{name}/")
+                } else {
+                    format!("{dir_part}{name}")
+                }
+            } else if is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            };
+            entries.push(full_name);
+        }
+    }
+
+    // Fuzzy filter by name part.
+    let filtered: Vec<&String> = fuzzy_filter(&entries, &name_filter, |s| {
+        // Extract the filename portion for matching.
+        s.rsplit('/').next().unwrap_or(s)
+    });
+    filtered.into_iter().take(10).cloned().collect()
+}
+
+fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
+    let cmds: Vec<&String> = commands.iter().collect();
+    let filtered = fuzzy_filter(&cmds, query, |s| s);
+    filtered.into_iter().take(10).cloned().cloned().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Text wrapping helpers
+// ---------------------------------------------------------------------------
+
+/// Split text into visual lines of at most `width` chars.
+fn wrap_text(text: &str, width: usize) -> Vec<Vec<usize>> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut col = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut current));
+            col = 0;
+            continue;
+        }
+        if col >= width {
+            lines.push(std::mem::take(&mut current));
+            col = 0;
+        }
+        current.push(byte_idx);
+        col += 1;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Find which visual line the given byte cursor is on.
+fn cursor_visual_line(text: &str, cursor: usize, width: usize) -> usize {
+    let mut line = 0usize;
+    let mut col = 0usize;
+
+    for (byte_idx, ch) in text.char_indices() {
+        if byte_idx >= cursor {
+            return line;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+            continue;
+        }
+        if col >= width {
+            line += 1;
+            col = 0;
+        }
+        col += 1;
+    }
+    line
 }

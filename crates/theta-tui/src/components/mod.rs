@@ -4,17 +4,25 @@ use crossterm::event::Event;
 use ratatui::{Frame, layout::Rect};
 
 pub mod chat;
-pub mod command_picker;
 pub mod editor;
+pub mod fuzzy;
 pub mod login_flow;
 pub mod model_selector;
-pub mod path_picker;
 pub mod session_picker;
 pub mod status;
 
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use model_selector::{ModelEntry, ModelSelector};
 pub use session_picker::{SessionInfo, SessionPicker};
+
+/// A command or skill entry for autocomplete.
+#[derive(Debug, Clone)]
+pub struct CommandEntry {
+    /// The text to insert (e.g., "help", "model gpt-5.5").
+    pub name: String,
+    /// Short description.
+    pub description: String,
+}
 
 /// Actions that components can request from the App.
 #[derive(Debug, Clone)]
@@ -28,8 +36,6 @@ pub enum Action {
     ForkSession,
     ShowHelp,
     ShowModelSelector,
-    ShowPathPicker,
-    ShowCommandPicker,
     None,
 }
 

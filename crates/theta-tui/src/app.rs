@@ -5,16 +5,18 @@ use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem},
 };
 use tokio::sync::mpsc;
 
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
-use crate::components::command_picker::{CommandEntry, CommandPicker};
 use crate::components::login_flow::{LoginFlow, known_providers};
 use crate::components::model_selector::{ModelEntry, ModelSelector};
-use crate::components::path_picker::PathPicker;
 use crate::components::session_picker::{SessionInfo, SessionPicker};
+use crate::components::CommandEntry;
 use crate::components::status::StatusBar;
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
@@ -106,8 +108,6 @@ pub struct App {
     status: StatusBar,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
-    path_picker: PathPicker,
-    command_picker: CommandPicker,
     keybindings: Vec<Keybinding>,
     focus_idx: usize,
     running: bool,
@@ -124,8 +124,6 @@ pub struct App {
     current_tool: Option<String>,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
-    /// Available slash commands + skills for the command picker.
-    all_commands: Vec<CommandEntry>,
 }
 
 impl App {
@@ -162,7 +160,7 @@ impl App {
         status.thinking = thinking.to_string();
         status.set_agent_state("idle");
 
-        let mut editor = Editor::new(theme.clone());
+        let mut editor = Editor::new(theme.clone(), working_dir.clone(), commands.iter().map(|c| c.name.clone()).collect());
         editor.focus(true); // Editor starts focused.
 
         Self {
@@ -172,8 +170,6 @@ impl App {
             theme: theme.clone(),
             session_picker: None,
             model_selector: ModelSelector::new(models, theme.clone()),
-            path_picker: PathPicker::new(theme.clone(), working_dir),
-            command_picker: CommandPicker::new(theme.clone()),
             keybindings: default_bindings(),
             focus_idx: 0,
             running: true,
@@ -184,7 +180,6 @@ impl App {
             streaming: false,
             current_tool: None,
             login_flow: None,
-            all_commands: commands,
         }
     }
 
@@ -228,15 +223,8 @@ impl App {
         // Model selector overlay — renders on top of everything.
         self.model_selector.render(area, frame);
         if self.model_selector.visible {
-            // Don't render anything else while selector is open.
             return;
         }
-
-        // Path picker overlay.
-        self.path_picker.render(area, frame);
-
-        // Command picker overlay.
-        self.command_picker.render(area, frame);
 
         // Session picker mode.
         if self.mode == AppMode::SessionPicker
@@ -273,6 +261,59 @@ impl App {
         self.status.render(main[0], frame);
         self.chat.render(main[1], frame);
         self.editor.render(main[2], frame);
+
+        // Render autocomplete popup on top (after editor so it overlays).
+        if self.editor.autocomplete_active() {
+            self.render_autocomplete(area, frame);
+        }
+    }
+
+    fn render_autocomplete(&mut self, area: ratatui::layout::Rect, frame: &mut Frame) {
+        let items = self.editor.autocomplete_items();
+        if items.is_empty() {
+            return;
+        }
+        let selected = self.editor.autocomplete_selected();
+
+        let popup_height = (items.len() as u16 + 2).min(8);
+        let popup_width = area.width.min(50);
+        // Position above the bottom of the screen (above the 3-line editor area).
+        let y = area.height.saturating_sub(popup_height + 3);
+        let popup = ratatui::layout::Rect {
+            x: area.x,
+            y,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let visible_count = inner.height as usize;
+        let start = selected.saturating_sub(visible_count.saturating_sub(1));
+        let end = (start + visible_count).min(items.len());
+
+        let list_items: Vec<ListItem> = items[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let idx = start + i;
+                let prefix = if idx == selected { "> " } else { "  " };
+                let text = format!("{prefix}{item}");
+                let style = if idx == selected {
+                    Style::default().fg(self.theme.accent).bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(text, style)))
+            })
+            .collect();
+
+        let list = List::new(list_items);
+        frame.render_widget(list, inner);
     }
 
     fn handle_input_event(&mut self, event: &crossterm::event::Event) {
@@ -308,76 +349,6 @@ impl App {
                     }
                     crossterm::event::KeyCode::Char(c) => {
                         self.model_selector.push_query(c);
-                    }
-                    _ => {}
-                }
-            }
-            return;
-        }
-
-        // Path picker mode — handle keys exclusively.
-        if self.path_picker.visible {
-            if let crossterm::event::Event::Key(key) = event {
-                match key.code {
-                    crossterm::event::KeyCode::Esc => {
-                        self.path_picker.hide();
-                    }
-                    crossterm::event::KeyCode::Enter => {
-                        if self.path_picker.selected_is_dir() {
-                            self.path_picker.enter_directory();
-                        } else if let Some(path) = self.path_picker.take_selection()
-                        {
-                            self.editor.insert_at_cursor(&format!("@{path} "));
-                        }
-                    }
-                    crossterm::event::KeyCode::Tab => {
-                        if let Some(path) = self.path_picker.take_selection() {
-                            self.editor.insert_at_cursor(&format!("@{path} "));
-                        }
-                        self.path_picker.hide();
-                    }
-                    crossterm::event::KeyCode::Up => {
-                        self.path_picker.select_up();
-                    }
-                    crossterm::event::KeyCode::Down => {
-                        self.path_picker.select_down();
-                    }
-                    crossterm::event::KeyCode::Backspace => {
-                        self.path_picker.pop_query();
-                    }
-                    crossterm::event::KeyCode::Char(c) => {
-                        self.path_picker.push_query(c);
-                    }
-                    _ => {}
-                }
-            }
-            return;
-        }
-
-        // Command picker mode — handle keys exclusively.
-        if self.command_picker.visible {
-            if let crossterm::event::Event::Key(key) = event {
-                match key.code {
-                    crossterm::event::KeyCode::Esc => {
-                        self.command_picker.hide();
-                    }
-                    crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Tab => {
-                        if let Some(cmd) = self.command_picker.take_selection() {
-                            // The editor already has / from the trigger keypress.
-                            self.editor.insert_at_cursor(&format!("{cmd} "));
-                        }
-                    }
-                    crossterm::event::KeyCode::Up => {
-                        self.command_picker.select_up();
-                    }
-                    crossterm::event::KeyCode::Down => {
-                        self.command_picker.select_down();
-                    }
-                    crossterm::event::KeyCode::Backspace => {
-                        self.command_picker.pop_query();
-                    }
-                    crossterm::event::KeyCode::Char(c) => {
-                        self.command_picker.push_query(c);
                     }
                     _ => {}
                 }
@@ -499,12 +470,6 @@ impl App {
             }
             Action::ShowModelSelector => {
                 self.model_selector.show();
-            }
-            Action::ShowPathPicker => {
-                self.path_picker.show();
-            }
-            Action::ShowCommandPicker => {
-                self.command_picker.show(self.all_commands.clone());
             }
             _ => {}
         }
@@ -694,6 +659,8 @@ impl App {
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.streaming = false;
+                self.current_tool = None;
+                self.status.set_tool_progress("");
                 self.status.set_agent_state("idle");
             }
             TuiEvent::Info(msg) => {
