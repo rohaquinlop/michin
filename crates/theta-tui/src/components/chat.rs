@@ -1,6 +1,6 @@
 //! Chat message display — scrollable conversation view with markdown styling.
 
-use crossterm::event::{Event, KeyCode, MouseEventKind};
+use crossterm::event::{Event, KeyCode, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -36,6 +36,11 @@ pub struct Chat {
     scroll_from_bottom: usize,
     theme: Theme,
     focused: bool,
+    last_visible_lines: Vec<String>,
+    last_inner_area: Option<Rect>,
+    select_anchor: Option<(usize, usize)>,
+    select_head: Option<(usize, usize)>,
+    selecting: bool,
 }
 
 impl Chat {
@@ -45,12 +50,16 @@ impl Chat {
             scroll_from_bottom: 0,
             theme,
             focused: false,
+            last_visible_lines: Vec::new(),
+            last_inner_area: None,
+            select_anchor: None,
+            select_head: None,
+            selecting: false,
         }
     }
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
-        self.scroll_from_bottom = 0;
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -72,7 +81,6 @@ impl Chat {
             tool_name: None,
             is_streaming,
         });
-        self.scroll_from_bottom = 0;
     }
 
     pub fn update_tool(&mut self, name: &str, text: &str, is_streaming: bool) {
@@ -90,7 +98,6 @@ impl Chat {
             tool_name: Some(name.to_string()),
             is_streaming,
         });
-        self.scroll_from_bottom = 0;
     }
 
     pub fn finish_last(&mut self, role: ChatRole) {
@@ -105,8 +112,18 @@ impl Chat {
     fn format_message(&self, msg: &ChatMessage) -> Vec<Line<'static>> {
         let is_skill_invocation = msg.role == ChatRole::User && msg.text.starts_with("/skill:");
         let (prefix, role_style): (&str, Style) = match msg.role {
-            ChatRole::User if is_skill_invocation => ("◈ ", Style::default().fg(self.theme.accent)),
-            ChatRole::User => (" ", Style::default().fg(self.theme.fg)),
+            ChatRole::User if is_skill_invocation => (
+                "◈ ",
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            ChatRole::User => (
+                "",
+                Style::default()
+                    .fg(self.theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Tool => ("  ", Style::default().fg(self.theme.warning)),
             ChatRole::System => ("  ", Style::default().fg(self.theme.dim)),
@@ -133,6 +150,9 @@ impl Chat {
         };
 
         let mut lines = format_markdown(&text, role_style, &self.theme, prefix);
+        if msg.role == ChatRole::User {
+            apply_bubble_background(&mut lines, self.theme.user_bubble);
+        }
 
         if let Some(ref c) = cursor {
             if lines.is_empty() {
@@ -149,11 +169,24 @@ impl Chat {
     }
 }
 
+fn apply_bubble_background(lines: &mut [Line<'static>], bg: Color) {
+    for line in lines {
+        for span in &mut line.spans {
+            span.style = span.style.bg(bg);
+        }
+        if line.spans.is_empty() {
+            line.spans
+                .push(Span::styled(" ".to_string(), Style::default().bg(bg)));
+        }
+    }
+}
+
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let block = Block::default()
             .borders(Borders::NONE)
             .padding(Padding::horizontal(1));
+        let inner = block.inner(area);
         let mut lines: Vec<Line> = Vec::new();
         for (idx, msg) in self.messages.iter().enumerate() {
             if idx > 0 {
@@ -168,6 +201,25 @@ impl Component for Chat {
         let max_scroll = total_visual_rows.saturating_sub(viewport_height);
         self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
         let scroll_top = max_scroll.saturating_sub(self.scroll_from_bottom);
+        if let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head) {
+            let (start, end) = ordered_selection(anchor, head);
+            for visible_line_idx in start.0..=end.0 {
+                let global_line_idx = scroll_top + visible_line_idx;
+                if let Some(line) = lines.get_mut(global_line_idx) {
+                    let from = if visible_line_idx == start.0 {
+                        start.1
+                    } else {
+                        0
+                    };
+                    let to = if visible_line_idx == end.0 {
+                        end.1
+                    } else {
+                        usize::MAX
+                    };
+                    highlight_line_range(line, from, to, self.theme.highlight);
+                }
+            }
+        }
 
         let para = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
@@ -175,6 +227,29 @@ impl Component for Chat {
             .scroll((scroll_top.min(u16::MAX as usize) as u16, 0));
 
         frame.render_widget(para, area);
+
+        let rendered_lines: Vec<String> = self
+            .messages
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, msg)| {
+                let mut v = Vec::new();
+                if idx > 0 {
+                    v.push(String::new());
+                }
+                v.extend(self.format_message(msg).into_iter().map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                }));
+                v
+            })
+            .collect();
+        let start = scroll_top.min(rendered_lines.len());
+        let end = (start + inner.height as usize).min(rendered_lines.len());
+        self.last_visible_lines = rendered_lines[start..end].to_vec();
+        self.last_inner_area = Some(inner);
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -201,6 +276,44 @@ impl Component for Chat {
                 MouseEventKind::ScrollDown => {
                     self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(3)
                 }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
+                        self.select_anchor = Some(pos);
+                        self.select_head = Some(pos);
+                        self.selecting = true;
+                        if let Some(text) = self.selection_text(pos) {
+                            return Some(Action::CopySelection(text));
+                        }
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                    {
+                        self.select_head = Some(pos);
+                    }
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                        && let Some(text) = self.selection_text(pos)
+                    {
+                        return Some(Action::CopySelection(text));
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                    {
+                        self.select_head = Some(pos);
+                    }
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                        && let Some(text) = self.selection_text(pos)
+                    {
+                        self.selecting = false;
+                        return Some(Action::CopySelection(text));
+                    }
+                    self.selecting = false;
+                }
                 _ => {}
             },
             _ => {}
@@ -215,6 +328,100 @@ impl Component for Chat {
     fn focus(&mut self, focused: bool) {
         self.focused = focused;
     }
+}
+
+impl Chat {
+    fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.last_inner_area?;
+        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
+        {
+            return None;
+        }
+        let line = (row - area.y) as usize;
+        let col = (col - area.x) as usize;
+        Some((line, col))
+    }
+
+    fn selection_text(&self, head: (usize, usize)) -> Option<String> {
+        let anchor = self.select_anchor?;
+        let (start, end) = if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        };
+        if self.last_visible_lines.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for line_idx in start.0..=end.0 {
+            let line = self
+                .last_visible_lines
+                .get(line_idx)
+                .map(String::as_str)
+                .unwrap_or("");
+            let chars: Vec<char> = line.chars().collect();
+            let from = if line_idx == start.0 {
+                start.1.min(chars.len())
+            } else {
+                0
+            };
+            let to = if line_idx == end.0 {
+                end.1.min(chars.len())
+            } else {
+                chars.len()
+            };
+            if from < to {
+                out.push_str(&chars[from..to].iter().collect::<String>());
+            }
+            if line_idx != end.0 {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+fn ordered_selection(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+fn highlight_line_range(line: &mut Line<'static>, start_col: usize, end_col: usize, bg: Color) {
+    let mut col = 0usize;
+    let mut new_spans = Vec::new();
+    for span in &line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        if chars.is_empty() {
+            continue;
+        }
+        let span_start = col;
+        let span_end = col + chars.len();
+        col = span_end;
+        let sel_start = start_col.max(span_start);
+        let sel_end = end_col.min(span_end);
+        if sel_start >= sel_end {
+            new_spans.push(span.clone());
+            continue;
+        }
+        let rel_a = sel_start - span_start;
+        let rel_b = sel_end - span_start;
+        if rel_a > 0 {
+            new_spans.push(Span::styled(
+                chars[..rel_a].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+        new_spans.push(Span::styled(
+            chars[rel_a..rel_b].iter().collect::<String>(),
+            span.style.bg(bg),
+        ));
+        if rel_b < chars.len() {
+            new_spans.push(Span::styled(
+                chars[rel_b..].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+    }
+    line.spans = new_spans;
 }
 
 fn truncate_output(text: &str, max_len: usize) -> String {
@@ -503,5 +710,35 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(first.starts_with("◈ "));
+    }
+
+    #[test]
+    fn test_user_message_uses_bubble_background() {
+        let chat = Chat::new(Theme::default());
+        let lines = chat.format_message(&ChatMessage {
+            role: ChatRole::User,
+            text: "hello".into(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        let bg = lines
+            .first()
+            .and_then(|l| l.spans.first())
+            .map(|s| s.style.bg)
+            .unwrap_or(Some(Color::Reset));
+        assert_eq!(bg, Some(chat.theme.user_bubble));
+    }
+
+    #[test]
+    fn test_add_message_does_not_force_scroll_to_bottom() {
+        let mut chat = Chat::new(Theme::default());
+        chat.scroll_from_bottom = 5;
+        chat.add_message(ChatMessage {
+            role: ChatRole::Assistant,
+            text: "new content".into(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        assert_eq!(chat.scroll_from_bottom, 5);
     }
 }

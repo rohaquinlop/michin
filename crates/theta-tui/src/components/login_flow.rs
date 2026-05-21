@@ -215,6 +215,14 @@ impl LoginFlow {
         self.token_cursor += c.len_utf8();
     }
 
+    fn insert_token_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        self.token_input.insert_str(self.token_cursor, s);
+        self.token_cursor += s.len();
+    }
+
     fn token_backspace(&mut self) {
         if self.token_cursor > 0
             && let Some(prev) = self.token_input[..self.token_cursor].chars().last()
@@ -266,6 +274,12 @@ impl Component for LoginFlow {
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
+        if self.step == LoginStep::TokenInput
+            && let Event::Paste(pasted) = event
+        {
+            self.insert_token_str(pasted);
+            return None;
+        }
         let Event::Key(key) = event else {
             return None;
         };
@@ -304,7 +318,24 @@ impl Component for LoginFlow {
                 if self.step == LoginStep::TokenInput {
                     match key {
                         crossterm::event::KeyEvent {
+                            code: KeyCode::Char('v'),
+                            modifiers,
+                            ..
+                        } if modifiers.contains(KeyModifiers::CONTROL)
+                            || modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            // Paste shortcut; bracketed paste events are handled above.
+                        }
+                        crossterm::event::KeyEvent {
+                            code: KeyCode::Insert,
+                            modifiers,
+                            ..
+                        } if modifiers.contains(KeyModifiers::SHIFT) => {
+                            // Shift+Insert paste shortcut; bracketed paste events are handled above.
+                        }
+                        crossterm::event::KeyEvent {
                             code: KeyCode::Char(c),
+                            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                             ..
                         } => {
                             self.insert_token_char(*c);
@@ -440,7 +471,7 @@ impl LoginFlow {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(instruction_lines as u16),
-                Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -497,7 +528,11 @@ impl LoginFlow {
         for (i, c) in self.token_input.char_indices() {
             let at_cursor = i == self.token_cursor;
             spans.push(Span::styled(
-                c.to_string(),
+                if c == '\n' || c == '\r' {
+                    " ".to_string()
+                } else {
+                    "•".to_string()
+                },
                 if at_cursor {
                     Style::default().fg(self.theme.accent).bg(Color::DarkGray)
                 } else {

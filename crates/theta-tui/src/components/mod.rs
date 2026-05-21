@@ -43,6 +43,7 @@ pub enum Action {
     CycleTheme,
     ShowTree,
     ShowSettings,
+    CopySelection(String),
     None,
 }
 

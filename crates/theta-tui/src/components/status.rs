@@ -18,6 +18,9 @@ pub struct StatusBar {
     pub thinking: String,
     pub agent_state: String,
     pub tool_progress: String,
+    pub turn_index: u32,
+    pub show_diagnostics: bool,
+    spinner_idx: usize,
     theme: Theme,
 }
 
@@ -29,6 +32,9 @@ impl StatusBar {
             thinking: String::new(),
             agent_state: String::new(),
             tool_progress: String::new(),
+            turn_index: 0,
+            show_diagnostics: false,
+            spinner_idx: 0,
             theme,
         }
     }
@@ -44,20 +50,25 @@ impl StatusBar {
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
     }
+
+    pub fn set_turn_index(&mut self, turn_index: u32) {
+        self.turn_index = turn_index;
+    }
+
+    pub fn set_show_diagnostics(&mut self, show: bool) {
+        self.show_diagnostics = show;
+    }
 }
 
 impl Component for StatusBar {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let total_width = area.width as usize;
-        let session_id = short_middle(&self.session_id, 14);
         let model_str = short_middle(&self.model, 24);
         let thinking_str = format!(" | thinking: {}", self.thinking);
-        let session_str = format!(" | session: {session_id}");
 
         let left = vec![
             Span::styled(model_str, Style::default().fg(self.theme.accent)),
             Span::styled(thinking_str, Style::default().fg(self.theme.dim)),
-            Span::styled(session_str, Style::default().fg(self.theme.dim)),
         ];
 
         let state_color = if self.agent_state.starts_with("error")
@@ -75,10 +86,30 @@ impl Component for StatusBar {
             self.theme.success
         };
 
-        let mut right_text = if self.tool_progress.is_empty() {
-            format!("[{}]", self.agent_state)
+        let mode = mode_from_state(&self.agent_state);
+        let active = matches!(mode, "thinking" | "tool" | "retry" | "stream");
+        let spinner = if active {
+            const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+            let frame = FRAMES[self.spinner_idx % FRAMES.len()];
+            self.spinner_idx = self.spinner_idx.wrapping_add(1);
+            format!(" {frame}")
         } else {
-            format!("[{}] {}", self.agent_state, self.tool_progress)
+            String::new()
+        };
+        let step = if self.tool_progress.is_empty() {
+            "-".to_string()
+        } else {
+            self.tool_progress.clone()
+        };
+        let mut right_text = if self.show_diagnostics {
+            format!(
+                "[mode: {mode}] [step: {step}] [turn: {}]{spinner}",
+                self.turn_index
+            )
+        } else if step == "-" {
+            format!("[{mode}]{spinner}")
+        } else {
+            format!("[{mode}] {step}{spinner}")
         };
         right_text = truncate_chars(&right_text, total_width.saturating_div(2).max(12));
 
@@ -112,6 +143,22 @@ impl Component for StatusBar {
     }
 
     fn focus(&mut self, _focused: bool) {}
+}
+
+fn mode_from_state(state: &str) -> &str {
+    if state.starts_with("retrying") {
+        "retry"
+    } else if state.starts_with("tool") {
+        "tool"
+    } else if state.starts_with("thinking") {
+        "thinking"
+    } else if state.starts_with("streaming") {
+        "stream"
+    } else if state.starts_with("error") {
+        "error"
+    } else {
+        "idle"
+    }
 }
 
 fn short_middle(text: &str, max_chars: usize) -> String {

@@ -1,6 +1,6 @@
 //! Input editor — multiline text input with inline fuzzy autocomplete for @ files and / commands.
 
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -51,6 +51,14 @@ pub struct Editor {
     working_dir: PathBuf,
     /// Known slash commands for command autocomplete.
     slash_commands: Vec<String>,
+    /// Last rendered inner area for hit-testing.
+    last_inner_area: Option<Rect>,
+    /// Last visible text lines (wrapped) for selection copy.
+    last_visible_lines: Vec<String>,
+    /// Selection anchor in (line, col) within visible lines.
+    select_anchor: Option<(usize, usize)>,
+    select_head: Option<(usize, usize)>,
+    selecting: bool,
 }
 
 impl Editor {
@@ -67,6 +75,11 @@ impl Editor {
             autocomplete: None,
             working_dir,
             slash_commands,
+            last_inner_area: None,
+            last_visible_lines: Vec::new(),
+            select_anchor: None,
+            select_head: None,
+            selecting: false,
         }
     }
 
@@ -436,19 +449,24 @@ impl Component for Editor {
             .enumerate()
             .map(|(line_idx, line)| {
                 let abs_line = self.scroll + line_idx;
+                let sel = self.selection_bounds();
                 let spans: Vec<Span> = line
                     .iter()
-                    .map(|&char_idx| {
+                    .enumerate()
+                    .map(|(col_idx, &char_idx)| {
                         let c = self.text[char_idx..].chars().next().unwrap_or(' ');
                         let at_cursor = self.focused && char_idx == self.cursor;
-                        Span::styled(
-                            c.to_string(),
-                            if at_cursor {
-                                cursor_style
-                            } else {
-                                Style::default()
-                            },
-                        )
+                        let mut style = if at_cursor {
+                            cursor_style
+                        } else {
+                            Style::default()
+                        };
+                        if let Some((start, end_sel)) = sel
+                            && cell_in_selection((line_idx, col_idx), start, end_sel)
+                        {
+                            style = style.bg(self.theme.highlight);
+                        }
+                        Span::styled(c.to_string(), style)
                     })
                     .collect();
                 let mut spans = spans;
@@ -459,12 +477,66 @@ impl Component for Editor {
             })
             .collect();
 
+        let inner = block.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(Text::from(visible_lines)).block(block), area);
+        self.last_inner_area = Some(inner);
+        self.last_visible_lines = visual_lines[self.scroll..end]
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|&char_idx| self.text[char_idx..].chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect();
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
         if !self.focused {
+            return None;
+        }
+        if let Event::Mouse(mouse) = event {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row) {
+                        self.select_anchor = Some(pos);
+                        self.select_head = Some(pos);
+                        self.selecting = true;
+                        if let Some(text) = self.selection_text(pos) {
+                            return Some(Action::CopySelection(text));
+                        }
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                    {
+                        self.select_head = Some(pos);
+                    }
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                        && let Some(text) = self.selection_text(pos)
+                    {
+                        return Some(Action::CopySelection(text));
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                    {
+                        self.select_head = Some(pos);
+                    }
+                    if self.selecting
+                        && let Some(pos) = self.mouse_to_cell(mouse.column, mouse.row)
+                        && let Some(text) = self.selection_text(pos)
+                    {
+                        self.selecting = false;
+                        return Some(Action::CopySelection(text));
+                    }
+                    self.selecting = false;
+                }
+                _ => {}
+            }
             return None;
         }
         let Event::Key(key) = event else {
@@ -732,6 +804,83 @@ impl Component for Editor {
     fn focus(&mut self, focused: bool) {
         self.focused = focused;
     }
+}
+
+impl Editor {
+    fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        match (self.select_anchor, self.select_head) {
+            (Some(a), Some(b)) => {
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                Some((start, end))
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.last_inner_area?;
+        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
+        {
+            return None;
+        }
+        let line = (row - area.y) as usize;
+        let col = (col - area.x) as usize;
+        Some((line, col))
+    }
+
+    fn selection_text(&self, head: (usize, usize)) -> Option<String> {
+        let anchor = self.select_anchor?;
+        let (start, end) = if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        };
+        if self.last_visible_lines.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for line_idx in start.0..=end.0 {
+            let line = self
+                .last_visible_lines
+                .get(line_idx)
+                .map(String::as_str)
+                .unwrap_or("");
+            let chars: Vec<char> = line.chars().collect();
+            let from = if line_idx == start.0 {
+                start.1.min(chars.len())
+            } else {
+                0
+            };
+            let to = if line_idx == end.0 {
+                end.1.min(chars.len())
+            } else {
+                chars.len()
+            };
+            if from < to {
+                out.push_str(&chars[from..to].iter().collect::<String>());
+            }
+            if line_idx != end.0 {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+fn cell_in_selection(cell: (usize, usize), start: (usize, usize), end: (usize, usize)) -> bool {
+    if cell.0 < start.0 || cell.0 > end.0 {
+        return false;
+    }
+    if start.0 == end.0 {
+        return cell.1 >= start.1 && cell.1 < end.1;
+    }
+    if cell.0 == start.0 {
+        return cell.1 >= start.1;
+    }
+    if cell.0 == end.0 {
+        return cell.1 < end.1;
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

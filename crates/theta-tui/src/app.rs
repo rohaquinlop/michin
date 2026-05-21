@@ -25,6 +25,20 @@ use crate::keybinding::{Keybinding, default_bindings, resolve_event};
 use crate::terminal;
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolVerbosity {
+    Compact,
+    Full,
+}
+
+#[derive(Debug, Clone)]
+struct ToolRecord {
+    id: String,
+    name: String,
+    summary: String,
+    is_error: bool,
+}
+
 /// Commands sent from the TUI back to the interactive handler.
 #[derive(Debug, Clone)]
 pub enum TuiAction {
@@ -160,6 +174,13 @@ pub struct App {
     theme_idx: usize,
     streaming: bool,
     current_tool: Option<String>,
+    tools_in_turn: usize,
+    retries_in_turn: u32,
+    turn_index: u32,
+    turn_intent: String,
+    diag_enabled: bool,
+    tool_verbosity: ToolVerbosity,
+    last_tool_records: Vec<ToolRecord>,
     steer_queue_count: usize,
     follow_up_queue_count: usize,
     /// Active login flow (replaces chat+editor when set).
@@ -256,6 +277,13 @@ impl App {
             event_rx,
             streaming: false,
             current_tool: None,
+            tools_in_turn: 0,
+            retries_in_turn: 0,
+            turn_index: 0,
+            turn_intent: "chat".to_string(),
+            diag_enabled: false,
+            tool_verbosity: ToolVerbosity::Compact,
+            last_tool_records: Vec::new(),
             steer_queue_count: 0,
             follow_up_queue_count: 0,
             login_flow: None,
@@ -560,7 +588,12 @@ impl App {
         }
 
         if matches!(event, crossterm::event::Event::Mouse(_)) {
-            let _ = self.chat.handle_event(event);
+            if let Some(action) = self.chat.handle_event(event) {
+                self.handle_action(action);
+            }
+            if let Some(action) = self.editor.handle_event(event) {
+                self.handle_action(action);
+            }
             return;
         }
 
@@ -627,6 +660,13 @@ impl App {
             Action::CycleTheme => {
                 self.cycle_theme();
             }
+            Action::CopySelection(text) => {
+                if copy_to_clipboard(&text).is_ok() {
+                    self.status.set_tool_progress("copied selection");
+                } else {
+                    self.status.set_tool_progress("copy failed");
+                }
+            }
             _ => {}
         }
     }
@@ -675,6 +715,9 @@ impl App {
                     "  /settings       Open settings selector",
                     "  /skills         List available skills",
                     "  /model <id>     Switch model directly by id",
+                    "  /diag on|off    Toggle diagnostic event stream in chat",
+                    "  /tools compact|full  Toggle compact/full tool output",
+                    "  /expand <id|last-tool> Show full tool summary",
                     "  /skill:<name>   Invoke a skill",
                     "  /exit           Exit Theta",
                     "  /help           Show this help",
@@ -781,6 +824,101 @@ impl App {
                     });
                 }
             }
+            "diag" => match arg {
+                "on" => {
+                    self.diag_enabled = true;
+                    self.status.set_show_diagnostics(true);
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Diagnostics stream enabled.".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+                "off" => {
+                    self.diag_enabled = false;
+                    self.status.set_show_diagnostics(false);
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Diagnostics stream hidden (critical failures still shown).".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+                _ => {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Usage: /diag <on|off>".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+            },
+            "tools" => match arg {
+                "compact" => {
+                    self.tool_verbosity = ToolVerbosity::Compact;
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Tool output set to compact.".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+                "full" => {
+                    self.tool_verbosity = ToolVerbosity::Full;
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Tool output set to full.".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+                _ => {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Usage: /tools <compact|full>".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+            },
+            "expand" => {
+                let target = arg.trim();
+                if target.is_empty() {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Usage: /expand <id|last-tool>".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    return;
+                }
+                let rec = if target == "last-tool" {
+                    self.last_tool_records.last()
+                } else {
+                    self.last_tool_records.iter().find(|r| r.id == target)
+                };
+                if let Some(r) = rec {
+                    let header = if r.is_error {
+                        format!("Tool {} ({}) failed", r.name, r.id)
+                    } else {
+                        format!("Tool {} ({})", r.name, r.id)
+                    };
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: format!("{header}\n{}", r.summary),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                } else {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: format!("No tool summary found for `{target}`."),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+            }
             "fork" => {
                 let _ = self.action_tx.send(TuiAction::ForkSession);
                 self.chat.add_message(ChatMessage {
@@ -860,24 +998,29 @@ impl App {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state(&format!("tool: {name}"));
                 self.status.set_tool_progress("running...");
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::Tool,
-                    text: "running".into(),
-                    tool_name: Some(name),
-                    is_streaming: true,
-                });
+                self.tools_in_turn += 1;
+                if self.tool_verbosity == ToolVerbosity::Full {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::Tool,
+                        text: "running".into(),
+                        tool_name: Some(name),
+                        is_streaming: true,
+                    });
+                }
             }
             TuiEvent::ToolProgress { name, message } => {
                 self.status
                     .set_tool_progress(&truncate_status_text(&message, 80));
-                self.chat.update_tool(
-                    &name,
-                    &format!("\n{}", truncate_status_text(&message, 120)),
-                    true,
-                );
+                if self.tool_verbosity == ToolVerbosity::Full {
+                    self.chat.update_tool(
+                        &name,
+                        &format!("\n{}", truncate_status_text(&message, 120)),
+                        true,
+                    );
+                }
             }
             TuiEvent::ToolEnd {
-                id: _,
+                id,
                 name,
                 is_error,
                 summary,
@@ -885,30 +1028,83 @@ impl App {
                 if self.current_tool.as_deref() == Some(name.as_str()) {
                     self.current_tool = None;
                 }
+                self.last_tool_records.push(ToolRecord {
+                    id: id.clone(),
+                    name: name.clone(),
+                    summary: summary.clone(),
+                    is_error,
+                });
+                if self.last_tool_records.len() > 100 {
+                    let drop_n = self.last_tool_records.len() - 100;
+                    self.last_tool_records.drain(0..drop_n);
+                }
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
                     self.status.set_tool_progress("failed");
-                    self.chat
-                        .update_tool(&name, &format!("\nfailed\n{summary}"), false);
+                    if self.tool_verbosity == ToolVerbosity::Full {
+                        self.chat
+                            .update_tool(&name, &format!("\nfailed\n{summary}"), false);
+                    } else {
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::Tool,
+                            text: format!("[tool:{name}] failed: {}", compact_summary(&summary)),
+                            tool_name: Some(name),
+                            is_streaming: false,
+                        });
+                    }
                 } else {
                     self.status.set_agent_state("streaming (post-tool)");
                     self.status.set_tool_progress(&format!("{name} done"));
-                    let suffix = if summary.is_empty() {
-                        "\ndone".to_string()
+                    if self.tool_verbosity == ToolVerbosity::Full {
+                        let suffix = if summary.is_empty() {
+                            "\ndone".to_string()
+                        } else {
+                            format!("\ndone\n{summary}")
+                        };
+                        self.chat.update_tool(&name, &suffix, false);
                     } else {
-                        format!("\ndone\n{summary}")
-                    };
-                    self.chat.update_tool(&name, &suffix, false);
+                        self.chat.add_message(ChatMessage {
+                            role: ChatRole::Tool,
+                            text: format!("[tool:{name}] {}", compact_summary(&summary)),
+                            tool_name: Some(name),
+                            is_streaming: false,
+                        });
+                    }
                 }
             }
             TuiEvent::TurnStart => {
                 self.streaming = true;
+                self.turn_index += 1;
+                self.tools_in_turn = 0;
+                self.retries_in_turn = 0;
+                self.turn_intent = "chat".to_string();
+                self.status.set_turn_index(self.turn_index);
                 self.status.set_agent_state("streaming (starting)");
                 self.status.set_tool_progress("");
             }
             TuiEvent::TurnEnd { stop_reason } => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.streaming = false;
+                let turn_result = if stop_reason == "error" {
+                    "failed"
+                } else {
+                    "success"
+                };
+                if self.diag_enabled {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: format!(
+                            "Turn #{} · intent: {} · tools: {} · retries: {} · result: {}",
+                            self.turn_index,
+                            self.turn_intent,
+                            self.tools_in_turn,
+                            self.retries_in_turn,
+                            turn_result
+                        ),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
                 self.status
                     .set_agent_state(&format!("idle (stopped: {stop_reason})"));
                 self.status.set_tool_progress("");
@@ -924,8 +1120,20 @@ impl App {
                 }
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
+                self.retries_in_turn = self.retries_in_turn.max(attempt);
                 self.status
                     .set_agent_state(&format!("retrying (attempt {attempt}) in {delay_ms}ms..."));
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: format!(
+                        "Retrying {} ({}/1): {}",
+                        self.turn_intent,
+                        attempt,
+                        retry_reason_hint(&self.turn_intent)
+                    ),
+                    tool_name: None,
+                    is_streaming: false,
+                });
             }
             TuiEvent::SessionPicker(sessions) => {
                 self.session_picker = Some(SessionPicker::new(sessions, self.theme.clone()));
@@ -948,14 +1156,29 @@ impl App {
                 self.status.set_agent_state("idle");
             }
             TuiEvent::Info(msg) => {
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::System,
-                    text: msg,
-                    tool_name: None,
-                    is_streaming: false,
-                });
+                if self.diag_enabled || !is_diagnostic_message(&msg) {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: msg,
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
             }
             TuiEvent::Error(msg) => {
+                self.turn_intent = infer_intent_from_error(&msg).to_string();
+                if !self.diag_enabled
+                    && let Some(card) = normalize_failure_card(&msg)
+                {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: card,
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    self.status.set_agent_state("error");
+                    return;
+                }
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!("Error: {msg}"),
@@ -999,6 +1222,69 @@ impl App {
     }
 }
 
+fn compact_summary(summary: &str) -> String {
+    let first = summary.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    truncate_status_text(first.trim(), 100)
+}
+
+fn is_diagnostic_message(msg: &str) -> bool {
+    msg.contains("produced no")
+        || msg.contains("retrying same turn")
+        || msg.contains("validation")
+        || msg.contains("tool calls detected")
+}
+
+fn infer_intent_from_error(msg: &str) -> &'static str {
+    if msg.contains("inspection") {
+        "inspection"
+    } else if msg.contains("git turn") || msg.contains("git tool") {
+        "git"
+    } else if msg.contains("validation") {
+        "validation"
+    } else if msg.contains("action turn") {
+        "action"
+    } else {
+        "chat"
+    }
+}
+
+fn retry_reason_hint(intent: &str) -> &'static str {
+    match intent {
+        "inspection" => "no inspection tool call",
+        "git" => "no git tool call",
+        "validation" => "validation command not run",
+        "action" => "no action tool call",
+        _ => "missing tool call",
+    }
+}
+
+fn normalize_failure_card(msg: &str) -> Option<String> {
+    if msg.contains("inspection turn produced no inspection tool calls") {
+        return Some(
+            "Execution gap: assistant produced no inspection tool calls.\nAction: auto-retry triggered."
+                .to_string(),
+        );
+    }
+    if msg.contains("git turn produced no git tool calls") {
+        return Some(
+            "Execution gap: assistant produced no git tool calls.\nAction: auto-retry triggered."
+                .to_string(),
+        );
+    }
+    if msg.contains("empty assistant response") {
+        return Some(
+            "Execution gap: assistant returned empty response.\nAction: auto-retry triggered."
+                .to_string(),
+        );
+    }
+    if msg.contains("assistant produced no text and no tool calls after retries") {
+        return Some(
+            "Execution failed: assistant produced no text or tool calls after retries.".to_string(),
+        );
+    }
+    None
+}
+
 fn truncate_status_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -1007,4 +1293,60 @@ fn truncate_status_text(text: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        let mut child = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+
+    // OSC52 fallback for terminals that support clipboard escape sequences.
+    let b64 = base64_encode(text.as_bytes());
+    print!("\x1b]52;c;{}\x07", b64);
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    match bytes.len() - i {
+        1 => {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
