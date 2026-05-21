@@ -1184,14 +1184,30 @@ mod tests {
         };
         let ctx = Context {
             system: None,
-            messages: vec![Message::ToolResult {
-                tool_call_id: "call_1".into(),
-                tool_name: "read".into(),
-                content: vec![ContentBlock::text("ok")],
-                details: None,
-                is_error: false,
-                timestamp: 1,
-            }],
+            messages: vec![
+                Message::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path":"Cargo.toml"}),
+                    }],
+                    api: Some(crate::types::Api::OpenAiCompletions),
+                    provider: Some(crate::types::Provider::OpenAI),
+                    model: Some("gpt-5.5".into()),
+                    usage: None,
+                    stop_reason: Some(StopReason::ToolUse),
+                    error_message: None,
+                    timestamp: 1,
+                },
+                Message::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "read".into(),
+                    content: vec![ContentBlock::text("ok")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 2,
+                },
+            ],
             tools: vec![],
             thinking_level: None,
         };
@@ -1230,5 +1246,64 @@ mod tests {
         let mut body_off = json!({});
         apply_thinking_params(&mut body_off, &model, crate::types::ThinkingLevel::Off);
         assert_eq!(body_off["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn test_deepseek_request_body_drops_orphan_tool_result_from_aborted_turn() {
+        let model = Model {
+            id: "deepseek-v4-pro".into(),
+            name: "DeepSeek".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::DeepSeek,
+            base_url: "https://api.deepseek.com".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 1_000_000,
+            max_tokens: 384_000,
+            compat: crate::model::ModelCompat::for_deepseek(),
+        };
+        let ctx = Context {
+            system: None,
+            messages: vec![
+                Message::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path":"Cargo.toml"}),
+                    }],
+                    api: Some(crate::types::Api::OpenAiCompletions),
+                    provider: Some(crate::types::Provider::DeepSeek),
+                    model: Some("deepseek-v4-pro".into()),
+                    usage: None,
+                    stop_reason: Some(StopReason::Aborted),
+                    error_message: Some("aborted".into()),
+                    timestamp: 1,
+                },
+                Message::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "read".into(),
+                    content: vec![ContentBlock::text("ok")],
+                    details: None,
+                    is_error: false,
+                    timestamp: 2,
+                },
+                Message::User {
+                    content: vec![ContentBlock::text("continue")],
+                    timestamp: 3,
+                },
+            ],
+            tools: vec![],
+            thinking_level: None,
+        };
+        let body = build_request_body(&model, &ctx, &StreamOptions::default(), true).unwrap();
+        let messages = body["messages"].as_array().expect("messages array");
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool")),
+            "orphan tool messages must not be replayed"
+        );
     }
 }

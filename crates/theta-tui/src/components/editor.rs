@@ -188,7 +188,7 @@ impl Editor {
     fn move_word_right(&mut self) {
         while self.cursor < self.text.len() {
             if let Some(next) = self.text[self.cursor..].chars().next() {
-                if !next.is_whitespace() {
+                if next.is_whitespace() {
                     self.move_right();
                 } else {
                     break;
@@ -197,7 +197,7 @@ impl Editor {
         }
         while self.cursor < self.text.len() {
             if let Some(next) = self.text[self.cursor..].chars().next() {
-                if next.is_whitespace() {
+                if !next.is_whitespace() {
                     self.move_right();
                 } else {
                     break;
@@ -495,6 +495,12 @@ impl Component for Editor {
         if !self.focused {
             return None;
         }
+        if let Event::Paste(pasted) = event {
+            self.text.insert_str(self.cursor, pasted);
+            self.cursor += pasted.len();
+            self.refresh_slash_autocomplete();
+            return None;
+        }
         if let Event::Mouse(mouse) = event {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -673,6 +679,13 @@ impl Component for Editor {
                 }
             }
             crossterm::event::KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::SHIFT,
+                ..
+            } => {
+                self.insert_char('\n');
+            }
+            crossterm::event::KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -727,6 +740,34 @@ impl Component for Editor {
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Left,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.move_start();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Right,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.move_end();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.move_word_left();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.move_word_right();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Left,
                 ..
             } => {
                 self.move_left();
@@ -736,6 +777,20 @@ impl Component for Editor {
                 ..
             } => {
                 self.move_right();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Up,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.move_start();
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.move_end();
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Up,
@@ -1071,6 +1126,7 @@ fn cursor_visual_line(text: &str, cursor: usize, width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         let root =
@@ -1140,6 +1196,149 @@ mod tests {
         let matches = file_mention_matches(&root, "");
 
         assert_eq!(matches, vec!["visible.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_handles_paste_event() {
+        let root = temp_root("paste");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+
+        editor.handle_event(&Event::Paste("hello\nworld".to_string()));
+
+        assert_eq!(editor.text(), "hello\nworld");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_moves_to_end_with_super_down() {
+        let root = temp_root("super-down");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("abcdef");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::SUPER,
+        )));
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(editor.text(), "abcdef!");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_moves_to_start_with_super_up() {
+        let root = temp_root("super-up");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("abcdef");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SUPER)));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(editor.text(), "!abcdef");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_moves_with_super_plus_shift_arrows() {
+        let root = temp_root("super-shift-arrows");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("abcdef");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(editor.text(), "abcdef!");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('^'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(editor.text(), "^abcdef!");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_moves_word_left_with_alt_left() {
+        let root = temp_root("alt-left");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("alpha beta");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(editor.text(), "alpha !beta");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_moves_word_right_with_alt_right() {
+        let root = temp_root("alt-right");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("alpha beta");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::ALT,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('!'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(editor.text(), "alpha! beta");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn editor_inserts_newline_with_shift_enter() {
+        let root = temp_root("shift-enter");
+        let mut editor = Editor::new(Theme::default(), root.clone(), vec![]);
+        editor.focus(true);
+        editor.set_text("hello");
+
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+        editor.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(editor.text(), "hello\nw");
         let _ = std::fs::remove_dir_all(root);
     }
 }

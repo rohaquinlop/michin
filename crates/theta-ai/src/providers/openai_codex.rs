@@ -507,6 +507,11 @@ fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             arguments,
                         } => {
                             let (call_id, item_id) = split_tool_call_id(id);
+                            let item_id = if item_id.is_empty() {
+                                "item_0"
+                            } else {
+                                item_id
+                            };
                             let args_str =
                                 serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
                             items.push(serde_json::json!({
@@ -560,6 +565,13 @@ fn split_tool_call_id(id: &str) -> (&str, &str) {
     } else {
         (id, "")
     }
+}
+
+fn stable_tool_call_id(call_id: &str, item_id: &str) -> String {
+    if !call_id.is_empty() || !item_id.is_empty() {
+        return format!("{call_id}|{item_id}");
+    }
+    "tool_call_0".to_string()
 }
 
 fn convert_tools(tools: &[Tool]) -> Vec<Value> {
@@ -649,7 +661,7 @@ impl CodexEventParser {
                         let name = item["name"].as_str().unwrap_or("unknown");
                         let call_id = item["call_id"].as_str().unwrap_or("");
                         let item_id = item["id"].as_str().unwrap_or("");
-                        let full_id = format!("{call_id}|{item_id}");
+                        let full_id = stable_tool_call_id(call_id, item_id);
                         if !call_id.is_empty() {
                             self.tool_call_ids
                                 .insert(call_id.to_string(), full_id.clone());
@@ -727,7 +739,7 @@ impl CodexEventParser {
                     .tool_call_ids
                     .get(call_id)
                     .cloned()
-                    .unwrap_or_else(|| format!("{call_id}|{item_id}"));
+                    .unwrap_or_else(|| stable_tool_call_id(call_id, item_id));
                 if self.tool_call_ended.insert(full_id.clone()) {
                     out.push(AssistantMessageEvent::ToolCallEnd { id: full_id });
                 }
@@ -746,11 +758,7 @@ impl CodexEventParser {
                         let name = item["name"].as_str().unwrap_or("unknown");
                         let call_id = item["call_id"].as_str().unwrap_or("");
                         let item_id = item["id"].as_str().unwrap_or("");
-                        let full_id = if !call_id.is_empty() || !item_id.is_empty() {
-                            format!("{call_id}|{item_id}")
-                        } else {
-                            "tool_call_0".to_string()
-                        };
+                        let full_id = stable_tool_call_id(call_id, item_id);
                         if !call_id.is_empty() {
                             self.tool_call_ids
                                 .insert(call_id.to_string(), full_id.clone());
@@ -794,11 +802,7 @@ impl CodexEventParser {
                             .unwrap_or("unknown");
                         let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
                         let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        let full_id = if !call_id.is_empty() || !item_id.is_empty() {
-                            format!("{call_id}|{item_id}")
-                        } else {
-                            "tool_call_0".to_string()
-                        };
+                        let full_id = stable_tool_call_id(call_id, item_id);
                         if !call_id.is_empty() {
                             self.tool_call_ids
                                 .insert(call_id.to_string(), full_id.clone());
@@ -997,6 +1001,54 @@ mod tests {
         assert_eq!(split_tool_call_id("a|b"), ("a", "b"));
         assert_eq!(split_tool_call_id("abc"), ("abc", ""));
         assert_eq!(split_tool_call_id("a|b|c"), ("a", "b|c"));
+    }
+
+    #[test]
+    fn test_stable_tool_call_id_fallbacks() {
+        assert_eq!(stable_tool_call_id("", ""), "tool_call_0");
+        assert_eq!(stable_tool_call_id("call_1", ""), "call_1|");
+    }
+
+    #[test]
+    fn test_convert_messages_uses_non_empty_item_id_for_tool_call() {
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "Codex".into(),
+            api: crate::types::Api::OpenAiCodexResponses,
+            provider: crate::types::Provider::OpenAiCodex,
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let ctx = crate::types::Context {
+            system: None,
+            messages: vec![crate::types::Message::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_abc".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"Cargo.toml"}),
+                }],
+                api: Some(crate::types::Api::OpenAiCodexResponses),
+                provider: Some(crate::types::Provider::OpenAiCodex),
+                model: Some("gpt-5.5".into()),
+                usage: None,
+                stop_reason: Some(StopReason::ToolUse),
+                error_message: None,
+                timestamp: 1,
+            }],
+            tools: vec![],
+            thinking_level: None,
+        };
+
+        let out = convert_messages(&model, &ctx);
+        assert_eq!(out[0]["type"], "function_call");
+        assert_eq!(out[0]["id"], "item_0");
+        assert_eq!(out[0]["call_id"], "call_abc");
     }
 
     #[test]

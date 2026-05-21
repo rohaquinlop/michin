@@ -22,9 +22,13 @@ impl ReplaySanitizationStats {
 }
 
 fn normalize_tool_call_id_for_model(id: &str, model: &Model) -> String {
+    if id.is_empty() {
+        return "tool_call_0".to_string();
+    }
+
     if id.contains('|') {
         let call_id = id.split('|').next().unwrap_or(id);
-        return call_id
+        let normalized: String = call_id
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -35,6 +39,10 @@ fn normalize_tool_call_id_for_model(id: &str, model: &Model) -> String {
             })
             .take(40)
             .collect();
+        if normalized.is_empty() {
+            return "tool_call_0".to_string();
+        }
+        return normalized;
     }
 
     if model.provider == crate::Provider::OpenAI && id.len() > 40 {
@@ -202,8 +210,13 @@ pub fn sanitize_messages_for_replay(
                 out.push(msg);
             }
             Message::ToolResult { tool_call_id, .. } => {
-                existing_results.insert(tool_call_id.clone());
-                out.push(msg);
+                if pending_tool_calls
+                    .iter()
+                    .any(|(id, _, _)| id == tool_call_id)
+                {
+                    existing_results.insert(tool_call_id.clone());
+                    out.push(msg);
+                }
             }
             Message::User { .. } => {
                 flush_pending_tool_calls(
@@ -224,4 +237,81 @@ pub fn sanitize_messages_for_replay(
         &mut stats,
     );
     (out, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Api, Modality, Model, ModelCompat, Provider};
+    use serde_json::json;
+
+    fn openai_model() -> Model {
+        Model {
+            id: "gpt-5.5".into(),
+            name: "OpenAI".into(),
+            api: Api::OpenAiCompletions,
+            provider: Provider::OpenAI,
+            base_url: "https://api.openai.com".into(),
+            reasoning: false,
+            thinking_level_map: Default::default(),
+            input: vec![Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: ModelCompat::for_openai(),
+        }
+    }
+
+    #[test]
+    fn normalize_pipe_only_tool_call_id_becomes_non_empty() {
+        let model = openai_model();
+        assert_eq!(normalize_tool_call_id_for_model("|", &model), "tool_call_0");
+    }
+
+    #[test]
+    fn normalize_pipe_only_tool_call_id_becomes_non_empty_for_deepseek() {
+        let mut model = openai_model();
+        model.provider = Provider::DeepSeek;
+        assert_eq!(normalize_tool_call_id_for_model("|", &model), "tool_call_0");
+    }
+
+    #[test]
+    fn drops_orphan_tool_result_without_preceding_tool_call() {
+        let model = openai_model();
+        let messages = vec![
+            Message::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                }],
+                api: Some(Api::OpenAiCompletions),
+                provider: Some(Provider::OpenAI),
+                model: Some("gpt-5.5".into()),
+                usage: None,
+                stop_reason: Some(StopReason::Error),
+                error_message: Some("error".into()),
+                timestamp: 1,
+            },
+            Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentBlock::text("done")],
+                details: None,
+                is_error: false,
+                timestamp: 2,
+            },
+            Message::User {
+                content: vec![ContentBlock::text("continue")],
+                timestamp: 3,
+            },
+        ];
+
+        let (out, stats) = sanitize_messages_for_replay(&messages, &model);
+        assert_eq!(stats.dropped_assistant_messages, 1);
+        assert!(
+            !out.iter().any(|m| matches!(m, Message::ToolResult { .. })),
+            "orphan tool result should be dropped when parent assistant tool call is removed"
+        );
+    }
 }
