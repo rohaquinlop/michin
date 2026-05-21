@@ -74,6 +74,7 @@ impl ModelCompat {
             requires_reasoning_content_on_assistant: true,
             supports_usage_in_streaming: true,
             requires_assistant_after_tool_result: true,
+            max_tokens_field: Some(MaxTokensField::MaxTokens),
             ..Default::default()
         }
     }
@@ -82,6 +83,9 @@ impl ModelCompat {
         Self {
             thinking_format: Some(ThinkingFormat::OpenAI),
             supports_usage_in_streaming: true,
+            // OpenCode endpoints are OpenAI-compatible adapters and commonly
+            // expect the classic `max_tokens` field.
+            max_tokens_field: Some(MaxTokensField::MaxTokens),
             ..Default::default()
         }
     }
@@ -214,5 +218,15 @@ mod tests {
         assert!(!m.requires_reasoning_on_replay());
         m.compat = ModelCompat::for_deepseek();
         assert!(m.requires_reasoning_on_replay());
+    }
+
+    #[test]
+    fn test_max_tokens_field_for_non_openai_compat() {
+        let mut m = test_model();
+        m.compat = ModelCompat::for_deepseek();
+        assert_eq!(m.max_tokens_field_name(), "max_tokens");
+
+        m.compat = ModelCompat::for_opencode();
+        assert_eq!(m.max_tokens_field_name(), "max_tokens");
     }
 }

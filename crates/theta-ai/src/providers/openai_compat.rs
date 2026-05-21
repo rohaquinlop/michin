@@ -276,6 +276,13 @@ pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::type
                     "type": "enabled",
                     "reasoning_effort": s,
                 });
+            } else if level != crate::types::ThinkingLevel::Off {
+                // DeepSeek currently supports reasoning effort values `high`
+                // and `max`; degrade unsupported non-off levels to `high`.
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "reasoning_effort": "high",
+                });
             } else {
                 // Explicitly disable thinking
                 body["thinking"] = json!({"type": "disabled"});
@@ -545,7 +552,6 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
         events.push(AssistantMessageEvent::Usage {
             usage: parse_usage(usage),
         });
-        return events;
     }
 
     let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) else {
@@ -585,15 +591,14 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                 });
 
             let state = &mut parser.tool_calls[state_idx];
-            if let Some(id) = id
+            if !state.emitted_start
+                && let Some(id) = id
                 && !id.is_empty()
             {
                 state.id = id.to_string();
             }
-            if state.id.is_empty() {
-                state.id = format!("tool_call_{index}");
-            }
-            if let Some(name) = name
+            if !state.emitted_start
+                && let Some(name) = name
                 && !name.is_empty()
             {
                 state.name = name.to_string();
@@ -653,6 +658,9 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
     if let Some(reason) = finish_reason {
         if reason == "tool_calls" {
             for state in &mut parser.tool_calls {
+                if state.id.is_empty() {
+                    state.id = format!("tool_call_{}", state.index);
+                }
                 if !state.emitted_start && !state.id.is_empty() {
                     state.emitted_start = true;
                     events.push(AssistantMessageEvent::ToolCallStart {
@@ -689,9 +697,20 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                 stop_reason: StopReason::Length,
                 usage: None,
             });
+        } else if reason == "content_filter" || reason == "insufficient_system_resource" {
+            events.push(AssistantMessageEvent::Done {
+                stop_reason: StopReason::Error,
+                usage: None,
+            });
         } else if reason == "stop" {
             events.push(AssistantMessageEvent::Done {
                 stop_reason: StopReason::Stop,
+                usage: None,
+            });
+        } else if reason == "function_call" {
+            // Backward-compat finish reason used by some OpenAI-compatible providers.
+            events.push(AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
                 usage: None,
             });
         }
@@ -908,6 +927,62 @@ mod tests {
             }
             other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_tool_call_id_is_stable_when_id_arrives_late() {
+        let mut parser = OpenAiCompatStreamParser::new();
+
+        let chunks = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{\"path\""}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_real","function":{"arguments":":\"Cargo.toml\"}"}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#,
+        ];
+
+        let events: Vec<AssistantMessageEvent> = chunks
+            .iter()
+            .flat_map(|chunk| parser.parse_data(chunk))
+            .collect();
+
+        let start_ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::ToolCallStart { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let end_ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::ToolCallEnd { id } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(start_ids, vec!["call_real".to_string()]);
+        assert_eq!(end_ids, vec!["call_real".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_usage_and_done_same_chunk() {
+        let mut parser = OpenAiCompatStreamParser::new();
+        let chunk = r#"{
+            "choices":[{"delta":{"content":""},"finish_reason":"stop","index":0}],
+            "usage":{"prompt_tokens":10,"completion_tokens":2}
+        }"#;
+        let events = parser.parse_data(chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::Usage { .. }))
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1129,5 +1204,31 @@ mod tests {
                 .unwrap_or_default(),
             0
         );
+    }
+
+    #[test]
+    fn test_deepseek_non_off_thinking_falls_back_to_high() {
+        let model = Model {
+            id: "deepseek-v4-pro".into(),
+            name: "DeepSeek".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::DeepSeek,
+            base_url: "https://api.deepseek.com".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 1_000_000,
+            max_tokens: 384_000,
+            compat: crate::model::ModelCompat::for_deepseek(),
+        };
+        let mut body = json!({});
+        apply_thinking_params(&mut body, &model, crate::types::ThinkingLevel::Medium);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["reasoning_effort"], "high");
+
+        let mut body_off = json!({});
+        apply_thinking_params(&mut body_off, &model, crate::types::ThinkingLevel::Off);
+        assert_eq!(body_off["thinking"]["type"], "disabled");
     }
 }
