@@ -501,6 +501,34 @@ struct OpenAiToolCallState {
     emitted_end: bool,
 }
 
+fn upsert_tool_call_state_by_id_or_index(
+    parser: &mut OpenAiCompatStreamParser,
+    index: usize,
+    id: Option<&str>,
+) -> usize {
+    if let Some(non_empty_id) = id.filter(|v| !v.is_empty())
+        && let Some(existing_idx) = parser
+            .tool_calls
+            .iter()
+            .position(|tc| !tc.id.is_empty() && tc.id == non_empty_id)
+    {
+        parser.tool_calls[existing_idx].index = index;
+        return existing_idx;
+    }
+
+    parser
+        .tool_calls
+        .iter()
+        .position(|tc| tc.index == index)
+        .unwrap_or_else(|| {
+            parser.tool_calls.push(OpenAiToolCallState {
+                index,
+                ..Default::default()
+            });
+            parser.tool_calls.len() - 1
+        })
+}
+
 impl OpenAiCompatStreamParser {
     fn new() -> Self {
         Self::default()
@@ -578,17 +606,7 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                 .and_then(|f| f.get("name"))
                 .and_then(|n| n.as_str());
 
-            let state_idx = parser
-                .tool_calls
-                .iter()
-                .position(|tc| tc.index == index)
-                .unwrap_or_else(|| {
-                    parser.tool_calls.push(OpenAiToolCallState {
-                        index,
-                        ..Default::default()
-                    });
-                    parser.tool_calls.len() - 1
-                });
+            let state_idx = upsert_tool_call_state_by_id_or_index(parser, index, id);
 
             let state = &mut parser.tool_calls[state_idx];
             if !state.emitted_start
@@ -634,6 +652,62 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
         }
     }
 
+    // Legacy function_call delta (older OpenAI-compatible providers).
+    if let Some(function_call) = delta.and_then(|d| d.get("function_call")) {
+        let id = choice
+            .get("message")
+            .and_then(|m| m.get("tool_call_id"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                choice
+                    .get("message")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| choice.get("id").and_then(|v| v.as_str()));
+        let state_idx = upsert_tool_call_state_by_id_or_index(parser, 0, id);
+        let state = &mut parser.tool_calls[state_idx];
+
+        if !state.emitted_start
+            && let Some(id) = id
+            && !id.is_empty()
+        {
+            state.id = id.to_string();
+        }
+        if !state.emitted_start
+            && let Some(name) = function_call.get("name").and_then(|n| n.as_str())
+            && !name.is_empty()
+        {
+            state.name = name.to_string();
+        }
+
+        if !state.emitted_start && !state.id.is_empty() && !state.name.is_empty() {
+            state.emitted_start = true;
+            events.push(AssistantMessageEvent::ToolCallStart {
+                id: state.id.clone(),
+                name: state.name.clone(),
+            });
+            if !state.arguments.is_empty() {
+                events.push(AssistantMessageEvent::ToolCallDelta {
+                    id: state.id.clone(),
+                    arguments: state.arguments.clone(),
+                });
+            }
+        }
+
+        if let Some(args) = function_call.get("arguments").and_then(|a| a.as_str())
+            && !args.is_empty()
+        {
+            state.arguments.push_str(args);
+            if state.emitted_start {
+                events.push(AssistantMessageEvent::ToolCallDelta {
+                    id: state.id.clone(),
+                    arguments: args.to_string(),
+                });
+            }
+        }
+    }
+
     // Reasoning/thinking content (DeepSeek and o-series)
     if let Some(reasoning) = delta.and_then(|d| d.get("reasoning_content"))
         && let Some(text) = reasoning.as_str()
@@ -656,7 +730,7 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
 
     // Handle finish reason
     if let Some(reason) = finish_reason {
-        if reason == "tool_calls" {
+        if reason == "tool_calls" || reason == "function_call" {
             for state in &mut parser.tool_calls {
                 if state.id.is_empty() {
                     state.id = format!("tool_call_{}", state.index);
@@ -1305,5 +1379,66 @@ mod tests {
                 .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool")),
             "orphan tool messages must not be replayed"
         );
+    }
+
+    #[test]
+    fn test_parse_legacy_function_call_stream_to_tool_call() {
+        let mut parser = OpenAiCompatStreamParser::new();
+        let mut accumulator = EventAccumulator::new();
+        let chunks = [
+            r#"{"choices":[{"delta":{"function_call":{"name":"read","arguments":"{\"path\""}},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"function_call":{"arguments":":\"Cargo.toml\"}"}},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"function_call","index":0}]}"#,
+        ];
+
+        let events: Vec<AssistantMessageEvent> = chunks
+            .iter()
+            .flat_map(|chunk| parser.parse_data(chunk))
+            .collect();
+
+        for event in &events {
+            accumulator.feed(event);
+        }
+
+        let blocks = accumulator.content_blocks();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolCall {
+                id: _,
+                name,
+                arguments,
+            } => {
+                assert_eq!(name, "read");
+                assert_eq!(arguments["path"], "Cargo.toml");
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        assert_eq!(accumulator.stop_reason(), Some(StopReason::ToolUse));
+    }
+
+    #[test]
+    fn test_parse_mixed_function_call_and_tool_calls_yields_single_call() {
+        let mut parser = OpenAiCompatStreamParser::new();
+        let mut accumulator = EventAccumulator::new();
+        let chunks = [
+            r#"{"choices":[{"delta":{"function_call":{"name":"read","arguments":"{\"path\""}},"index":0}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_real","type":"function","function":{"arguments":":\"Cargo.toml\"}"}}]},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}]}"#,
+        ];
+
+        let events: Vec<AssistantMessageEvent> = chunks
+            .iter()
+            .flat_map(|chunk| parser.parse_data(chunk))
+            .collect();
+
+        for event in &events {
+            accumulator.feed(event);
+        }
+        let blocks = accumulator.content_blocks();
+        let tool_calls: Vec<&ContentBlock> = blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::ToolCall { .. }))
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
     }
 }

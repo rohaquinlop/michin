@@ -753,9 +753,14 @@ fn is_inspection_tool_call(tc: &ToolCall) -> bool {
                     let c = cmd.to_lowercase();
                     c.contains("git status")
                         || c.contains("git diff")
+                        || c.contains("git show")
                         || c.contains("cat ")
                         || c.contains("ls ")
                         || c.contains("rg ")
+                        || c.contains("sed ")
+                        || c.contains("head ")
+                        || c.contains("tail ")
+                        || c.contains("wc ")
                 }))
 }
 
@@ -780,8 +785,14 @@ fn is_validation_tool_call(tc: &ToolCall) -> bool {
                     || c.contains("cargo check")
                     || c.contains("cargo clippy")
                     || c.contains("cargo fmt")
+                    || c.contains("cargo nextest")
                     || c.contains("npm test")
+                    || c.contains("npm run test")
+                    || c.contains("pnpm test")
+                    || c.contains("pnpm run test")
+                    || c.contains("yarn test")
                     || c.contains("pytest")
+                    || c.contains("uv run pytest")
                     || c.contains("go test")
             })
 }
@@ -1276,5 +1287,36 @@ mod tests {
     fn token_sequence_matching_requires_boundaries() {
         let tokens = tokenize_words("providers openai_compat");
         assert!(!contains_token_sequence(&tokens, &["pr"]));
+    }
+
+    #[test]
+    fn inspection_tool_call_detects_common_read_only_bash_commands() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"sed -n '1,20p' Cargo.toml && git show HEAD~1"}),
+        };
+        assert!(is_inspection_tool_call(&tc));
+    }
+
+    #[test]
+    fn validation_tool_call_detects_common_variants() {
+        let cases = [
+            "cargo nextest run",
+            "npm run test",
+            "pnpm test",
+            "uv run pytest -q",
+        ];
+        for cmd in cases {
+            let tc = ToolCall {
+                id: "1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": cmd}),
+            };
+            assert!(
+                is_validation_tool_call(&tc),
+                "expected validation for {cmd}"
+            );
+        }
     }
 }

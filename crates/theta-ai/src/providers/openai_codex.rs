@@ -229,7 +229,11 @@ async fn ws_stream(
         req_builder = req_builder.header("chatgpt-account-id", account_id);
     }
 
-    let req = req_builder.body(()).unwrap();
+    let req = req_builder.body(()).map_err(|e| ThetaError::ApiError {
+        status: 500,
+        message: format!("WebSocket request build failed: {e}"),
+        retry_after_ms: None,
+    })?;
 
     let connect = tokio_tungstenite::connect_async(req);
     let (ws_stream, _) = if let Some(timeout_ms) = timeout_ms {
@@ -407,6 +411,9 @@ fn build_request_body(model: &Model, context: &Context, options: &StreamOptions)
 
     if !sanitized_context.tools.is_empty() {
         body["tools"] = serde_json::json!(convert_tools(&sanitized_context.tools));
+    }
+    if let Some(max_tokens) = options.max_tokens {
+        body["max_output_tokens"] = serde_json::json!(max_tokens);
     }
     if let Some(temp) = options.temperature {
         body["temperature"] = serde_json::json!(temp);
@@ -621,6 +628,13 @@ impl CodexEventParser {
     fn parse_sse_line(&mut self, line: &str) -> Vec<AssistantMessageEvent> {
         let line = line.trim();
         if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                return Vec::new();
+            }
+            return self.parse_json_str(data);
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            let data = data.trim_start();
             if data == "[DONE]" {
                 return Vec::new();
             }
@@ -1373,5 +1387,51 @@ mod tests {
             "response": { "output": [] }
         }));
         assert!(parser.done_emitted());
+    }
+
+    #[test]
+    fn test_parse_sse_line_accepts_data_without_space() {
+        let mut parser = CodexEventParser::default();
+        let events = parser.parse_sse_line(
+            r#"data:{"type":"response.output_text.delta","item_id":"m1","delta":"hello"}"#,
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AssistantMessageEvent::TextDelta { text } if text == "hello"
+        )));
+    }
+
+    #[test]
+    fn test_build_request_body_sets_max_output_tokens_when_configured() {
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "Codex".into(),
+            api: crate::types::Api::OpenAiCodexResponses,
+            provider: crate::types::Provider::OpenAiCodex,
+            base_url: "https://chatgpt.com/backend-api".into(),
+            reasoning: true,
+            thinking_level_map: Default::default(),
+            input: vec![crate::types::Modality::Text],
+            cost: Default::default(),
+            context_window: 128_000,
+            max_tokens: 16_384,
+            compat: crate::model::ModelCompat::for_openai(),
+        };
+        let body = build_request_body(
+            &model,
+            &crate::types::Context::default(),
+            &StreamOptions {
+                max_tokens: Some(1234),
+                ..Default::default()
+            },
+        );
+        assert_eq!(body["max_output_tokens"], 1234);
+    }
+
+    #[tokio::test]
+    async fn test_ws_stream_invalid_url_returns_error_not_panic() {
+        let body = serde_json::json!({"model":"gpt-5.5","stream":true});
+        let result = ws_stream("://bad-url", &body, "", "token", Some(1)).await;
+        assert!(result.is_err());
     }
 }
