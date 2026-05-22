@@ -33,6 +33,10 @@ pub struct ThetaSettings {
     /// Show thinking by default in UI.
     #[serde(default = "default_show_thinking")]
     pub show_thinking: bool,
+
+    /// Tool progress update frequency in Hz.
+    #[serde(default = "default_tool_progress_hz")]
+    pub tool_progress_hz: u64,
 }
 
 fn default_steering_mode() -> String {
@@ -51,6 +55,10 @@ const fn default_show_thinking() -> bool {
     true
 }
 
+const fn default_tool_progress_hz() -> u64 {
+    20
+}
+
 impl Default for ThetaSettings {
     fn default() -> Self {
         Self {
@@ -60,6 +68,7 @@ impl Default for ThetaSettings {
             follow_up_mode: default_follow_up_mode(),
             transport_preference: default_transport_preference(),
             show_thinking: default_show_thinking(),
+            tool_progress_hz: default_tool_progress_hz(),
         }
     }
 }

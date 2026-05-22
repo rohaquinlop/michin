@@ -136,6 +136,7 @@ pub struct SettingsPayload {
     pub follow_up_mode: String,
     pub transport_preference: String,
     pub show_thinking: bool,
+    pub tool_progress_hz: u64,
 }
 
 /// Which view is currently active.
@@ -164,7 +165,7 @@ pub struct App {
     /// Send structured actions back to the interactive handler.
     pub action_tx: mpsc::UnboundedSender<TuiAction>,
     /// Receive TUI events from the agent.
-    pub event_rx: mpsc::UnboundedReceiver<TuiEvent>,
+    pub event_rx: mpsc::Receiver<TuiEvent>,
     #[allow(dead_code)]
     theme: Theme,
     theme_idx: usize,
@@ -182,6 +183,8 @@ pub struct App {
     show_thinking: bool,
     steering_mode: String,
     follow_up_mode: String,
+    tool_progress_hz: u64,
+    last_tool_progress_at: Option<std::time::Instant>,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
 }
@@ -227,7 +230,7 @@ impl App {
         models: Vec<ModelEntry>,
         commands: Vec<CommandEntry>,
         working_dir: std::path::PathBuf,
-        event_rx: mpsc::UnboundedReceiver<TuiEvent>,
+        event_rx: mpsc::Receiver<TuiEvent>,
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
     ) -> Self {
@@ -279,6 +282,8 @@ impl App {
             show_thinking: settings.show_thinking,
             steering_mode: settings.steering_mode,
             follow_up_mode: settings.follow_up_mode,
+            tool_progress_hz: settings.tool_progress_hz.max(1),
+            last_tool_progress_at: None,
             login_flow: None,
         }
     }
@@ -311,6 +316,16 @@ impl App {
                 }
                 Some(event) = self.event_rx.recv() => {
                     self.handle_agent_event(event);
+                    for _ in 0..63 {
+                        match self.event_rx.try_recv() {
+                            Ok(next) => self.handle_agent_event(next),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                self.running = false;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -702,6 +717,7 @@ impl App {
                     "  /model <id>     Switch model directly by id",
                     "  /diag on|off    Toggle diagnostic event stream in chat",
                     "  /tools compact|full  Toggle compact/full tool output",
+                    "  /tools-rate <hz> Set tool progress update rate (1-60)",
                     "  /expand <id|last-tool> Show full tool summary",
                     "  /skill:<name>   Invoke a skill",
                     "  /exit           Exit Theta",
@@ -751,7 +767,7 @@ impl App {
                 }
             }
             "clear" => {
-                self.chat.messages.clear();
+                self.chat.clear_messages();
             }
             "session" | "s" => {
                 let info = format!(
@@ -901,6 +917,34 @@ impl App {
                     });
                 }
             }
+            "tools-rate" => {
+                let parsed = arg.trim().parse::<u64>().ok();
+                let Some(hz) = parsed else {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Usage: /tools-rate <1-60>".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    return;
+                };
+                if !(1..=60).contains(&hz) {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Usage: /tools-rate <1-60>".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                    return;
+                }
+                self.tool_progress_hz = hz;
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: format!("Tool progress rate set to {hz} Hz."),
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
             "fork" => {
                 let _ = self.action_tx.send(TuiAction::ForkSession);
                 self.chat.add_message(ChatMessage {
@@ -994,6 +1038,14 @@ impl App {
                 }
             }
             TuiEvent::ToolProgress { name, message } => {
+                let interval =
+                    std::time::Duration::from_millis(1000 / self.tool_progress_hz.max(1));
+                if let Some(last) = self.last_tool_progress_at
+                    && last.elapsed() < interval
+                {
+                    return;
+                }
+                self.last_tool_progress_at = Some(std::time::Instant::now());
                 self.status
                     .set_tool_progress(&truncate_status_text(&message, 80));
                 if self.tool_verbosity == ToolVerbosity::Full {
@@ -1137,6 +1189,7 @@ impl App {
                         msg.is_streaming = false;
                     }
                 }
+                self.chat.invalidate_render_cache();
                 self.streaming = false;
                 self.current_tool = None;
                 self.status.set_tool_progress("");
@@ -1169,7 +1222,7 @@ impl App {
                 self.status.set_agent_state("error");
             }
             TuiEvent::LoadHistory(entries) => {
-                self.chat.messages.clear();
+                self.chat.clear_messages();
                 for entry in entries {
                     if entry.role == "thinking" && !self.show_thinking {
                         continue;

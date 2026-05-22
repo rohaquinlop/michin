@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Padding, Paragraph},
 };
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
@@ -16,7 +17,7 @@ use syntect::{
     parsing::SyntaxSet,
     util::LinesWithEndings,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::components::{Action, Component};
 use crate::theme::Theme;
@@ -51,6 +52,12 @@ pub struct Chat {
     select_anchor: Option<(usize, usize)>,
     select_head: Option<(usize, usize)>,
     selecting: bool,
+    active_tool_message_idx: HashMap<String, usize>,
+    cached_inner_width: Option<usize>,
+    cached_wrapped_lines: Vec<Line<'static>>,
+    cached_visible_line_texts: Vec<String>,
+    cached_message_count: usize,
+    cache_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +67,33 @@ struct VisibleLine {
 }
 
 impl Chat {
+    /// Benchmark helper: simulate old no-cache path by formatting and wrapping
+    /// the whole transcript every call. Returns wrapped line count.
+    pub fn benchmark_full_rebuild_no_cache(&self, inner_width: usize) -> usize {
+        let mut lines: Vec<Line> = Vec::new();
+        for msg in &self.messages {
+            lines.extend(self.format_message(msg, inner_width));
+        }
+        wrap_styled_lines(&lines, inner_width).len()
+    }
+
+    /// Benchmark helper: rebuild internal cache if needed and return wrapped line count.
+    pub fn benchmark_cached_rebuild(&mut self, inner_width: usize) -> usize {
+        self.rebuild_render_cache(inner_width);
+        self.cached_wrapped_lines.len()
+    }
+
+    pub fn invalidate_render_cache(&mut self) {
+        self.cache_dirty = true;
+    }
+
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.active_tool_message_idx.clear();
+        self.cached_message_count = 0;
+        self.cache_dirty = true;
+    }
+
     pub fn new(theme: Theme) -> Self {
         Self {
             messages: Vec::new(),
@@ -72,15 +106,33 @@ impl Chat {
             select_anchor: None,
             select_head: None,
             selecting: false,
+            active_tool_message_idx: HashMap::new(),
+            cached_inner_width: None,
+            cached_wrapped_lines: Vec::new(),
+            cached_visible_line_texts: Vec::new(),
+            cached_message_count: 0,
+            cache_dirty: true,
         }
     }
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
+        if let Some(tool_name) = self.messages.last().and_then(|m| {
+            if m.role == ChatRole::Tool && m.is_streaming {
+                m.tool_name.clone()
+            } else {
+                None
+            }
+        }) {
+            self.active_tool_message_idx
+                .insert(tool_name, self.messages.len() - 1);
+        }
+        self.cache_dirty = true;
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+        self.cache_dirty = true;
     }
 
     pub fn update_last(&mut self, text: &str, role: ChatRole, is_streaming: bool) {
@@ -90,6 +142,7 @@ impl Chat {
         {
             last.text.push_str(text);
             last.is_streaming = is_streaming;
+            self.cache_dirty = true;
             return;
         }
         self.messages.push(ChatMessage {
@@ -98,23 +151,36 @@ impl Chat {
             tool_name: None,
             is_streaming,
         });
+        self.cache_dirty = true;
     }
 
     pub fn update_tool(&mut self, name: &str, text: &str, is_streaming: bool) {
-        if let Some(msg) = self.messages.iter_mut().rev().find(|msg| {
-            msg.role == ChatRole::Tool && msg.tool_name.as_deref() == Some(name) && msg.is_streaming
-        }) {
+        if let Some(&idx) = self.active_tool_message_idx.get(name)
+            && let Some(msg) = self.messages.get_mut(idx)
+            && msg.role == ChatRole::Tool
+            && msg.tool_name.as_deref() == Some(name)
+            && msg.is_streaming
+        {
             msg.text.push_str(text);
             msg.is_streaming = is_streaming;
+            if !is_streaming {
+                self.active_tool_message_idx.remove(name);
+            }
+            self.cache_dirty = true;
             return;
         }
 
+        let idx = self.messages.len();
         self.messages.push(ChatMessage {
             role: ChatRole::Tool,
             text: text.trim_start_matches('\n').to_string(),
             tool_name: Some(name.to_string()),
             is_streaming,
         });
+        if is_streaming {
+            self.active_tool_message_idx.insert(name.to_string(), idx);
+        }
+        self.cache_dirty = true;
     }
 
     pub fn finish_last(&mut self, role: ChatRole) {
@@ -122,6 +188,12 @@ impl Chat {
             && last.role == role
         {
             last.is_streaming = false;
+            if role == ChatRole::Tool
+                && let Some(name) = last.tool_name.as_deref()
+            {
+                self.active_tool_message_idx.remove(name);
+            }
+            self.cache_dirty = true;
         }
     }
 
@@ -273,19 +345,16 @@ fn wrap_user_bubble(
 
 impl Component for Chat {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
+        let render_start = std::time::Instant::now();
         let block = Block::default()
             .borders(Borders::NONE)
             .padding(Padding::horizontal(1));
         let inner = block.inner(area);
         let inner_width = area.width.saturating_sub(2) as usize;
-        let mut lines: Vec<Line> = Vec::new();
-        for msg in &self.messages {
-            lines.extend(self.format_message(msg, inner_width));
-        }
-        let wrapped_lines = wrap_styled_lines(&lines, inner_width);
+        self.rebuild_render_cache(inner_width);
 
         let viewport_height = area.height as usize;
-        let total_visual_rows = wrapped_lines.len();
+        let total_visual_rows = self.cached_wrapped_lines.len();
         let max_scroll = total_visual_rows.saturating_sub(viewport_height);
         if self.auto_follow_tail {
             self.scroll_top = max_scroll;
@@ -293,7 +362,8 @@ impl Component for Chat {
         self.clamp_scroll_to_bounds(max_scroll);
         let scroll_top = self.scroll_top;
 
-        let mut visible = wrapped_lines
+        let mut visible = self
+            .cached_wrapped_lines
             .iter()
             .skip(scroll_top)
             .take(inner.height as usize)
@@ -302,7 +372,10 @@ impl Component for Chat {
 
         if let (Some(anchor), Some(head)) = (self.select_anchor, self.select_head) {
             let (start, end) = ordered_selection(anchor, head);
-            for visible_line_idx in start.0..=end.0 {
+            let visible_last = visible.len().saturating_sub(1);
+            let from_line = start.0.min(visible_last);
+            let to_line = end.0.min(visible_last);
+            for visible_line_idx in from_line..=to_line {
                 if let Some(line) = visible.get_mut(visible_line_idx) {
                     let from = if visible_line_idx == start.0 {
                         start.1
@@ -325,28 +398,21 @@ impl Component for Chat {
 
         frame.render_widget(para, area);
 
-        let rendered_lines: Vec<VisibleLine> = self
-            .messages
+        let start = scroll_top.min(self.cached_visible_line_texts.len());
+        let end = (start + inner.height as usize).min(self.cached_visible_line_texts.len());
+        self.last_visible_lines = self.cached_visible_line_texts[start..end]
             .iter()
-            .flat_map(|msg| {
-                self.format_message(msg, inner_width).into_iter().map(|l| {
-                    let txt = l
-                        .spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect::<String>();
-                    VisibleLine {
-                        url_ranges: extract_url_ranges(&txt),
-                        text: txt,
-                    }
-                })
+            .map(|text| VisibleLine {
+                text: text.clone(),
+                url_ranges: extract_url_ranges(text),
             })
             .collect();
-        let visual_lines = wrap_visible_lines(&rendered_lines, inner_width);
-        let start = scroll_top.min(visual_lines.len());
-        let end = (start + inner.height as usize).min(visual_lines.len());
-        self.last_visible_lines = visual_lines[start..end].to_vec();
         self.last_inner_area = Some(inner);
+        tracing::debug!(
+            elapsed_ms = render_start.elapsed().as_millis(),
+            visible_lines = self.last_visible_lines.len(),
+            "chat render"
+        );
     }
 
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
@@ -446,6 +512,54 @@ impl Component for Chat {
 }
 
 impl Chat {
+    fn rebuild_render_cache(&mut self, inner_width: usize) {
+        if !self.cache_dirty && self.cached_inner_width == Some(inner_width) {
+            return;
+        }
+        let rebuild_start = std::time::Instant::now();
+        if self.cached_inner_width == Some(inner_width)
+            && self.messages.len() == self.cached_message_count + 1
+            && inner_width > 0
+            && let Some(msg) = self.messages.last()
+        {
+            let lines = self.format_message(msg, inner_width);
+            for line in wrap_styled_lines(&lines, inner_width) {
+                self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_wrapped_lines.push(line);
+            }
+            self.cached_message_count = self.messages.len();
+            self.cache_dirty = false;
+            tracing::debug!(
+                elapsed_ms = rebuild_start.elapsed().as_millis(),
+                wrapped_lines = self.cached_wrapped_lines.len(),
+                "chat cache incremental append"
+            );
+            return;
+        }
+        self.cached_inner_width = Some(inner_width);
+        self.cached_wrapped_lines.clear();
+        self.cached_visible_line_texts.clear();
+        if inner_width == 0 {
+            self.cache_dirty = false;
+            return;
+        }
+
+        for msg in &self.messages {
+            let lines = self.format_message(msg, inner_width);
+            for line in wrap_styled_lines(&lines, inner_width) {
+                self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_wrapped_lines.push(line);
+            }
+        }
+        self.cached_message_count = self.messages.len();
+        self.cache_dirty = false;
+        tracing::debug!(
+            elapsed_ms = rebuild_start.elapsed().as_millis(),
+            wrapped_lines = self.cached_wrapped_lines.len(),
+            "chat cache rebuild"
+        );
+    }
+
     fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
         let area = self.last_inner_area?;
         if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
@@ -608,7 +722,7 @@ fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>
         for span in &line.spans {
             let mut buf = String::new();
             for ch in span.content.chars() {
-                let ch_w = UnicodeWidthStr::width(ch.to_string().as_str()).max(1);
+                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
                 if current_width + ch_w > width && (current_width > 0 || !buf.is_empty()) {
                     if !buf.is_empty() {
                         current_spans.push(Span::styled(std::mem::take(&mut buf), span.style));
@@ -628,37 +742,11 @@ fn wrap_styled_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>
     out
 }
 
-fn wrap_visible_lines(lines: &[VisibleLine], width: usize) -> Vec<VisibleLine> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for line in lines {
-        if line.text.is_empty() {
-            out.push(VisibleLine {
-                text: String::new(),
-                url_ranges: Vec::new(),
-            });
-            continue;
-        }
-        let mut chunk = String::new();
-        for ch in line.text.chars() {
-            chunk.push(ch);
-            if UnicodeWidthStr::width(chunk.as_str()) >= width {
-                out.push(VisibleLine {
-                    url_ranges: extract_url_ranges(&chunk),
-                    text: std::mem::take(&mut chunk),
-                });
-            }
-        }
-        if !chunk.is_empty() {
-            out.push(VisibleLine {
-                url_ranges: extract_url_ranges(&chunk),
-                text: chunk,
-            });
-        }
-    }
-    out
+fn line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>()
 }
 
 fn extract_url_ranges(text: &str) -> Vec<(usize, usize, String)> {
@@ -1471,5 +1559,27 @@ mod tests {
 |     | aces_that_must_wrap      |
 | B   | short                    |";
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    #[ignore = "perf characterization; run manually"]
+    fn perf_large_history_render_cache() {
+        let mut chat = Chat::new(Theme::default());
+        for i in 0..2500 {
+            chat.add_message(ChatMessage {
+                role: if i % 2 == 0 {
+                    ChatRole::User
+                } else {
+                    ChatRole::Assistant
+                },
+                text: format!("message {i} {}", "x".repeat(120)),
+                tool_name: None,
+                is_streaming: false,
+            });
+        }
+        let start = std::time::Instant::now();
+        chat.rebuild_render_cache(120);
+        let elapsed = start.elapsed();
+        assert!(elapsed.as_secs() < 10);
     }
 }

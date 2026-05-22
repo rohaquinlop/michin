@@ -15,6 +15,7 @@ use theta_tui::components::CommandEntry;
 use theta_tui::components::{ModelEntry, SessionInfo, known_providers};
 use theta_tui::theme::Theme;
 use tokio::sync::{RwLock, mpsc};
+use tokio::time::{self, MissedTickBehavior};
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
@@ -82,7 +83,8 @@ pub async fn run_tui(
     let has_auth = api_key.is_some();
 
     // Create channels between TUI and agent bridge.
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (event_tx_raw, mut event_rx_raw) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel(1024);
     let (message_tx, mut message_rx) = mpsc::unbounded_channel::<String>();
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
@@ -104,7 +106,7 @@ pub async fn run_tui(
     // Always spawn the action handler first (handles login + agent init).
     // ------------------------------------------------------------------
     let action_agent_cell = agent_cell.clone();
-    let action_event_tx = event_tx.clone();
+    let action_event_tx = event_tx_raw.clone();
     let action_session_id_cell = session_id_cell.clone();
     let action_working_dir = working_dir.to_path_buf();
     let action_model_id = model_id.clone();
@@ -137,7 +139,12 @@ pub async fn run_tui(
         let agent = create_agent(&model, key, config, working_dir, &model_id, thinking).await?;
         let agent = Arc::new(agent);
         *agent_cell.write().await = Some(agent.clone());
-        spawn_event_bridge(agent, event_tx.clone());
+        let persisted = crate::settings::load_settings().await;
+        spawn_event_bridge(
+            agent,
+            event_tx_raw.clone(),
+            persisted.tool_progress_hz.max(1),
+        );
 
         // Persist the model + thinking for the next session.
         let mut s = crate::settings::load_settings().await;
@@ -152,7 +159,7 @@ pub async fn run_tui(
     // Spawn message handler — waits for agent, creates session lazily.
     // ------------------------------------------------------------------
     let msg_agent_cell = agent_cell.clone();
-    let msg_event_tx = event_tx.clone();
+    let msg_event_tx = event_tx_raw.clone();
     let msg_working_dir = working_dir.to_path_buf();
     let msg_session_id_cell = session_id_cell.clone();
     let msg_model_id = model_id.to_string();
@@ -291,6 +298,7 @@ pub async fn run_tui(
             follow_up_mode: persisted.follow_up_mode,
             transport_preference: persisted.transport_preference,
             show_thinking: persisted.show_thinking,
+            tool_progress_hz: persisted.tool_progress_hz,
         },
         model_entries,
         commands,
@@ -315,6 +323,34 @@ pub async fn run_tui(
     if let Some(prompt) = initial_prompt {
         app.send_initial_message(prompt.to_string());
     }
+
+    // Bounded backpressure bridge: preserve non-progress events; coalesce progress events.
+    tokio::spawn(async move {
+        let mut pending_progress: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        while let Some(event) = event_rx_raw.recv().await {
+            match event {
+                TuiEvent::ToolProgress { name, message } => {
+                    pending_progress.insert(name, message);
+                }
+                evt => {
+                    if !pending_progress.is_empty() {
+                        let pending = pending_progress.len();
+                        for (name, message) in pending_progress.drain() {
+                            let _ = event_tx.try_send(TuiEvent::ToolProgress { name, message });
+                        }
+                        tracing::debug!(
+                            pending_count = pending,
+                            "forwarded coalesced tui tool progress"
+                        );
+                    }
+                    if event_tx.try_send(evt).is_err() {
+                        tracing::debug!("dropping tui event due to full bounded queue");
+                    }
+                }
+            }
+        }
+    });
 
     app.run().await?;
 
@@ -348,125 +384,159 @@ async fn create_agent(
     let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking)).await;
     agent.set_system_prompt(system_blocks).await;
 
+    // Load script hooks from ~/.theta/extensions/*.rhai and ./.theta/extensions/*.rhai.
+    if let Some(hooks) = crate::scripts::load_script_hooks(working_dir).await {
+        agent.set_hooks(hooks);
+    }
+
     Ok(agent)
 }
 
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
-fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>) {
+fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, hz: u64) {
     tokio::spawn(async move {
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut pending_tool_progress: HashMap<String, String> = HashMap::new();
         let mut saw_assistant_text_delta = false;
         let mut saw_thinking_delta = false;
+        let interval_ms = (1000 / hz.max(1)).max(1);
+        let mut progress_tick = time::interval(std::time::Duration::from_millis(interval_ms));
+        progress_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            match events.recv().await {
-                Ok(AgentEvent::MessageStart) => {
-                    saw_assistant_text_delta = false;
-                    saw_thinking_delta = false;
-                }
-                Ok(AgentEvent::TextDelta { text }) => {
-                    saw_assistant_text_delta = true;
-                    let _ = event_tx.send(TuiEvent::TextDelta(text));
-                }
-                Ok(AgentEvent::ThinkingDelta { thinking }) => {
-                    saw_thinking_delta = true;
-                    let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
-                }
-                Ok(AgentEvent::ToolCallStart { .. }) => {}
-                Ok(AgentEvent::ToolExecutionStart {
-                    tool_call_id: id,
-                    tool_name: name,
-                }) => {
-                    tool_names.insert(id.clone(), name.clone());
-                    let _ = event_tx.send(TuiEvent::ToolStart { name, id });
-                }
-                Ok(AgentEvent::ToolExecutionProgress {
-                    tool_call_id: id,
-                    output,
-                }) => {
-                    let _ = event_tx.send(TuiEvent::ToolProgress {
-                        name: tool_names.get(&id).cloned().unwrap_or(id),
-                        message: output,
-                    });
-                }
-                Ok(AgentEvent::ToolExecutionEnd { result }) => {
-                    let summary = format_tool_summary(&result, 2200);
-                    tool_names.remove(&result.tool_call_id);
-                    let _ = event_tx.send(TuiEvent::ToolEnd {
-                        id: result.tool_call_id,
-                        name: result.tool_name,
-                        is_error: result.is_error,
-                        summary,
-                    });
-                }
-                Ok(AgentEvent::MessageEnd { message }) => {
-                    if let theta_ai::Message::Assistant { content, .. } = message {
-                        if !saw_assistant_text_delta {
-                            let final_text = content
-                                .iter()
-                                .filter_map(|b| match b {
-                                    theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !final_text.is_empty() {
-                                let _ = event_tx.send(TuiEvent::TextDelta(final_text));
-                            }
+            tokio::select! {
+                _ = progress_tick.tick() => {
+                    if !pending_tool_progress.is_empty() {
+                        let pending = pending_tool_progress.len();
+                        let tick_start = std::time::Instant::now();
+                        for (id, message) in pending_tool_progress.drain() {
+                            let _ = event_tx.send(TuiEvent::ToolProgress {
+                                name: tool_names.get(&id).cloned().unwrap_or(id),
+                                message,
+                            });
                         }
-                        if !saw_thinking_delta {
-                            let final_thinking = content
-                                .iter()
-                                .filter_map(|b| match b {
-                                    theta_ai::ContentBlock::Thinking { thinking, .. } => {
-                                        Some(thinking.as_str())
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !final_thinking.is_empty() {
-                                let _ = event_tx.send(TuiEvent::ThinkingDelta(final_thinking));
-                            }
-                        }
+                        tracing::debug!(
+                            pending_count = pending,
+                            elapsed_ms = tick_start.elapsed().as_millis(),
+                            "flushed coalesced tool progress events"
+                        );
                     }
-                    saw_assistant_text_delta = false;
-                    saw_thinking_delta = false;
                 }
-                Ok(AgentEvent::TurnStart { .. }) => {
-                    let _ = event_tx.send(TuiEvent::TurnStart);
+                received = events.recv() => match received {
+                    Ok(AgentEvent::MessageStart) => {
+                        saw_assistant_text_delta = false;
+                        saw_thinking_delta = false;
+                    }
+                    Ok(AgentEvent::TextDelta { text }) => {
+                        saw_assistant_text_delta = true;
+                        let _ = event_tx.send(TuiEvent::TextDelta(text));
+                    }
+                    Ok(AgentEvent::ThinkingDelta { thinking }) => {
+                        saw_thinking_delta = true;
+                        let _ = event_tx.send(TuiEvent::ThinkingDelta(thinking));
+                    }
+                    Ok(AgentEvent::ToolCallStart { .. }) => {}
+                    Ok(AgentEvent::ToolExecutionStart {
+                        tool_call_id: id,
+                        tool_name: name,
+                    }) => {
+                        tool_names.insert(id.clone(), name.clone());
+                        let _ = event_tx.send(TuiEvent::ToolStart { name, id });
+                    }
+                    Ok(AgentEvent::ToolExecutionProgress {
+                        tool_call_id: id,
+                        output,
+                    }) => {
+                        pending_tool_progress.insert(id, output);
+                    }
+                    Ok(AgentEvent::ToolExecutionEnd { result }) => {
+                        if let Some(message) = pending_tool_progress.remove(&result.tool_call_id) {
+                            let _ = event_tx.send(TuiEvent::ToolProgress {
+                                name: tool_names
+                                    .get(&result.tool_call_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| result.tool_call_id.clone()),
+                                message,
+                            });
+                        }
+                        let summary = format_tool_summary(&result, 2200);
+                        tool_names.remove(&result.tool_call_id);
+                        let _ = event_tx.send(TuiEvent::ToolEnd {
+                            id: result.tool_call_id,
+                            name: result.tool_name,
+                            is_error: result.is_error,
+                            summary,
+                        });
+                    }
+                    Ok(AgentEvent::MessageEnd { message }) => {
+                        if let theta_ai::Message::Assistant { content, .. } = message {
+                            if !saw_assistant_text_delta {
+                                let final_text = content
+                                    .iter()
+                                    .filter_map(|b| match b {
+                                        theta_ai::ContentBlock::Text { text } => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if !final_text.is_empty() {
+                                    let _ = event_tx.send(TuiEvent::TextDelta(final_text));
+                                }
+                            }
+                            if !saw_thinking_delta {
+                                let final_thinking = content
+                                    .iter()
+                                    .filter_map(|b| match b {
+                                        theta_ai::ContentBlock::Thinking { thinking, .. } => {
+                                            Some(thinking.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if !final_thinking.is_empty() {
+                                    let _ = event_tx.send(TuiEvent::ThinkingDelta(final_thinking));
+                                }
+                            }
+                        }
+                        saw_assistant_text_delta = false;
+                        saw_thinking_delta = false;
+                    }
+                    Ok(AgentEvent::TurnStart { .. }) => {
+                        let _ = event_tx.send(TuiEvent::TurnStart);
+                    }
+                    Ok(AgentEvent::TurnEnd { .. }) => {
+                        let _ = event_tx.send(TuiEvent::TurnEnd {
+                            stop_reason: "stop".into(),
+                        });
+                    }
+                    Ok(AgentEvent::AgentEnd { .. }) => {
+                        let _ = event_tx.send(TuiEvent::AgentEnd);
+                    }
+                    Ok(AgentEvent::ContextCompacted { trimmed_count, .. }) => {
+                        let _ = event_tx.send(TuiEvent::ContextCompacted { trimmed_count });
+                    }
+                    Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
+                        let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
+                    }
+                    Ok(AgentEvent::ReplaySanitized {
+                        dropped_assistant_messages,
+                        synthesized_tool_results,
+                        normalized_tool_call_ids,
+                    }) => {
+                        let _ = event_tx.send(TuiEvent::Info(format!(
+                            "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}"
+                        )));
+                    }
+                    Ok(AgentEvent::Error { message }) => {
+                        let _ = event_tx.send(TuiEvent::Error(message));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = event_tx.send(TuiEvent::Error(format!("lagged by {n} events")));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
                 }
-                Ok(AgentEvent::TurnEnd { .. }) => {
-                    let _ = event_tx.send(TuiEvent::TurnEnd {
-                        stop_reason: "stop".into(),
-                    });
-                }
-                Ok(AgentEvent::AgentEnd { .. }) => {
-                    let _ = event_tx.send(TuiEvent::AgentEnd);
-                }
-                Ok(AgentEvent::ContextCompacted { trimmed_count, .. }) => {
-                    let _ = event_tx.send(TuiEvent::ContextCompacted { trimmed_count });
-                }
-                Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
-                    let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
-                }
-                Ok(AgentEvent::ReplaySanitized {
-                    dropped_assistant_messages,
-                    synthesized_tool_results,
-                    normalized_tool_call_ids,
-                }) => {
-                    let _ = event_tx.send(TuiEvent::Info(format!(
-                        "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}"
-                    )));
-                }
-                Ok(AgentEvent::Error { message }) => {
-                    let _ = event_tx.send(TuiEvent::Error(message));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    let _ = event_tx.send(TuiEvent::Error(format!("lagged by {n} events")));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                _ => {}
             }
         }
     });
@@ -546,7 +616,9 @@ async fn handle_tui_action(
                                 {
                                     Ok(agent) => {
                                         let agent = Arc::new(agent);
-                                        spawn_event_bridge(agent.clone(), event_tx.clone());
+                                        let hz =
+                                            crate::settings::load_settings().await.tool_progress_hz;
+                                        spawn_event_bridge(agent.clone(), event_tx.clone(), hz);
                                         *agent_cell.write().await = Some(agent);
                                         let _ = event_tx.send(TuiEvent::Info(
                                             "Connected to ChatGPT Plus. Ready.".into(),
@@ -603,7 +675,8 @@ async fn handle_tui_action(
                         {
                             Ok(agent) => {
                                 let agent = Arc::new(agent);
-                                spawn_event_bridge(agent.clone(), event_tx.clone());
+                                let hz = crate::settings::load_settings().await.tool_progress_hz;
+                                spawn_event_bridge(agent.clone(), event_tx.clone(), hz);
                                 *agent_cell.write().await = Some(agent);
                                 let _ = event_tx.send(TuiEvent::Info(format!(
                                     "Connected to {provider}. Ready."
