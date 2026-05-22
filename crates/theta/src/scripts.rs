@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use theta_agent_core::hooks::Hooks;
 use theta_script::{ScriptEngine, ScriptHooks, ScriptLoader};
+use tokio::sync::Notify;
 
 /// A discovered script with metadata for prompt display.
 #[derive(Debug, Clone)]
@@ -60,7 +61,10 @@ pub fn build_extensions_prompt_block(scripts: &[DiscoveredScript]) -> Option<Str
 
 /// Load scripts from disk and build a hooks implementation.
 /// Returns `None` if no scripts found (avoids overhead of empty engine).
-pub async fn load_script_hooks(working_dir: &Path) -> Option<Arc<dyn Hooks>> {
+pub async fn load_script_hooks(
+    working_dir: &Path,
+    status_notify: Arc<Notify>,
+) -> Option<Arc<dyn Hooks>> {
     let loader = ScriptLoader::discover(working_dir).await;
 
     if loader.is_empty() {
@@ -93,7 +97,7 @@ pub async fn load_script_hooks(working_dir: &Path) -> Option<Arc<dyn Hooks>> {
         if errors > 0 {
             tracing::warn!(errors, "some scripts failed to load, using partial hooks");
         }
-        let hooks = ScriptHooks::new(engine);
+        let hooks = ScriptHooks::new(engine, status_notify);
         Some(Arc::new(hooks))
     }
 }

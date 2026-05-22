@@ -113,6 +113,10 @@ pub enum TuiEvent {
     LoadHistory(Vec<HistoryEntry>),
     /// Refresh available models (e.g. after login).
     UpdateModels(Vec<ModelEntry>),
+    /// Active model was switched successfully.
+    ModelSwitched {
+        model: String,
+    },
     QueueStatus {
         steer: usize,
         follow_up: usize,
@@ -121,6 +125,18 @@ pub enum TuiEvent {
         sessions: Vec<SessionInfo>,
         filter: String,
     },
+    /// Extension status line update from Rhai scripts.
+    ExtensionStatus(ExtensionStatusPayload),
+}
+
+/// Structured status-bar data from extensions (Rhai scripts).
+#[derive(Debug, Clone)]
+pub struct ExtensionStatusPayload {
+    /// Lines by row index (0 = primary row, the one rendered at bottom).
+    pub rows: Vec<crate::components::status::StatusRow>,
+    /// Number of rows from tui.row() callbacks that need their own visual row
+    /// (excludes status lines merged into row 0).
+    pub extension_row_count: usize,
 }
 
 /// A historical message entry for session resume.
@@ -350,9 +366,10 @@ impl App {
         if self.mode == AppMode::SessionPicker
             && let Some(ref mut picker) = self.session_picker
         {
+            let status_h = self.status.desired_height();
             let main = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(8)])
+                .constraints([Constraint::Length(status_h), Constraint::Min(8)])
                 .split(area);
             self.status.render(main[0], frame);
             picker.render(main[1], frame);
@@ -360,9 +377,10 @@ impl App {
         }
 
         if let Some(ref mut login) = self.login_flow {
+            let status_h = self.status.desired_height();
             let main = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(8)])
+                .constraints([Constraint::Length(status_h), Constraint::Min(8)])
                 .split(area);
             self.status.render(main[0], frame);
             login.render(main[1], frame);
@@ -370,12 +388,13 @@ impl App {
         }
 
         let editor_height = self.editor.desired_height(area.width as usize, 6);
+        let status_height = self.status.desired_height();
         let main = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
                 Constraint::Length(editor_height),
-                Constraint::Length(1),
+                Constraint::Length(status_height),
             ])
             .split(area);
 
@@ -1250,6 +1269,9 @@ impl App {
             TuiEvent::UpdateModels(models) => {
                 self.model_selector.set_models(models);
             }
+            TuiEvent::ModelSwitched { model } => {
+                self.status.model = model;
+            }
             TuiEvent::QueueStatus { steer, follow_up } => {
                 self.steer_queue_count = steer;
                 self.follow_up_queue_count = follow_up;
@@ -1258,6 +1280,11 @@ impl App {
                 self.tree_selector
                     .set_sessions(sessions, TreeFilter::parse(&filter));
                 self.mode = AppMode::TreePicker;
+            }
+            TuiEvent::ExtensionStatus(payload) => {
+                self.status.set_extension_rows(payload.rows);
+                self.status
+                    .set_extension_row_count(payload.extension_row_count);
             }
         }
     }

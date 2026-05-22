@@ -58,7 +58,7 @@ macro_rules! check_abort {
 pub async fn run_prompt_loop(
     state: &mut AgentState,
     provider: &dyn LlmProvider,
-    hooks: &dyn Hooks,
+    hooks: &Arc<dyn Hooks>,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
     abort_token: Option<CancellationToken>,
@@ -91,7 +91,7 @@ pub async fn run_prompt_loop(
 async fn run_outer_loop(
     state: &mut AgentState,
     provider: &dyn LlmProvider,
-    hooks: &dyn Hooks,
+    hooks: &Arc<dyn Hooks>,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
     abort_token: Option<CancellationToken>,
@@ -147,7 +147,7 @@ async fn run_outer_loop(
 async fn run_single_turn(
     state: &mut AgentState,
     provider: &dyn LlmProvider,
-    hooks: &dyn Hooks,
+    hooks: &Arc<dyn Hooks>,
     config: &AgentLoopConfig,
     event_tx: &broadcast::Sender<AgentEvent>,
     turn_index: u32,
@@ -496,7 +496,7 @@ async fn run_single_turn(
                     }
                 }
 
-                tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx)
+                tools::execute_tool_calls(state, &tool_calls, abort_token.clone(), event_tx, hooks)
                     .await?;
                 executed_tools_in_turn = true;
                 if tool_calls.iter().any(is_inspection_tool_call) {

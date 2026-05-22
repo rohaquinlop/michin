@@ -8,19 +8,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use theta_agent_core::hooks::Hooks;
 use theta_agent_core::state::AgentState;
-use theta_agent_core::types::{ToolCall, ToolResult};
+use theta_agent_core::types::{ExtensionStatusRow, ToolCall, ToolResult};
+use tokio::sync::Notify;
 
 use crate::engine::{BeforeHookResult, ScriptEngine};
 
 /// Hooks implementation backed by Rhai scripts.
 pub struct ScriptHooks {
     engine: Arc<ScriptEngine>,
+    /// Signaled after every `after_tool_call` evaluation so the TUI
+    /// can refresh extension status rows on demand instead of polling.
+    status_notify: Arc<Notify>,
 }
 
 impl ScriptHooks {
     /// Create hooks from a loaded script engine.
-    pub fn new(engine: Arc<ScriptEngine>) -> Self {
-        Self { engine }
+    pub fn new(engine: Arc<ScriptEngine>, status_notify: Arc<Notify>) -> Self {
+        Self {
+            engine,
+            status_notify,
+        }
     }
 }
 
@@ -57,6 +64,7 @@ impl Hooks for ScriptHooks {
     async fn after_tool_call(
         &self,
         _state: &AgentState,
+        tool_call: &ToolCall,
         result: &ToolResult,
     ) -> Result<(), theta_agent_core::error::AgentError> {
         // Build a summary string for the result content.
@@ -70,19 +78,26 @@ impl Hooks for ScriptHooks {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // We need the original args — not available in ToolResult.
-        // Pass empty args for after hooks (they can't block anyway).
-        let args = serde_json::json!({});
-        if let Err(e) = self
-            .engine
-            .eval_after(&result.tool_name, &args, &result_str)
-        {
+        let args = &tool_call.arguments;
+        if let Err(e) = self.engine.eval_after(&result.tool_name, args, &result_str) {
             tracing::warn!(
                 tool = %result.tool_name,
                 error = %e,
                 "script after_tool error"
             );
         }
+
+        // Wake the TUI poller so it can refresh extension status rows.
+        self.status_notify.notify_one();
+
         Ok(())
+    }
+
+    fn tui_status_lines(&self) -> Vec<(String, String)> {
+        self.engine.eval_tui_statuses()
+    }
+
+    fn tui_status_rows(&self) -> Vec<ExtensionStatusRow> {
+        self.engine.eval_tui_rows()
     }
 }

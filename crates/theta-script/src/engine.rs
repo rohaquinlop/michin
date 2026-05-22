@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use rhai::{AST, Dynamic, Engine, FnPtr, Scope};
 
+use theta_agent_core::types::ExtensionStatusRow;
+
 use crate::loader::ScriptDef;
 
 /// Outcome of a before-tool hook.
@@ -34,10 +36,21 @@ struct RegistrationContext {
 }
 
 /// Script engine: loads scripts, evaluates hooks.
+///
+/// The Rhai `Engine` is wrapped in a `Mutex` because Rhai evaluation
+/// uses internal `Cell`/`RefCell` and is not safe to call concurrently
+/// from multiple threads. All evaluation methods acquire this lock.
 pub struct ScriptEngine {
-    engine: Engine,
+    engine: Mutex<Engine>,
     handlers: Arc<Mutex<HashMap<String, Vec<ToolHandler>>>>,
     registration_context: Arc<Mutex<Option<RegistrationContext>>>,
+    /// TUI status line callbacks: key → Rhai callback that returns String.
+    tui_status_handlers: Arc<Mutex<HashMap<String, ToolHandler>>>,
+    /// TUI row layout callbacks: index → Rhai callback returning #{ left, center, right }.
+    tui_row_handlers: Arc<Mutex<HashMap<usize, ToolHandler>>>,
+    /// Shared mutable state accessible from all script hooks via set_state/get_state.
+    #[allow(dead_code)]
+    shared_state: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ScriptEngine {
@@ -45,6 +58,37 @@ impl ScriptEngine {
         let mut engine = Engine::new();
         let handlers = Arc::new(Mutex::new(HashMap::new()));
         let registration_context = Arc::new(Mutex::new(None));
+        let tui_status_handlers = Arc::new(Mutex::new(HashMap::new()));
+        let tui_row_handlers = Arc::new(Mutex::new(HashMap::new()));
+        let shared_state: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Register set_state(key, value) — accessible from all Rhai scripts.
+        {
+            let ss = Arc::clone(&shared_state);
+            engine.register_fn("set_state", move |key: &str, value: &str| {
+                if let Ok(mut guard) = ss.lock() {
+                    guard.insert(key.to_string(), value.to_string());
+                }
+            });
+        }
+
+        // Register get_state(key) -> String — returns "" if not found.
+        {
+            let ss = Arc::clone(&shared_state);
+            engine.register_fn("get_state", move |key: &str| -> String {
+                ss.lock()
+                    .map(|guard| guard.get(key).cloned().unwrap_or_default())
+                    .unwrap_or_default()
+            });
+        }
+
+        // Register cwd() -> String — returns current working directory path.
+        engine.register_fn("cwd", || -> String {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".into())
+        });
 
         {
             let handlers: Arc<Mutex<HashMap<String, Vec<ToolHandler>>>> = Arc::clone(&handlers);
@@ -100,23 +144,78 @@ impl ScriptEngine {
             );
         }
 
+        {
+            let tui_handlers = Arc::clone(&tui_status_handlers);
+            let registration_context: Arc<Mutex<Option<RegistrationContext>>> =
+                Arc::clone(&registration_context);
+            engine.register_fn(
+                "status",
+                move |_tui: rhai::Map, key: &str, callback: FnPtr| {
+                    let Some(ctx) = registration_context.lock().unwrap().clone() else {
+                        return Dynamic::UNIT;
+                    };
+                    let handler = ToolHandler {
+                        ast: ctx.ast,
+                        callable: callback,
+                    };
+                    tui_handlers
+                        .lock()
+                        .unwrap()
+                        .insert(key.to_string(), handler);
+                    tracing::info!(script = %ctx.script_name, key, "registered tui.status");
+                    Dynamic::UNIT
+                },
+            );
+        }
+
+        // Register tui.row(row_idx, callback) — callback returns #{ left, center, right }.
+        {
+            let row_handlers = Arc::clone(&tui_row_handlers);
+            let registration_context: Arc<Mutex<Option<RegistrationContext>>> =
+                Arc::clone(&registration_context);
+            engine.register_fn(
+                "row",
+                move |_tui: rhai::Map, row_idx: i64, callback: FnPtr| {
+                    let Some(ctx) = registration_context.lock().unwrap().clone() else {
+                        return Dynamic::UNIT;
+                    };
+                    let idx = row_idx.max(0) as usize;
+                    let handler = ToolHandler {
+                        ast: ctx.ast,
+                        callable: callback,
+                    };
+                    row_handlers.lock().unwrap().insert(idx, handler);
+                    tracing::info!(script = %ctx.script_name, row_idx = idx, "registered tui.row");
+                    Dynamic::UNIT
+                },
+            );
+        }
+
         Self {
-            engine,
+            engine: Mutex::new(engine),
             handlers,
             registration_context,
+            tui_status_handlers,
+            tui_row_handlers,
+            shared_state,
         }
     }
 
-    /// Load a script file. The script calls `tool_before(name, fn)` / `tool_after(name, fn)`.
+    /// Load a script file. The script calls `tool.before(name, fn)` / `tool.after(name, fn)`.
+    /// Scripts can use `set_state(key, value)` and `get_state(key)` to share state
+    /// across hooks (e.g., track caveman level across tool calls and status display).
     pub fn load(&self, def: &ScriptDef) -> Result<(), String> {
         let ast = self
             .engine
+            .lock()
+            .unwrap()
             .compile(&def.source)
             .map_err(|e| format!("Syntax error in {}: {e}", def.name))?;
 
         let mut scope = Scope::new();
 
         scope.push("tool", Dynamic::from(rhai::Map::new()));
+        scope.push("tui", Dynamic::from(rhai::Map::new()));
 
         // ctx.notify(msg)
         {
@@ -137,6 +236,8 @@ impl ScriptEngine {
 
         let eval_result = self
             .engine
+            .lock()
+            .unwrap()
             .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
             .map_err(|e| format!("Runtime error in {}: {e}", def.name));
 
@@ -191,15 +292,115 @@ impl ScriptEngine {
         Ok(())
     }
 
+    /// Evaluate all registered TUI status callbacks.
+    /// Returns key → text pairs for display in the TUI status area.
+    pub fn eval_tui_statuses(&self) -> Vec<(String, String)> {
+        let engine = self.engine.lock().unwrap();
+        let guard = self.tui_status_handlers.lock().unwrap();
+        let mut out = Vec::with_capacity(guard.len());
+        for (key, handler) in guard.iter() {
+            // Call with empty context — status callbacks take no args.
+            let call_dyn = Dynamic::from(rhai::Map::new());
+            match handler
+                .callable
+                .call::<Dynamic>(&engine, &handler.ast, (call_dyn,))
+            {
+                Ok(dyn_val) => {
+                    let text = dyn_val.try_cast::<String>().unwrap_or_default();
+                    if !text.is_empty() {
+                        out.push((key.clone(), text));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(key, error = %e, "tui.status eval error");
+                }
+            }
+        }
+        // Sort by key for stable ordering.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Evaluate all registered TUI row callbacks.
+    /// Returns vec of ExtensionStatusRow with left/center/right text slots,
+    /// ordered by row index.
+    pub fn eval_tui_rows(&self) -> Vec<ExtensionStatusRow> {
+        let engine = self.engine.lock().unwrap();
+        let guard = self.tui_row_handlers.lock().unwrap();
+        if guard.is_empty() {
+            return vec![];
+        }
+
+        let mut indices: Vec<usize> = guard.keys().copied().collect();
+        indices.sort();
+
+        let mut rows: Vec<ExtensionStatusRow> = Vec::new();
+        for idx in indices {
+            if let Some(handler) = guard.get(&idx) {
+                let call_dyn = Dynamic::from(rhai::Map::new());
+                match handler
+                    .callable
+                    .call::<Dynamic>(&engine, &handler.ast, (call_dyn,))
+                {
+                    Ok(dyn_val) => {
+                        let row = self.parse_row_result(&dyn_val);
+                        // Ensure vec has enough entries.
+                        while rows.len() <= idx {
+                            rows.push(ExtensionStatusRow::default());
+                        }
+                        rows[idx] = row;
+                    }
+                    Err(e) => {
+                        tracing::warn!(row_idx = idx, error = %e, "tui.row eval error");
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Parse a Rhai map like #{ left: "text", center: "text", right: "text" }
+    /// into an ExtensionStatusRow.
+    fn parse_row_result(&self, val: &Dynamic) -> ExtensionStatusRow {
+        let default = ExtensionStatusRow::default();
+        if !val.is_map() {
+            return default;
+        }
+        let map = val.clone().cast::<rhai::Map>();
+        let left = map
+            .get("left")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s])
+            .unwrap_or_default();
+        let center = map
+            .get("center")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s])
+            .unwrap_or_default();
+        let right = map
+            .get("right")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s])
+            .unwrap_or_default();
+        ExtensionStatusRow {
+            left,
+            center,
+            right,
+        }
+    }
+
     fn run_hook(
         &self,
         handler: &ToolHandler,
         args: &serde_json::Value,
         result: Option<&str>,
     ) -> Result<Dynamic, String> {
+        let engine = self.engine.lock().unwrap();
         let args_str = serde_json::to_string(args).unwrap_or_else(|_| "null".into());
-        let args_dyn: Dynamic = self
-            .engine
+        let args_dyn: Dynamic = engine
             .parse_json(&args_str, false)
             .map_err(|e| format!("arg parse: {e}"))?
             .into();
@@ -211,12 +412,12 @@ impl ScriptEngine {
         if let Some(r) = result {
             handler
                 .callable
-                .call::<Dynamic>(&self.engine, &handler.ast, (call_dyn, r.to_string()))
+                .call::<Dynamic>(&engine, &handler.ast, (call_dyn, r.to_string()))
                 .map_err(|e| format!("hook error: {e}"))
         } else {
             handler
                 .callable
-                .call::<Dynamic>(&self.engine, &handler.ast, (call_dyn,))
+                .call::<Dynamic>(&engine, &handler.ast, (call_dyn,))
                 .map_err(|e| format!("hook error: {e}"))
         }
     }
@@ -314,5 +515,103 @@ mod tests {
         let args = serde_json::json!({"path": "src/main.rs"});
         let result = engine.eval_before("write", &args).unwrap();
         assert!(matches!(result, BeforeHookResult::Allow));
+    }
+
+    #[test]
+    fn test_tui_status_registration() {
+        let engine = ScriptEngine::new();
+
+        let script = ScriptDef {
+            name: "status-demo".into(),
+            location: PathBuf::from("status.rhai"),
+            source: r#"
+                tui.status("skill:git-commit", |ctx| {
+                    return "committing...";
+                });
+            "#
+            .into(),
+        };
+
+        engine.load(&script).unwrap();
+
+        let statuses = engine.eval_tui_statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, "skill:git-commit");
+        assert_eq!(statuses[0].1, "committing...");
+    }
+
+    #[test]
+    fn test_shared_state_across_hooks() {
+        let engine = ScriptEngine::new();
+
+        let script = ScriptDef {
+            name: "state-demo".into(),
+            location: PathBuf::from("state.rhai"),
+            source: r#"
+                // Initialize default state
+                let current = get_state("level");
+                if current == "" {
+                    set_state("level", "ultra");
+                }
+
+                // After reading a file, update state
+                tool.after("read", |ctx, _result| {
+                    let path = ctx.args.get("path");
+                    if path != () && path.to_string().contains("caveman") {
+                        set_state("level", "full");
+                    }
+                });
+
+                // Display state in TUI
+                tui.status("caveman:level", |ctx| {
+                    let level = get_state("level");
+                    return `[caveman:${level}]`;
+                });
+            "#
+            .into(),
+        };
+
+        engine.load(&script).unwrap();
+
+        // Initial state: ultra
+        let statuses = engine.eval_tui_statuses();
+        assert_eq!(statuses[0].1, "[caveman:ultra]");
+
+        // Simulate caveman skill being read → should update state
+        let args = serde_json::json!({"path": "/some/path/caveman/SKILL.md", "offset": 1});
+        engine
+            .eval_after("read", &args, "# caveman skill content...")
+            .unwrap();
+
+        // State should now be "full"
+        let statuses = engine.eval_tui_statuses();
+        assert_eq!(statuses[0].1, "[caveman:full]");
+    }
+
+    #[test]
+    fn test_tui_status_multiple_keys() {
+        let engine = ScriptEngine::new();
+
+        let script = ScriptDef {
+            name: "multi-status".into(),
+            location: PathBuf::from("multi.rhai"),
+            source: r#"
+                tui.status("project:build", |ctx| {
+                    return "building...";
+                });
+                tui.status("project:lint", |ctx| {
+                    return "linting...";
+                });
+            "#
+            .into(),
+        };
+
+        engine.load(&script).unwrap();
+
+        let statuses = engine.eval_tui_statuses();
+        assert_eq!(statuses.len(), 2);
+        // Sorted by key.
+        assert_eq!(statuses[0].0, "project:build");
+        assert_eq!(statuses[1].0, "project:lint");
     }
 }

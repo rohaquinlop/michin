@@ -9,6 +9,7 @@ use theta_agent_core::events::AgentEvent;
 use theta_ai::providers::default_registry;
 use theta_ai::{Model, ModelCatalog, Provider};
 use theta_models::BuiltInCatalog;
+use theta_models::opencode;
 use theta_tui::App;
 use theta_tui::app::{HistoryEntry, TuiAction, TuiEvent};
 use theta_tui::components::CommandEntry;
@@ -34,10 +35,13 @@ pub async fn run_tui(
     thinking: &str,
     initial_prompt: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Resolve model.
+    // Build runtime model snapshot (hydrate OpenCode model list if available).
     let catalog = BuiltInCatalog::new();
+    let runtime_models_cell: Arc<RwLock<Vec<Model>>> =
+        Arc::new(RwLock::new(resolve_runtime_models(&catalog).await));
+    let runtime_models = runtime_models_cell.read().await.clone();
 
-    let model = find_model_by_id(&catalog, model_id)
+    let model = find_model_by_id(&runtime_models, model_id)
         .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
         .clone();
 
@@ -46,7 +50,7 @@ pub async fn run_tui(
     // via Codex but default model is from OpenAI provider).
     let provider_str = provider_to_string(model.provider);
     let mut auth_config = config.auth.clone();
-    let model_entries = available_model_entries(&catalog, &mut auth_config).await;
+    let model_entries = available_model_entries(&runtime_models, &mut auth_config).await;
     let api_key = auth_config.get_api_key(&provider_str).await;
 
     // Fallback: if no auth for the default model's provider, check
@@ -64,7 +68,7 @@ pub async fn run_tui(
                 continue; // already checked
             }
             if let Some(key) = auth_config.get_api_key(prov_str).await
-                && let Some(m) = catalog.list().into_iter().find(|m| {
+                && let Some(m) = runtime_models.iter().find(|m| {
                     m.provider == *prov && (m.id == model_id || m.id.starts_with(model_id))
                 })
             {
@@ -102,6 +106,11 @@ pub async fn run_tui(
         _ => Theme::default(),
     };
 
+    // Shared notification channel: the ScriptHooks after_tool_call callback
+    // signals this whenever tool execution may have changed extension state.
+    // The TUI poller wakes on this instead of polling on a timer.
+    let status_notify = Arc::new(tokio::sync::Notify::new());
+
     // ------------------------------------------------------------------
     // Always spawn the action handler first (handles login + agent init).
     // ------------------------------------------------------------------
@@ -113,7 +122,9 @@ pub async fn run_tui(
     let action_model = model.clone();
     let action_thinking = thinking.to_string();
     let action_catalog = BuiltInCatalog::new();
+    let action_runtime_models_cell = runtime_models_cell.clone();
     let action_config = config.clone();
+    let action_status_notify = status_notify.clone();
     tokio::spawn(async move {
         while let Some(action) = action_rx.recv().await {
             handle_tui_action(
@@ -126,7 +137,9 @@ pub async fn run_tui(
                 &action_thinking,
                 &action_model,
                 &action_catalog,
+                &action_runtime_models_cell,
                 &action_config,
+                &action_status_notify,
             )
             .await;
         }
@@ -136,15 +149,45 @@ pub async fn run_tui(
     // If we have auth, create the agent now and spawn event bridge.
     // ------------------------------------------------------------------
     if let Some(ref key) = api_key {
-        let agent = create_agent(&model, key, config, working_dir, &model_id, thinking).await?;
+        let agent = create_agent(
+            &model,
+            key,
+            config,
+            working_dir,
+            &model_id,
+            thinking,
+            &status_notify,
+        )
+        .await?;
         let agent = Arc::new(agent);
         *agent_cell.write().await = Some(agent.clone());
         let persisted = crate::settings::load_settings().await;
         spawn_event_bridge(
-            agent,
+            agent.clone(),
             event_tx_raw.clone(),
             persisted.tool_progress_hz.max(1),
         );
+
+        // Poll extension status rows — wait on notify from hook evaluations.
+        // Reads the current agent from agent_cell so it works across agent
+        // replacements (e.g. after login).
+        let ext_agent_cell = agent_cell.clone();
+        let ext_event_tx = event_tx_raw.clone();
+        let ext_notify = status_notify.clone();
+        tokio::spawn(async move {
+            loop {
+                ext_notify.notified().await;
+                let Some(agent) = ext_agent_cell.read().await.clone() else {
+                    continue;
+                };
+                let rows = agent.hooks().tui_status_rows();
+                let lines = agent.hooks().tui_status_lines();
+                if !rows.is_empty() || !lines.is_empty() {
+                    let payload = to_extension_payload(rows, lines);
+                    let _ = ext_event_tx.send(TuiEvent::ExtensionStatus(payload));
+                }
+            }
+        });
 
         // Persist the model + thinking for the next session.
         let mut s = crate::settings::load_settings().await;
@@ -324,6 +367,12 @@ pub async fn run_tui(
         app.send_initial_message(prompt.to_string());
     }
 
+    // Auto-invoke startup skills from config (e.g. ["caveman ultra"]).
+    for skill_invocation in &config.startup_skills {
+        let msg = format!("/skill:{skill_invocation}");
+        app.send_initial_message(msg);
+    }
+
     // Bounded backpressure bridge: preserve non-progress events; coalesce progress events.
     tokio::spawn(async move {
         let mut pending_progress: std::collections::HashMap<String, String> =
@@ -369,6 +418,7 @@ async fn create_agent(
     working_dir: &Path,
     model_id: &str,
     thinking: &str,
+    status_notify: &Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<Agent> {
     let catalog = BuiltInCatalog::new();
     let registry = default_registry();
@@ -385,7 +435,9 @@ async fn create_agent(
     agent.set_system_prompt(system_blocks).await;
 
     // Load script hooks from ~/.theta/extensions/*.rhai and ./.theta/extensions/*.rhai.
-    if let Some(hooks) = crate::scripts::load_script_hooks(working_dir).await {
+    if let Some(hooks) =
+        crate::scripts::load_script_hooks(working_dir, Arc::clone(status_notify)).await
+    {
         agent.set_hooks(hooks);
     }
 
@@ -564,7 +616,9 @@ async fn handle_tui_action(
     thinking: &str,
     model: &Model,
     catalog: &BuiltInCatalog,
+    runtime_models_cell: &Arc<RwLock<Vec<Model>>>,
     config: &ThetaConfig,
+    status_notify: &Arc<tokio::sync::Notify>,
 ) {
     match action {
         TuiAction::StartCodexOAuth => {
@@ -611,6 +665,7 @@ async fn handle_tui_action(
                                     working_dir,
                                     &codex_model.id,
                                     thinking,
+                                    status_notify,
                                 )
                                 .await
                                 {
@@ -637,8 +692,10 @@ async fn handle_tui_action(
                                 }
                             }
 
+                            refresh_runtime_models(catalog, runtime_models_cell).await;
+                            let runtime_models = runtime_models_cell.read().await.clone();
                             let refreshed_models =
-                                available_model_entries(catalog, &mut auth).await;
+                                available_model_entries(&runtime_models, &mut auth).await;
                             let _ = event_tx.send(TuiEvent::UpdateModels(refreshed_models));
                         }
                         Err(e) => {
@@ -670,8 +727,16 @@ async fn handle_tui_action(
                     }
                     // If this was the initial login (no agent yet), create the agent now.
                     if agent_cell.read().await.is_none() {
-                        match create_agent(model, &token, config, working_dir, model_id, thinking)
-                            .await
+                        match create_agent(
+                            model,
+                            &token,
+                            config,
+                            working_dir,
+                            model_id,
+                            thinking,
+                            status_notify,
+                        )
+                        .await
                         {
                             Ok(agent) => {
                                 let agent = Arc::new(agent);
@@ -694,7 +759,10 @@ async fn handle_tui_action(
                         }
                     }
 
-                    let refreshed_models = available_model_entries(catalog, &mut auth).await;
+                    refresh_runtime_models(catalog, runtime_models_cell).await;
+                    let runtime_models = runtime_models_cell.read().await.clone();
+                    let refreshed_models =
+                        available_model_entries(&runtime_models, &mut auth).await;
                     let _ = event_tx.send(TuiEvent::UpdateModels(refreshed_models));
                 }
                 Err(e) => {
@@ -707,10 +775,11 @@ async fn handle_tui_action(
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
                 return;
             };
+            let runtime_models = runtime_models_cell.read().await.clone();
             let model = provider
                 .as_deref()
-                .and_then(|p| find_model_by_provider_and_id(catalog, p, &model_id))
-                .or_else(|| find_model_by_id(catalog, &model_id));
+                .and_then(|p| find_model_by_provider_and_id(&runtime_models, p, &model_id))
+                .or_else(|| find_model_by_id(&runtime_models, &model_id));
 
             if let Some(m) = model {
                 let provider = provider_to_string(m.provider);
@@ -737,6 +806,9 @@ async fn handle_tui_action(
                 let _ = event_tx.send(TuiEvent::Info(format!(
                     "Switched to {model_id} ({provider})"
                 )));
+                let _ = event_tx.send(TuiEvent::ModelSwitched {
+                    model: model_id.to_string(),
+                });
                 // Persist model preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
                 s.last_model = Some(model_id.to_string());
@@ -949,7 +1021,7 @@ async fn handle_tui_action(
 }
 
 async fn available_model_entries(
-    catalog: &BuiltInCatalog,
+    models: &[Model],
     auth: &mut crate::config::AuthConfig,
 ) -> Vec<ModelEntry> {
     let mut provider_has_auth: HashMap<String, bool> = HashMap::new();
@@ -960,22 +1032,19 @@ async fn available_model_entries(
         );
     }
 
-    let mut entries: Vec<ModelEntry> = catalog
-        .list()
-        .into_iter()
-        .map(|m| {
-            let provider = provider_to_string(m.provider);
-            let auth_suffix = if provider_has_auth.get(&provider).copied().unwrap_or(false) {
-                ""
-            } else {
-                " [auth required]"
-            };
-            ModelEntry {
-                id: m.id.clone(),
-                name: format!("{}{auth_suffix}", m.name),
-                provider,
-                context_window: m.context_window,
-            }
+    let mut entries: Vec<ModelEntry> = models
+        .iter()
+        .filter(|m| {
+            provider_has_auth
+                .get(&provider_to_string(m.provider))
+                .copied()
+                .unwrap_or(false)
+        })
+        .map(|m| ModelEntry {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            provider: provider_to_string(m.provider),
+            context_window: m.context_window,
         })
         .collect();
 
@@ -988,20 +1057,86 @@ async fn available_model_entries(
     entries
 }
 
-fn find_model_by_id(catalog: &BuiltInCatalog, id: &str) -> Option<theta_ai::Model> {
-    catalog.list().into_iter().find(|m| m.id == id).cloned()
+fn find_model_by_id(catalog: &[theta_ai::Model], id: &str) -> Option<theta_ai::Model> {
+    catalog.iter().find(|m| m.id == id).cloned().or_else(|| {
+        if id == "opencode" {
+            catalog
+                .iter()
+                .find(|m| m.provider == Provider::OpenCode)
+                .cloned()
+        } else {
+            None
+        }
+    })
 }
 
 fn find_model_by_provider_and_id(
-    catalog: &BuiltInCatalog,
+    catalog: &[theta_ai::Model],
     provider: &str,
     id: &str,
 ) -> Option<theta_ai::Model> {
     catalog
-        .list()
-        .into_iter()
+        .iter()
         .find(|m| provider_to_string(m.provider) == provider && m.id == id)
         .cloned()
+}
+
+async fn refresh_runtime_models(
+    catalog: &BuiltInCatalog,
+    runtime_models_cell: &Arc<RwLock<Vec<Model>>>,
+) {
+    let refreshed = resolve_runtime_models(catalog).await;
+    *runtime_models_cell.write().await = refreshed;
+}
+
+async fn resolve_runtime_models(catalog: &BuiltInCatalog) -> Vec<Model> {
+    let mut models: Vec<Model> = catalog.list().into_iter().cloned().collect();
+    let fetched = opencode::fetch_models().await;
+    if !fetched.is_empty() {
+        models.retain(|m| m.provider != Provider::OpenCode);
+        models.extend(fetched);
+    }
+    models
+}
+
+/// Build an ExtensionStatusPayload from Rhai row callbacks + legacy status lines.
+/// Legacy status lines are mapped to row[0].left.
+fn to_extension_payload(
+    rows: Vec<theta_agent_core::types::ExtensionStatusRow>,
+    lines: Vec<(String, String)>,
+) -> theta_tui::app::ExtensionStatusPayload {
+    // Count rows from tui.row() callbacks that have actual content.
+    let extension_row_count = rows.iter().filter(|r| !r.is_empty()).count();
+
+    let mut all_rows: Vec<theta_tui::components::status::StatusRow> = rows
+        .into_iter()
+        .map(|r| theta_tui::components::status::StatusRow {
+            left: r.left,
+            center: r.center,
+            right: r.right,
+        })
+        .collect();
+
+    // Merge legacy status lines into row[0].left
+    if !lines.is_empty() {
+        if all_rows.is_empty() {
+            all_rows.push(theta_tui::components::status::StatusRow::default());
+        }
+        let mut merged = all_rows[0].left.clone();
+        for (key, text) in &lines {
+            if text.starts_with('[') && text.contains(':') {
+                merged.push(text.clone());
+            } else {
+                merged.push(format!("[{key}:{text}]"));
+            }
+        }
+        all_rows[0].left = merged;
+    }
+
+    theta_tui::app::ExtensionStatusPayload {
+        rows: all_rows,
+        extension_row_count,
+    }
 }
 
 fn provider_to_string(provider: Provider) -> String {

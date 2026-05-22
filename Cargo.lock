@@ -2121,9 +2121,12 @@ dependencies = [
 name = "theta-models"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "serde",
  "serde_json",
  "theta-ai",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -117,7 +117,7 @@ impl ModelSelector {
         self.filter_models();
     }
 
-    /// Filter models by query (fuzzy match on id and name).
+    /// Filter models by query (substring match on id, name, and provider).
     fn filter_models(&mut self) {
         let q = self.query.to_lowercase();
         if q.is_empty() {
@@ -128,7 +128,9 @@ impl ModelSelector {
                 .iter()
                 .enumerate()
                 .filter(|(_, m)| {
-                    m.id.to_lowercase().contains(&q) || m.name.to_lowercase().contains(&q)
+                    m.id.to_lowercase().contains(&q)
+                        || m.name.to_lowercase().contains(&q)
+                        || m.provider.to_lowercase().contains(&q)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -246,5 +248,34 @@ mod tests {
         assert!(row.starts_with("gpt-5.5"));
         assert!(row.contains("GPT 5.5"));
         assert!(row.contains("openai"));
+    }
+
+    #[test]
+    fn filter_matches_provider() {
+        let mut selector = ModelSelector::new(
+            vec![
+                ModelEntry {
+                    id: "gpt-5.5".to_string(),
+                    name: "GPT 5.5".to_string(),
+                    provider: "openai".to_string(),
+                    context_window: 128_000,
+                },
+                ModelEntry {
+                    id: "deepseek-v4-flash-free".to_string(),
+                    name: "DeepSeek V4 Flash Free".to_string(),
+                    provider: "opencode".to_string(),
+                    context_window: 200_000,
+                },
+            ],
+            Theme::default(),
+        );
+        selector.show();
+        for c in "opencode".chars() {
+            selector.push_query(c);
+        }
+
+        let selected = selector.selected_model().expect("expected selected model");
+        assert_eq!(selected.provider, "opencode");
+        assert_eq!(selector.filtered.len(), 1);
     }
 }

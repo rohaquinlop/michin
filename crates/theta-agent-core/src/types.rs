@@ -79,6 +79,21 @@ pub trait AgentTool: Send + Sync {
     ) -> Result<ToolResult, AgentError>;
 }
 
+/// A status-bar row specified by extensions (Rhai scripts).
+/// Each row has three text slots: left, center, right.
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionStatusRow {
+    pub left: Vec<String>,
+    pub center: Vec<String>,
+    pub right: Vec<String>,
+}
+
+impl ExtensionStatusRow {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.center.is_empty() && self.right.is_empty()
+    }
+}
+
 /// Configuration for the agent loop.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {

@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
+use crate::hooks::Hooks;
 use crate::state::AgentState;
-use crate::types::{AgentTool, ToolCall, ToolExecutionMode, ToolResult, ToolUpdate};
+use crate::types::{ToolCall, ToolExecutionMode, ToolResult, ToolUpdate};
 
 /// Execute a batch of tool calls. Handles ordering:
 /// 1. All parallel tools run concurrently.
@@ -16,11 +18,14 @@ use crate::types::{AgentTool, ToolCall, ToolExecutionMode, ToolResult, ToolUpdat
 ///
 /// Tool errors are converted to error ToolResult messages, never
 /// propagated as Err — a single tool failure should not abort the turn.
+///
+/// All tools (parallel and sequential) go through before/after hooks.
 pub async fn execute_tool_calls(
     state: &mut AgentState,
     tool_calls: &[ToolCall],
     abort_token: Option<CancellationToken>,
-    event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    hooks: &Arc<dyn Hooks>,
 ) -> Result<(), AgentError> {
     // Partition by execution mode.
     let mut parallel: Vec<&ToolCall> = Vec::new();
@@ -38,17 +43,22 @@ pub async fn execute_tool_calls(
         }
     }
 
-    // Execute parallel tools concurrently.
+    // Execute parallel tools concurrently — each gets before/after hooks.
     if !parallel.is_empty() {
+        let event_tx = event_tx.clone();
+        let abort = abort_token.clone();
+        let hooks: Arc<dyn Hooks> = Arc::clone(hooks);
+
         let handles: Vec<_> = parallel
             .iter()
             .map(|tc| {
-                let state_snapshot = state.tools.clone();
+                let state = state.clone();
                 let event_tx = event_tx.clone();
-                let abort = abort_token.clone();
+                let abort = abort.clone();
+                let hooks = Arc::clone(&hooks);
                 let tc = (*tc).clone();
                 tokio::spawn(
-                    async move { execute_one(&state_snapshot, &tc, abort, &event_tx).await },
+                    async move { execute_one(&state, &tc, abort, &event_tx, &*hooks).await },
                 )
             })
             .collect();
@@ -96,9 +106,9 @@ pub async fn execute_tool_calls(
         }
     }
 
-    // Execute sequential tools one at a time.
+    // Execute sequential tools one at a time — with hooks.
     for tc in &sequential {
-        let result = match execute_one(&state.tools, tc, abort_token.clone(), event_tx).await {
+        let result = match execute_one(state, tc, abort_token.clone(), event_tx, &**hooks).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(AgentEvent::Error {
@@ -120,14 +130,59 @@ pub async fn execute_tool_calls(
     Ok(())
 }
 
-/// Execute a single tool call.
+/// Execute a single tool call with before/after hooks.
+/// This is the unified path for all tools — parallel and sequential.
 async fn execute_one(
-    tools: &[Arc<dyn AgentTool>],
+    state: &AgentState,
+    tool_call: &ToolCall,
+    abort_token: Option<CancellationToken>,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    hooks: &dyn Hooks,
+) -> Result<ToolResult, AgentError> {
+    // before_tool_call hook.
+    hooks
+        .before_tool_call(state, tool_call)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                tool_name = %tool_call.name,
+                error = %e,
+                "before_tool_call blocked execution"
+            );
+            AgentError::ToolExecution {
+                tool_name: tool_call.name.clone(),
+                message: e.to_string(),
+            }
+        })?;
+
+    let result = run_tool(state, tool_call, abort_token, event_tx).await;
+
+    // after_tool_call hook.
+    if let Ok(ref r) = result {
+        let _ = hooks
+            .after_tool_call(state, tool_call, r)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    tool_name = %tool_call.name,
+                    error = %e,
+                    "after_tool_call hook error"
+                );
+            });
+    }
+
+    result
+}
+
+/// Core tool execution logic (no hooks).
+async fn run_tool(
+    state: &AgentState,
     tool_call: &ToolCall,
     abort_token: Option<CancellationToken>,
     event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
 ) -> Result<ToolResult, AgentError> {
-    let tool = tools
+    let tool = state
+        .tools
         .iter()
         .find(|t| t.name() == tool_call.name)
         .ok_or_else(|| AgentError::ToolNotFound {

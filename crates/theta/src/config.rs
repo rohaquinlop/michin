@@ -48,6 +48,10 @@ pub struct ThetaConfig {
     /// Agent loop controls.
     #[serde(default)]
     pub agent: AgentSettings,
+
+    /// Skills to auto-invoke at session start (e.g. ["caveman ultra"]).
+    #[serde(default)]
+    pub startup_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

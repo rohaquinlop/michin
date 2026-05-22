@@ -86,6 +86,11 @@ impl Agent {
         self.hooks = hooks;
     }
 
+    /// Get a reference to the hooks.
+    pub fn hooks(&self) -> &Arc<dyn Hooks> {
+        &self.hooks
+    }
+
     /// Set the agent loop configuration.
     pub fn set_config(&mut self, config: AgentLoopConfig) {
         self.config = config;
@@ -273,7 +278,7 @@ impl Agent {
             loop_mod::run_prompt_loop(
                 &mut state,
                 provider,
-                &*self.hooks,
+                &self.hooks,
                 &self.config,
                 &self.event_tx,
                 abort_token,

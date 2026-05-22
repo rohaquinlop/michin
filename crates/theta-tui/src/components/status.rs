@@ -20,8 +20,21 @@ pub struct StatusBar {
     pub detail: String,
     pub turn_index: u32,
     pub show_diagnostics: bool,
+    /// Extension status rows: rows[0] is primary bottom row.
+    pub extension_rows: Vec<StatusRow>,
+    /// Number of rows that need their own visual row (from tui.row() callbacks),
+    /// excluding status lines merged into primary row.
+    extension_row_count: usize,
     spinner_idx: usize,
     theme: Theme,
+}
+
+/// A single row of extension status data.
+#[derive(Debug, Clone, Default)]
+pub struct StatusRow {
+    pub left: Vec<String>,
+    pub center: Vec<String>,
+    pub right: Vec<String>,
 }
 
 impl StatusBar {
@@ -34,6 +47,8 @@ impl StatusBar {
             detail: String::new(),
             turn_index: 0,
             show_diagnostics: false,
+            extension_rows: Vec::new(),
+            extension_row_count: 0,
             spinner_idx: 0,
             theme,
         }
@@ -58,20 +73,26 @@ impl StatusBar {
     pub fn set_show_diagnostics(&mut self, show: bool) {
         self.show_diagnostics = show;
     }
+
+    pub fn set_extension_rows(&mut self, rows: Vec<StatusRow>) {
+        self.extension_rows = rows;
+    }
+
+    pub fn set_extension_row_count(&mut self, count: usize) {
+        self.extension_row_count = count;
+    }
+
+    /// Total rows needed: 1 primary + extension-only rows.
+    pub fn desired_height(&self) -> u16 {
+        1 + self.extension_row_count as u16
+    }
 }
 
 impl Component for StatusBar {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let total_width = area.width as usize;
-        let model_str = short_middle(&self.model, 28);
-        let thinking_str = short_middle(&self.thinking, 10);
 
-        let left = vec![
-            Span::styled(model_str, Style::default().fg(self.theme.dim)),
-            Span::styled(" • ".to_string(), Style::default().fg(self.theme.border)),
-            Span::styled(thinking_str, Style::default().fg(self.theme.dim)),
-        ];
-
+        // Build the agent state badge (right-aligned).
         let state_color = if self.agent_state.starts_with("error")
             || self.agent_state.starts_with("tool error")
         {
@@ -97,43 +118,45 @@ impl Component for StatusBar {
         } else {
             String::new()
         };
-        let right_text = if self.show_diagnostics {
+        let right_badge = if self.show_diagnostics {
             format!("[{mode}] turn:{}{spinner}", self.turn_index)
         } else {
             format!("[{mode}]{spinner}")
         };
-        let detail_width = total_width.saturating_sub(48).min(total_width / 3);
-        let detail = if self.detail.trim().is_empty() {
-            String::new()
-        } else {
-            format!(
-                " {}",
-                truncate_chars(self.detail.trim(), detail_width.max(8))
-            )
-        };
 
-        let right = vec![Span::styled(right_text, Style::default().fg(state_color))];
+        // Determine total rows: always primary row (0) + any extension-defined rows.
+        // Works for any extension row index because extension_rows is a dense vec
+        // sized to max_row_idx + 1 by the scripting engine.
+        let num_rows = 1 + self.extension_rows.len();
+        // Render as many rows as fit in available height.
+        let renderable_rows = (area.height as usize).min(num_rows);
 
-        // Pad to fill width.
-        let left_str: String = left.iter().map(|s| s.content.as_ref()).collect();
-        let detail_len = detail.chars().count();
-        let right_str: String = right.iter().map(|s| s.content.as_ref()).collect();
+        for row_idx in 0..renderable_rows {
+            let y = area.y + row_idx as u16;
+            let row_area = Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            };
 
-        let pad = if left_str.len() + detail_len + right_str.len() < total_width {
-            " ".repeat(total_width - left_str.len() - detail_len - right_str.len())
-        } else {
-            " ".to_string()
-        };
+            let ext_row = self.extension_rows.get(row_idx);
 
-        let mut spans = left;
-        if !detail.is_empty() {
-            spans.push(Span::styled(detail, Style::default().fg(self.theme.dim)));
+            if row_idx == 0 {
+                // Primary row: model + ext-left + detail + ext-right + agent-state
+                self.render_primary_row(
+                    frame,
+                    row_area,
+                    total_width,
+                    ext_row,
+                    &right_badge,
+                    state_color,
+                );
+            } else {
+                // Extension-only rows: ext-left + ext-center + ext-right
+                self.render_extension_row(frame, row_area, total_width, ext_row);
+            }
         }
-        spans.push(Span::raw(pad));
-        spans.extend(right);
-
-        let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Reset));
-        frame.render_widget(para, area);
     }
 
     fn handle_event(&mut self, _event: &Event) -> Option<Action> {
@@ -145,6 +168,185 @@ impl Component for StatusBar {
     }
 
     fn focus(&mut self, _focused: bool) {}
+}
+
+impl StatusBar {
+    // ── private render helpers ───────────────────────────────────
+
+    /// Render the primary (bottom) row: model + ext-left + detail + ext-right + agent-state.
+    fn render_primary_row(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        total_width: usize,
+        ext_row: Option<&StatusRow>,
+        right_badge: &str,
+        state_color: Color,
+    ) {
+        let model_str = short_middle(&self.model, 28);
+        let thinking_str = short_middle(&self.thinking, 10);
+
+        let model_spans = vec![
+            Span::styled("[".to_string(), Style::default().fg(self.theme.border)),
+            Span::styled(model_str, Style::default().fg(self.theme.dim)),
+            Span::styled(":".to_string(), Style::default().fg(self.theme.border)),
+            Span::styled(thinking_str, Style::default().fg(self.theme.dim)),
+            Span::styled("]".to_string(), Style::default().fg(self.theme.border)),
+        ];
+
+        let ext_left = ext_row.map(|r| join_parts(&r.left)).unwrap_or_default();
+        let ext_right = ext_row.map(|r| join_parts(&r.right)).unwrap_or_default();
+
+        let detail_str = if self.detail.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" {}", truncate_chars(self.detail.trim(), 48))
+        };
+
+        let state_span = Span::styled(right_badge.to_string(), Style::default().fg(state_color));
+
+        // Layout: [model:effort] [ext-left]  <detail>  [ext-right] [idle/status]
+        let model_text: String = model_spans.iter().map(|s| s.content.as_ref()).collect();
+        let fixed = model_text.len()
+            + ext_left.len()
+            + detail_str.len()
+            + ext_right.len()
+            + right_badge.len();
+        let pad = if fixed < total_width {
+            " ".repeat(total_width - fixed)
+        } else {
+            String::new()
+        };
+
+        let mut spans = model_spans;
+        if !ext_left.is_empty() {
+            spans.push(Span::styled(
+                format!(" {ext_left}"),
+                Style::default().fg(self.theme.accent),
+            ));
+        }
+        spans.push(Span::raw(pad));
+        if !detail_str.is_empty() {
+            spans.push(Span::styled(
+                detail_str,
+                Style::default().fg(self.theme.dim),
+            ));
+        }
+        if !ext_right.is_empty() {
+            spans.push(Span::styled(
+                format!(" {ext_right}"),
+                Style::default().fg(self.theme.accent),
+            ));
+        }
+
+        // Right-anchor the state badge so it never gets clipped.
+        let badge_space = " ";
+        let badge_len = badge_space.len() + right_badge.len();
+        let left_max = total_width.saturating_sub(badge_len);
+        let left_line = Line::from(truncate_line_chars(spans, left_max));
+        // Pad to fill the gap before the badge.
+        let left_visible: String = left_line.iter().flat_map(|s| s.content.chars()).collect();
+        let gap = if left_visible.len() < left_max {
+            " ".repeat(left_max - left_visible.len())
+        } else {
+            String::new()
+        };
+
+        let mut all_spans: Vec<Span> = left_line.spans;
+        if !gap.is_empty() {
+            all_spans.push(Span::raw(gap));
+        }
+        all_spans.push(Span::raw(badge_space));
+        all_spans.push(state_span);
+
+        let line = Line::from(all_spans);
+        let para = Paragraph::new(line).style(Style::default().bg(Color::Reset));
+        frame.render_widget(para, area);
+    }
+
+    /// Render an extension row: ext-left + ext-center + ext-right.
+    fn render_extension_row(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        total_width: usize,
+        ext_row: Option<&StatusRow>,
+    ) {
+        let Some(row) = ext_row else {
+            let para = Paragraph::new("").style(Style::default().bg(Color::Reset));
+            frame.render_widget(para, area);
+            return;
+        };
+
+        let left_text = join_parts(&row.left);
+        let center_text = join_parts(&row.center);
+        let right_text = join_parts(&row.right);
+
+        let fixed = left_text.len() + center_text.len() + right_text.len();
+        let remaining = total_width.saturating_sub(fixed);
+        let left_pad = remaining / 2;
+        let right_pad = remaining - left_pad;
+
+        let mut spans: Vec<Span> = Vec::new();
+        if !left_text.is_empty() {
+            spans.push(Span::styled(
+                left_text,
+                Style::default().fg(self.theme.accent),
+            ));
+        }
+        spans.push(Span::raw(" ".repeat(left_pad)));
+        if !center_text.is_empty() {
+            spans.push(Span::styled(
+                center_text,
+                Style::default().fg(self.theme.accent),
+            ));
+        }
+        spans.push(Span::raw(" ".repeat(right_pad)));
+        if !right_text.is_empty() {
+            spans.push(Span::styled(
+                right_text,
+                Style::default().fg(self.theme.accent),
+            ));
+        }
+
+        let line = Line::from(truncate_line_chars(spans, total_width));
+        let para = Paragraph::new(line).style(Style::default().bg(Color::Reset));
+        frame.render_widget(para, area);
+    }
+}
+
+/// Truncate spans by character count, preserving styles.
+/// Drops spans from the right until the total char count fits within max_chars.
+fn truncate_line_chars(spans: Vec<Span>, max_chars: usize) -> Vec<Span> {
+    let mut result: Vec<Span> = Vec::new();
+    let mut remaining = max_chars;
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let char_count = span.content.chars().count();
+        if char_count <= remaining {
+            result.push(span);
+            remaining -= char_count;
+        } else {
+            let truncated: String = span.content.chars().take(remaining).collect();
+            if !truncated.is_empty() {
+                result.push(Span::styled(truncated, span.style));
+            }
+            break;
+        }
+    }
+    result
+}
+
+/// Join slot parts with spaces between each, stripping any that are empty.
+fn join_parts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn mode_from_state(state: &str) -> &str {
