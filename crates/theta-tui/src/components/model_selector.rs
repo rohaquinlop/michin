@@ -163,7 +163,7 @@ impl ModelSelector {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.accent))
-            .title(" Switch Model (Ctrl+P) ");
+            .title(" Models ");
 
         let inner = block.inner(overlay);
         frame.render_widget(block, overlay);
@@ -183,7 +183,7 @@ impl ModelSelector {
         } else {
             ""
         };
-        let search_text = format!("> {}{}", self.query, cursor);
+        let search_text = format!("filter> {}{}", self.query, cursor);
         let search = Paragraph::new(Span::styled(
             search_text,
             Style::default().fg(self.theme.accent),
@@ -196,13 +196,7 @@ impl ModelSelector {
             .iter()
             .map(|&idx| {
                 let m = &self.all_models[idx];
-                let ctx = if m.context_window >= 1_000_000 {
-                    format!("{}M", m.context_window / 1_000_000)
-                } else {
-                    format!("{}K", m.context_window / 1000)
-                };
-                let line = format!("{:18} {:13} {ctx:>6}  {}", m.id, m.provider, m.name);
-                ListItem::new(Span::raw(line))
+                ListItem::new(Span::raw(format_model_row(m)))
             })
             .collect();
 
@@ -214,9 +208,43 @@ impl ModelSelector {
 
         // Footer help.
         let help = Paragraph::new(Span::styled(
-            "Type to filter  Enter to select  Esc to cancel",
+            "Type filter | Up/Down move | Enter select | Esc close",
             Style::default().fg(self.theme.dim),
         ));
         frame.render_widget(help, chunks[2]);
+    }
+}
+
+fn format_model_row(model: &ModelEntry) -> String {
+    let ctx = format_context_window(model.context_window);
+    format!(
+        "{:18}  {:24}  {:13}  {ctx:>6}",
+        model.id, model.name, model.provider
+    )
+}
+
+fn format_context_window(context_window: u32) -> String {
+    if context_window >= 1_000_000 {
+        format!("{}M", context_window / 1_000_000)
+    } else {
+        format!("{}K", context_window / 1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_row_places_identity_first() {
+        let row = format_model_row(&ModelEntry {
+            id: "gpt-5.5".to_string(),
+            name: "GPT 5.5".to_string(),
+            provider: "openai".to_string(),
+            context_window: 128_000,
+        });
+        assert!(row.starts_with("gpt-5.5"));
+        assert!(row.contains("GPT 5.5"));
+        assert!(row.contains("openai"));
     }
 }

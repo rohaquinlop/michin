@@ -95,7 +95,7 @@ impl Editor {
     pub fn desired_height(&self, width: usize, max_height: u16) -> u16 {
         let inner_width = width.saturating_sub(2).max(1);
         let lines = wrap_text(&self.text, inner_width).len() as u16;
-        lines.saturating_add(1).clamp(2, max_height.max(2))
+        lines.saturating_add(2).clamp(3, max_height.max(3))
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -415,10 +415,15 @@ impl Component for Editor {
             self.theme.warning
         };
         let block = Block::default()
-            .borders(Borders::TOP)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(Style::default().fg(input_border));
 
         let inner = block.inner(area);
+        if inner.width == 0 || inner.height == 0 {
+            let para = Paragraph::new("").block(block);
+            frame.render_widget(para, area);
+            return;
+        }
         let width = inner.width as usize;
         let height = inner.height as usize;
         if width == 0 || height == 0 {
@@ -477,9 +482,9 @@ impl Component for Editor {
             })
             .collect();
 
-        let inner = block.inner(area);
         frame.render_widget(Clear, area);
-        frame.render_widget(Paragraph::new(Text::from(visible_lines)).block(block), area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(Text::from(visible_lines)), inner);
         self.last_inner_area = Some(inner);
         self.last_visible_lines = visual_lines[self.scroll..end]
             .iter()

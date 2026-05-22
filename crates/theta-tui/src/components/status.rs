@@ -17,7 +17,7 @@ pub struct StatusBar {
     pub session_id: String,
     pub thinking: String,
     pub agent_state: String,
-    pub tool_progress: String,
+    pub detail: String,
     pub turn_index: u32,
     pub show_diagnostics: bool,
     spinner_idx: usize,
@@ -31,7 +31,7 @@ impl StatusBar {
             session_id: String::new(),
             thinking: String::new(),
             agent_state: String::new(),
-            tool_progress: String::new(),
+            detail: String::new(),
             turn_index: 0,
             show_diagnostics: false,
             spinner_idx: 0,
@@ -43,8 +43,8 @@ impl StatusBar {
         self.agent_state = state.to_string();
     }
 
-    pub fn set_tool_progress(&mut self, progress: &str) {
-        self.tool_progress = progress.to_string();
+    pub fn set_detail(&mut self, detail: &str) {
+        self.detail = detail.to_string();
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -63,11 +63,12 @@ impl StatusBar {
 impl Component for StatusBar {
     fn render(&mut self, area: Rect, frame: &mut Frame) {
         let total_width = area.width as usize;
-        let model_str = short_middle(&self.model, 24);
-        let thinking_str = format!(" | thinking: {}", self.thinking);
+        let model_str = short_middle(&self.model, 28);
+        let thinking_str = short_middle(&self.thinking, 10);
 
         let left = vec![
-            Span::styled(model_str, Style::default().fg(self.theme.accent)),
+            Span::styled(model_str, Style::default().fg(self.theme.dim)),
+            Span::styled(" • ".to_string(), Style::default().fg(self.theme.border)),
             Span::styled(thinking_str, Style::default().fg(self.theme.dim)),
         ];
 
@@ -96,41 +97,42 @@ impl Component for StatusBar {
         } else {
             String::new()
         };
-        let step = if self.tool_progress.is_empty() {
-            "-".to_string()
+        let right_text = if self.show_diagnostics {
+            format!("[{mode}] turn:{}{spinner}", self.turn_index)
         } else {
-            self.tool_progress.clone()
-        };
-        let mut right_text = if self.show_diagnostics {
-            format!(
-                "[mode: {mode}] [step: {step}] [turn: {}]{spinner}",
-                self.turn_index
-            )
-        } else if step == "-" {
             format!("[{mode}]{spinner}")
-        } else {
-            format!("[{mode}] {step}{spinner}")
         };
-        right_text = truncate_chars(&right_text, total_width.saturating_div(2).max(12));
+        let detail_width = total_width.saturating_sub(48).min(total_width / 3);
+        let detail = if self.detail.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                " {}",
+                truncate_chars(self.detail.trim(), detail_width.max(8))
+            )
+        };
 
         let right = vec![Span::styled(right_text, Style::default().fg(state_color))];
 
         // Pad to fill width.
         let left_str: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let detail_len = detail.chars().count();
         let right_str: String = right.iter().map(|s| s.content.as_ref()).collect();
 
-        let pad = if left_str.len() + right_str.len() < total_width {
-            " ".repeat(total_width - left_str.len() - right_str.len())
+        let pad = if left_str.len() + detail_len + right_str.len() < total_width {
+            " ".repeat(total_width - left_str.len() - detail_len - right_str.len())
         } else {
             " ".to_string()
         };
 
         let mut spans = left;
+        if !detail.is_empty() {
+            spans.push(Span::styled(detail, Style::default().fg(self.theme.dim)));
+        }
         spans.push(Span::raw(pad));
         spans.extend(right);
 
-        let para =
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 30)));
+        let para = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Reset));
         frame.render_widget(para, area);
     }
 
@@ -154,6 +156,8 @@ fn mode_from_state(state: &str) -> &str {
         "thinking"
     } else if state.starts_with("streaming") {
         "stream"
+    } else if state.starts_with("compacting") {
+        "compact"
     } else if state.starts_with("error") {
         "error"
     } else {
@@ -181,6 +185,9 @@ fn short_middle(text: &str, max_chars: usize) -> String {
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
     let mut chars = text.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() {

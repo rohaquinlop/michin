@@ -164,7 +164,7 @@ impl SessionPicker {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "j/k navigate  Enter resume  s sort  N new  Esc new",
+                "Up/Down move | Enter resume | s sort | n new | Esc new",
                 Style::default().fg(self.theme.dim),
             )),
         ]));
@@ -174,18 +174,7 @@ impl SessionPicker {
         let items: Vec<ListItem> = self
             .sessions
             .iter()
-            .map(|s| {
-                let title = &s.title;
-                let model = s.model.as_deref().unwrap_or("unknown");
-                let branch = s.branch.as_deref().unwrap_or("-");
-                let when = format_relative_time(s.created_at);
-                let count = s.message_count;
-                let line = format!(
-                    "{model}  |  {branch}  |  {when}  |  {count} msgs  |  ~{} tok  |  {title}",
-                    s.token_count
-                );
-                ListItem::new(Span::raw(line))
-            })
+            .map(|s| ListItem::new(Span::raw(session_row_label(s))))
             .collect();
 
         let list = List::new(items)
@@ -237,6 +226,16 @@ fn format_relative_time(ts: u64) -> String {
     }
 }
 
+fn session_row_label(session: &SessionInfo) -> String {
+    let model = session.model.as_deref().unwrap_or("unknown");
+    let branch = session.branch.as_deref().unwrap_or("-");
+    let when = format_relative_time(session.created_at);
+    format!(
+        "{branch} | {model} | {when} | {} msgs | ~{} tok | {}",
+        session.message_count, session.token_count, session.title
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +275,21 @@ mod tests {
         picker.cycle_sort_mode();
         assert_eq!(picker.sort_mode_label(), "messages");
         assert_eq!(picker.sessions[0].message_count, 10);
+    }
+
+    #[test]
+    fn session_row_label_starts_with_identity() {
+        let session = SessionInfo {
+            id: "s1".to_string(),
+            title: "conversation".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            branch: Some("feature/ui".to_string()),
+            token_count: 3200,
+            created_at: 1_000,
+            message_count: 18,
+        };
+        let row = session_row_label(&session);
+        assert!(row.starts_with("feature/ui | gpt-5.5 | "));
+        assert!(row.contains("18 msgs"));
     }
 }

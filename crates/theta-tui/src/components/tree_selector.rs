@@ -1,8 +1,9 @@
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 use crate::components::session_picker::SessionInfo;
@@ -78,29 +79,79 @@ impl TreeSelector {
         if !self.visible {
             return;
         }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(area);
         let rows: Vec<ListItem> = self
             .sessions
             .iter()
-            .map(|s| {
-                let label = format!(
-                    "{} | {} | {} msgs | {}",
-                    s.branch.clone().unwrap_or_else(|| "-".into()),
-                    s.model.clone().unwrap_or_else(|| "unknown".into()),
-                    s.message_count,
-                    s.title
-                );
-                ListItem::new(label)
-            })
+            .map(|s| ListItem::new(tree_row_label(s)))
             .collect();
+        let header = Paragraph::new(Line::from(Span::styled(
+            format!("Tree view ({})", filter_label(self.filter)),
+            Style::default().fg(self.theme.accent),
+        )));
+        frame.render_widget(header, chunks[0]);
         let list = List::new(rows)
             .block(
                 Block::default()
-                    .title("Tree (/tree)")
+                    .title("Sessions")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.border)),
             )
             .highlight_style(Style::default().fg(self.theme.accent).bg(Color::DarkGray))
             .highlight_symbol("> ");
-        frame.render_stateful_widget(list, area, &mut self.state);
+        frame.render_stateful_widget(list, chunks[1], &mut self.state);
+        let footer = Paragraph::new(Span::styled(
+            "Up/Down move | Enter resume | Esc close",
+            Style::default().fg(self.theme.dim),
+        ));
+        frame.render_widget(footer, chunks[2]);
+    }
+}
+
+fn tree_row_label(session: &SessionInfo) -> String {
+    format!(
+        "{} | {} | {} msgs | {}",
+        session.branch.clone().unwrap_or_else(|| "-".into()),
+        session.model.clone().unwrap_or_else(|| "unknown".into()),
+        session.message_count,
+        session.title
+    )
+}
+
+fn filter_label(filter: TreeFilter) -> &'static str {
+    match filter {
+        TreeFilter::Default => "default",
+        TreeFilter::NoTools => "no-tools",
+        TreeFilter::UserOnly => "user-only",
+        TreeFilter::LabeledOnly => "labeled-only",
+        TreeFilter::All => "all",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_label_prioritizes_branch_and_model() {
+        let session = SessionInfo {
+            id: "s1".to_string(),
+            title: "long session title".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            branch: Some("feature/readability".to_string()),
+            token_count: 0,
+            created_at: 0,
+            message_count: 12,
+        };
+        let row = tree_row_label(&session);
+        assert!(row.starts_with("feature/readability | gpt-5.5"));
+        assert!(row.contains("12 msgs"));
     }
 }

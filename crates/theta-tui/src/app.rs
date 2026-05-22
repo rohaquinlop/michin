@@ -217,6 +217,7 @@ impl App {
         });
         self.status.set_agent_state("streaming");
         self.streaming = true;
+        self.status.set_detail("sending initial prompt");
         let _ = self.message_tx.send(text);
     }
 
@@ -372,19 +373,19 @@ impl App {
         let main = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
                 Constraint::Min(3),
                 Constraint::Length(editor_height),
+                Constraint::Length(1),
             ])
             .split(area);
 
-        self.status.render(main[0], frame);
-        self.chat.render(main[1], frame);
-        self.editor.render(main[2], frame);
+        self.chat.render(main[0], frame);
+        self.editor.render(main[1], frame);
+        self.status.render(main[2], frame);
 
         // Render autocomplete popup on top (after editor so it overlays).
         if self.editor.autocomplete_active() {
-            self.render_autocomplete(main[2], frame);
+            self.render_autocomplete(main[1], frame);
         }
     }
 
@@ -614,6 +615,7 @@ impl App {
                             tool_name: None,
                             is_streaming: false,
                         });
+                        self.status.set_detail("queued follow-up");
                     } else {
                         let _ = self.action_tx.send(TuiAction::Steer(text.clone()));
                         self.steer_queue_count += 1;
@@ -623,6 +625,7 @@ impl App {
                             tool_name: None,
                             is_streaming: false,
                         });
+                        self.status.set_detail("queued steer message");
                     }
                 } else {
                     self.chat.add_message(ChatMessage {
@@ -633,6 +636,7 @@ impl App {
                     });
                     self.status.set_agent_state("streaming");
                     self.streaming = true;
+                    self.status.set_detail("awaiting assistant response");
                     let _ = self.message_tx.send(text);
                 }
             }
@@ -656,16 +660,16 @@ impl App {
             }
             Action::CopySelection(text) => {
                 if copy_to_clipboard(&text).is_ok() {
-                    self.status.set_tool_progress("copied selection");
+                    self.status.set_detail("copied selection");
                 } else {
-                    self.status.set_tool_progress("copy failed");
+                    self.status.set_detail("copy failed");
                 }
             }
             Action::OpenUrl(url) => {
                 if open::that(&url).is_ok() {
-                    self.status.set_tool_progress("opened link");
+                    self.status.set_detail("opened link");
                 } else {
-                    self.status.set_tool_progress("open link failed");
+                    self.status.set_detail("open link failed");
                 }
             }
             _ => {}
@@ -1009,6 +1013,7 @@ impl App {
                 if self.current_tool.is_none() {
                     self.status.set_agent_state("streaming (responding)");
                 }
+                self.status.set_detail("assistant responding");
             }
             TuiEvent::ThinkingDelta(text) => {
                 let summary = text.lines().next().unwrap_or("").trim();
@@ -1017,25 +1022,22 @@ impl App {
                     self.chat.update_last(&text, ChatRole::Thinking, true);
                 }
                 if summary.is_empty() {
-                    self.status.set_tool_progress("");
+                    self.status.set_detail("");
                 } else {
-                    self.status
-                        .set_tool_progress(&truncate_status_text(summary, 80));
+                    self.status.set_detail(&truncate_status_text(summary, 80));
                 }
             }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state(&format!("tool: {name}"));
-                self.status.set_tool_progress("running...");
+                self.status.set_detail(&format!("{name} running..."));
                 self.tools_in_turn += 1;
-                if self.tool_verbosity == ToolVerbosity::Full {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::Tool,
-                        text: "running".into(),
-                        tool_name: Some(name),
-                        is_streaming: true,
-                    });
-                }
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::Tool,
+                    text: "running".into(),
+                    tool_name: Some(name),
+                    is_streaming: true,
+                });
             }
             TuiEvent::ToolProgress { name, message } => {
                 let interval =
@@ -1046,8 +1048,7 @@ impl App {
                     return;
                 }
                 self.last_tool_progress_at = Some(std::time::Instant::now());
-                self.status
-                    .set_tool_progress(&truncate_status_text(&message, 80));
+                self.status.set_detail(&truncate_status_text(&message, 80));
                 if self.tool_verbosity == ToolVerbosity::Full {
                     self.chat.update_tool(
                         &name,
@@ -1077,21 +1078,19 @@ impl App {
                 }
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
-                    self.status.set_tool_progress("failed");
+                    self.status.set_detail(&format!("{name} failed"));
                     if self.tool_verbosity == ToolVerbosity::Full {
                         self.chat
                             .update_tool(&name, &format!("\nfailed\n{summary}"), false);
                     } else {
-                        self.chat.add_message(ChatMessage {
-                            role: ChatRole::Tool,
-                            text: format!("[tool:{name}] failed: {}", compact_summary(&summary)),
-                            tool_name: Some(name),
-                            is_streaming: false,
-                        });
+                        self.chat.complete_tool_compact(
+                            &name,
+                            &format!("failed: {}", compact_summary(&summary)),
+                        );
                     }
                 } else {
                     self.status.set_agent_state("streaming (post-tool)");
-                    self.status.set_tool_progress(&format!("{name} done"));
+                    self.status.set_detail(&format!("{name} done"));
                     if self.tool_verbosity == ToolVerbosity::Full {
                         let suffix = if summary.is_empty() {
                             "\ndone".to_string()
@@ -1100,12 +1099,8 @@ impl App {
                         };
                         self.chat.update_tool(&name, &suffix, false);
                     } else {
-                        self.chat.add_message(ChatMessage {
-                            role: ChatRole::Tool,
-                            text: format!("[tool:{name}] {}", compact_summary(&summary)),
-                            tool_name: Some(name),
-                            is_streaming: false,
-                        });
+                        self.chat
+                            .complete_tool_compact(&name, &compact_summary(&summary));
                     }
                 }
             }
@@ -1117,7 +1112,7 @@ impl App {
                 self.turn_intent = "chat".to_string();
                 self.status.set_turn_index(self.turn_index);
                 self.status.set_agent_state("streaming (starting)");
-                self.status.set_tool_progress("");
+                self.status.set_detail("");
             }
             TuiEvent::TurnEnd { stop_reason } => {
                 self.chat.finish_last(ChatRole::Assistant);
@@ -1145,16 +1140,24 @@ impl App {
                 }
                 self.status
                     .set_agent_state(&format!("idle (stopped: {stop_reason})"));
-                self.status.set_tool_progress("");
+                self.status.set_detail(&format!(
+                    "turn #{}: {}",
+                    self.turn_index,
+                    if stop_reason == "error" {
+                        "failed"
+                    } else {
+                        "complete"
+                    }
+                ));
             }
             TuiEvent::ContextCompacted { trimmed_count } => {
                 self.status.set_agent_state("compacting");
                 if trimmed_count == 1 {
                     self.status
-                        .set_tool_progress(&format!("trimmed {trimmed_count} old message"));
+                        .set_detail(&format!("trimmed {trimmed_count} old message"));
                 } else {
                     self.status
-                        .set_tool_progress(&format!("trimmed {trimmed_count} old messages"));
+                        .set_detail(&format!("trimmed {trimmed_count} old messages"));
                 }
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
@@ -1180,6 +1183,7 @@ impl App {
             TuiEvent::SessionCreated { id, model } => {
                 self.status.session_id = id;
                 self.status.model = model;
+                self.status.set_detail("session created");
             }
             TuiEvent::AgentEnd => {
                 self.chat.finish_last(ChatRole::Assistant);
@@ -1192,8 +1196,8 @@ impl App {
                 self.chat.invalidate_render_cache();
                 self.streaming = false;
                 self.current_tool = None;
-                self.status.set_tool_progress("");
                 self.status.set_agent_state("idle");
+                self.status.set_detail("");
             }
             TuiEvent::Info(msg) => {
                 if self.diag_enabled || !is_diagnostic_message(&msg) {
@@ -1220,6 +1224,7 @@ impl App {
                     is_streaming: false,
                 });
                 self.status.set_agent_state("error");
+                self.status.set_detail(&truncate_status_text(&msg, 80));
             }
             TuiEvent::LoadHistory(entries) => {
                 self.chat.clear_messages();
@@ -1248,8 +1253,6 @@ impl App {
             TuiEvent::QueueStatus { steer, follow_up } => {
                 self.steer_queue_count = steer;
                 self.follow_up_queue_count = follow_up;
-                self.status
-                    .set_tool_progress(&format!("queue steer:{steer} follow-up:{follow_up}"));
             }
             TuiEvent::TreeSessions { sessions, filter } => {
                 self.tree_selector

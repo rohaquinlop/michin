@@ -183,6 +183,28 @@ impl Chat {
         self.cache_dirty = true;
     }
 
+    pub fn complete_tool_compact(&mut self, name: &str, text: &str) {
+        if let Some(&idx) = self.active_tool_message_idx.get(name)
+            && let Some(msg) = self.messages.get_mut(idx)
+            && msg.role == ChatRole::Tool
+            && msg.tool_name.as_deref() == Some(name)
+        {
+            msg.text = text.to_string();
+            msg.is_streaming = false;
+            self.active_tool_message_idx.remove(name);
+            self.cache_dirty = true;
+            return;
+        }
+
+        self.messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            text: text.to_string(),
+            tool_name: Some(name.to_string()),
+            is_streaming: false,
+        });
+        self.cache_dirty = true;
+    }
+
     pub fn finish_last(&mut self, role: ChatRole) {
         if let Some(last) = self.messages.last_mut()
             && last.role == role
@@ -218,14 +240,14 @@ impl Chat {
             ),
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Thinking => ("[thinking] ", Style::default().fg(self.theme.dim)),
-            ChatRole::Tool => ("  ", Style::default().fg(self.theme.warning)),
-            ChatRole::System => ("  ", Style::default().fg(self.theme.dim)),
+            ChatRole::Tool => ("[tool] ", Style::default().fg(self.theme.warning)),
+            ChatRole::System => ("[system] ", Style::default().fg(self.theme.dim)),
         };
 
         let text = if msg.role == ChatRole::Tool {
             let body = truncate_output(&msg.text, 500);
             if let Some(name) = msg.tool_name.as_deref() {
-                format!("[tool:{name}] {body}")
+                format!("{name}: {body}")
             } else {
                 body
             }
@@ -522,6 +544,13 @@ impl Chat {
             && inner_width > 0
             && let Some(msg) = self.messages.last()
         {
+            if self.cached_message_count > 0
+                && let Some(prev) = self.messages.get(self.cached_message_count - 1)
+                && should_insert_gap(prev.role.clone(), msg.role.clone())
+            {
+                self.cached_visible_line_texts.push(String::new());
+                self.cached_wrapped_lines.push(Line::raw(""));
+            }
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
@@ -544,12 +573,20 @@ impl Chat {
             return;
         }
 
+        let mut prev_role: Option<ChatRole> = None;
         for msg in &self.messages {
+            if let Some(prev) = prev_role.clone()
+                && should_insert_gap(prev, msg.role.clone())
+            {
+                self.cached_visible_line_texts.push(String::new());
+                self.cached_wrapped_lines.push(Line::raw(""));
+            }
             let lines = self.format_message(msg, inner_width);
             for line in wrap_styled_lines(&lines, inner_width) {
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_wrapped_lines.push(line);
             }
+            prev_role = Some(msg.role.clone());
         }
         self.cached_message_count = self.messages.len();
         self.cache_dirty = false;
@@ -684,6 +721,19 @@ fn truncate_output(text: &str, max_len: usize) -> String {
     } else {
         let truncated: String = text.chars().take(max_len).collect();
         format!("{}... ({} chars total)", truncated, text.chars().count())
+    }
+}
+
+fn should_insert_gap(prev: ChatRole, curr: ChatRole) -> bool {
+    role_group(prev) != role_group(curr)
+}
+
+fn role_group(role: ChatRole) -> u8 {
+    match role {
+        ChatRole::User => 1,
+        ChatRole::Assistant | ChatRole::Thinking => 2,
+        ChatRole::Tool => 3,
+        ChatRole::System => 4,
     }
 }
 
@@ -1559,6 +1609,28 @@ mod tests {
 |     | aces_that_must_wrap      |
 | B   | short                    |";
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn compact_tool_completion_updates_started_row() {
+        let mut chat = Chat::new(Theme::default());
+        chat.add_message(ChatMessage {
+            role: ChatRole::Tool,
+            text: "running".to_string(),
+            tool_name: Some("read".to_string()),
+            is_streaming: true,
+        });
+        chat.complete_tool_compact("read", "done: src/main.rs");
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].text, "done: src/main.rs");
+        assert!(!chat.messages[0].is_streaming);
+    }
+
+    #[test]
+    fn inserts_gap_between_role_groups() {
+        assert!(should_insert_gap(ChatRole::User, ChatRole::Assistant));
+        assert!(!should_insert_gap(ChatRole::Assistant, ChatRole::Thinking));
+        assert!(should_insert_gap(ChatRole::Assistant, ChatRole::Tool));
     }
 
     #[test]
