@@ -294,6 +294,7 @@ cargo run -- <args>
 ## Git Rules
 
 - **Never commit unless the user explicitly asks.**
+- **Never push, pull, or interact with remotes.** Remote operations (push, pull, fetch, clone) are always done by the user, never by the agent.
 - **Stage only files you changed:** `git add <specific-files>`. Never `git add -A` or `git add .`.
 - **Check `git status`** before every commit.
 - **No `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`.** These destroy work.
