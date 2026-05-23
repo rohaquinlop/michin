@@ -771,9 +771,10 @@ async fn run_single_turn(
             Err(e) => {
                 state.is_streaming = false;
                 state.last_turn_end_reason = Some(TurnEndReason::ProviderFailure);
+                let details = format_agent_error_chain(&e);
                 let _ = event_tx.send(AgentEvent::TurnTerminated {
                     reason: TurnEndReason::ProviderFailure,
-                    details: e.to_string(),
+                    details,
                     turn: turn_index,
                     round: tool_round,
                 });
@@ -1542,6 +1543,17 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn format_agent_error_chain(error: &AgentError) -> String {
+    let mut out = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(err) = source {
+        out.push_str("\ncaused by: ");
+        out.push_str(&err.to_string());
+        source = err.source();
+    }
+    out
 }
 
 #[cfg(test)]
