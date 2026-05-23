@@ -376,6 +376,25 @@ async fn run_single_turn(
                             continue;
                         }
                     }
+                    if intent == AgentIntent::AnalyzeOnly && !executed_tools_in_turn {
+                        consecutive_noop_rounds += 1;
+                        if consecutive_noop_rounds <= 1 {
+                            let _ = event_tx.send(AgentEvent::TurnDecision {
+                                reason: TurnDecisionReason::NoopRetry,
+                                details:
+                                    "analyze-only intent produced no tool calls; retrying once"
+                                        .to_string(),
+                                turn: turn_index,
+                                round: tool_round,
+                            });
+                            state.messages.push(Message::User {
+                                content: vec![ContentBlock::text(ANALYZE_RETRY_PROMPT)],
+                                timestamp: now_ms(),
+                            });
+                            tool_round += 1;
+                            continue;
+                        }
+                    }
                     break;
                 }
                 consecutive_noop_rounds = 0;
@@ -469,6 +488,7 @@ async fn run_single_turn(
 }
 
 const VALIDATION_RETRY_PROMPT: &str = "This is an execution request. Call the relevant tools now. If blocked, state the blocker clearly and stop.";
+const ANALYZE_RETRY_PROMPT: &str = "This is an analysis request. Use read-only tools now (read/grep/find/ls or read-only bash) and report findings.";
 
 fn classify_action_blocker(text: &str) -> bool {
     let t = text.to_lowercase();

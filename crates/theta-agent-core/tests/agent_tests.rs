@@ -849,6 +849,68 @@ async fn test_commit_turn_retries_and_executes_git_bash_tool() {
 }
 
 #[tokio::test]
+async fn test_analyze_only_turn_retries_and_executes_read_only_tool() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("I'll validate AGENTS.md for correctness."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::ToolCallStart {
+                id: "call_a1".into(),
+                name: "read".into(),
+            },
+            AssistantMessageEvent::tool_call_delta("call_a1", r#"{"input":"analyze"}"#),
+            AssistantMessageEvent::ToolCallEnd {
+                id: "call_a1".into(),
+            },
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("Reviewed."),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .add_tool(Arc::new(MockTool::new(
+            "read",
+            ToolExecutionMode::Sequential,
+        )))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text(
+            "Review the current project and validate if AGENTS.md needs updates",
+        )])
+        .await
+        .unwrap();
+
+    let state = agent.state().await;
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|msg| matches!(msg, Message::ToolResult { tool_name, .. } if tool_name == "read")),
+        "analyze-only turn should retry and execute read-only tool calls"
+    );
+}
+
+#[tokio::test]
 async fn test_agent_abort() {
     let model = test_model();
 
