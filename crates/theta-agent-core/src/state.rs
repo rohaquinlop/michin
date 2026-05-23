@@ -95,4 +95,21 @@ impl AgentState {
             .sum();
         msg_tokens + sys_tokens
     }
+
+    /// The last API-reported input token count (real, from the most recent
+    /// assistant message's usage). This is the actual prompt token count as
+    /// counted by the provider.
+    pub fn last_real_input_tokens(&self) -> Option<u32> {
+        self.messages.iter().rev().find_map(|m| match m {
+            Message::Assistant { usage, .. } => usage.as_ref().map(|u| u.input_tokens),
+            _ => None,
+        })
+    }
+
+    /// Best-effort context consumption: API-reported input tokens if available,
+    /// otherwise the approximate token count.
+    pub fn context_tokens(&self) -> u32 {
+        self.last_real_input_tokens()
+            .unwrap_or_else(|| self.token_count())
+    }
 }

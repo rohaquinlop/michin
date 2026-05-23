@@ -174,6 +174,79 @@ impl Agent {
         self.state.read().await.messages.len()
     }
 
+    /// Live context stats for the TUI.
+    pub async fn context_stats(&self) -> (usize, u32, Option<u32>) {
+        let state = self.state.read().await;
+        (
+            state.messages.len(),
+            state.token_count(),
+            state.last_real_input_tokens(),
+        )
+    }
+
+    /// Manual compaction: trim old messages without running a loop.
+    /// Forces compaction regardless of the `enabled` config flag.
+    /// Sends ContextCompacted event and returns how many were trimmed.
+    pub async fn compact_context(&self) -> Result<u32, AgentError> {
+        let (result, _compaction_config) = {
+            let state = self.state.read().await;
+            let system_tokens: u32 = state
+                .system_prompt
+                .iter()
+                .map(|b| {
+                    theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
+                })
+                .sum();
+            let llm_msgs: Vec<theta_ai::Message> =
+                state.llm_messages().into_iter().cloned().collect();
+            // Force-enable compaction for manual trigger (ignore config.enabled).
+            let mut force_config = self.config.compaction.clone();
+            force_config.enabled = true;
+            (
+                crate::compact::compact_messages(
+                    &llm_msgs,
+                    system_tokens,
+                    state.model.context_window,
+                    &force_config,
+                ),
+                self.config.compaction.clone(),
+            )
+        };
+
+        let trimmed = result.trimmed_count;
+        if trimmed > 0 {
+            let _ = self.event_tx.send(AgentEvent::ContextCompacted {
+                trimmed_count: trimmed,
+                tokens_before: result.tokens_before,
+                tokens_after: result.tokens_after,
+            });
+
+            // Apply compaction: keep ModelChange/ThinkingLevelChange + compacted result.
+            let mut state = self.state.write().await;
+            let meta_entries: Vec<_> = state
+                .messages
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        theta_ai::Message::ModelChange { .. }
+                            | theta_ai::Message::ThinkingLevelChange { .. }
+                    )
+                })
+                .cloned()
+                .collect();
+            // Prepend meta entries (oldest first), then compacted messages.
+            let mut new_messages = meta_entries;
+            // Sort compacted messages by timestamp to keep chronological order.
+            let mut compacted = result.messages;
+            compacted.sort_by_key(|m| m.timestamp());
+            new_messages.extend(compacted);
+            state.messages = new_messages;
+        }
+
+        Ok(trimmed)
+    }
+
     // ── Run control ───────────────────────────────────────────
 
     /// Start a new agent run with a user prompt.

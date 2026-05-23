@@ -296,7 +296,11 @@ pub async fn run_tui(
         },
         CommandEntry {
             name: "session".into(),
-            description: "Show current session info".into(),
+            description: "Show session info (tokens, context window, compaction)".into(),
+        },
+        CommandEntry {
+            name: "compact".into(),
+            description: "Manually compact context to fit in context window".into(),
         },
         CommandEntry {
             name: "fork".into(),
@@ -447,6 +451,8 @@ async fn create_agent(
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
 fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, hz: u64) {
     tokio::spawn(async move {
+        // Cache immutable config values.
+        let reserve_tokens = agent.config().compaction.reserve_tokens;
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut pending_tool_progress: HashMap<String, String> = HashMap::new();
@@ -521,7 +527,24 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         });
                     }
                     Ok(AgentEvent::MessageEnd { message }) => {
-                        if let theta_ai::Message::Assistant { content, .. } = message {
+                        if let theta_ai::Message::Assistant { content, usage, .. } = &message {
+                            // Forward real token usage to TUI status bar.
+                            if let Some(u) = usage {
+                                let state = agent.state().await;
+                                let avail = state
+                                    .model
+                                    .context_window
+                                    .saturating_sub(reserve_tokens);
+                                let pct = if avail > 0 {
+                                    (u.input_tokens as f64 / avail as f64 * 100.0) as u32
+                                } else {
+                                    0
+                                };
+                                let _ = event_tx.send(TuiEvent::ContextTokens {
+                                    tokens: u.input_tokens,
+                                    pct,
+                                });
+                            }
                             if !saw_assistant_text_delta {
                                 let final_text = content
                                     .iter()
@@ -565,8 +588,8 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     Ok(AgentEvent::AgentEnd { .. }) => {
                         let _ = event_tx.send(TuiEvent::AgentEnd);
                     }
-                    Ok(AgentEvent::ContextCompacted { trimmed_count, .. }) => {
-                        let _ = event_tx.send(TuiEvent::ContextCompacted { trimmed_count });
+                    Ok(AgentEvent::ContextCompacted { trimmed_count, tokens_before, tokens_after }) => {
+                        let _ = event_tx.send(TuiEvent::ContextCompacted { trimmed_count, tokens_before, tokens_after });
                     }
                     Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
                         let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
@@ -964,6 +987,22 @@ async fn handle_tui_action(
                         model: mid.clone(),
                     });
 
+                    // Emit context token stats from the loaded session.
+                    let (_, _, last_input) = agent.context_stats().await;
+                    if let Some(tokens) = last_input {
+                        let state = agent.state().await;
+                        let avail = state
+                            .model
+                            .context_window
+                            .saturating_sub(agent.config().compaction.reserve_tokens);
+                        let pct = if avail > 0 {
+                            (tokens as f64 / avail as f64 * 100.0) as u32
+                        } else {
+                            0
+                        };
+                        let _ = event_tx.send(TuiEvent::ContextTokens { tokens, pct });
+                    }
+
                     // Send history to display in chat.
                     let history: Vec<HistoryEntry> = messages
                         .into_iter()
@@ -1008,6 +1047,46 @@ async fn handle_tui_action(
             agent.steer(vec![theta_ai::ContentBlock::Text { text }]);
             let (steer, follow_up) = agent.queue_lengths();
             let _ = event_tx.send(TuiEvent::QueueStatus { steer, follow_up });
+        }
+        TuiAction::ShowSessionInfo => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+            let state = agent.state().await;
+            let (msg_count, approx_tokens, real_input_tokens) = agent.context_stats().await;
+            let _ = event_tx.send(TuiEvent::SessionInfo {
+                message_count: msg_count,
+                approx_tokens,
+                real_input_tokens,
+                context_window: state.model.context_window,
+                compaction_enabled: agent.config().compaction.enabled,
+                reserve_tokens: agent.config().compaction.reserve_tokens,
+                model_id: state.model.id.clone(),
+                provider: provider_to_string(state.model.provider),
+            });
+        }
+        TuiAction::CompactContext => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+            match agent.compact_context().await {
+                Ok(trimmed) => {
+                    if trimmed > 0 {
+                        let _ = event_tx.send(TuiEvent::Info(format!(
+                            "Compacted {trimmed} old messages from context."
+                        )));
+                    } else {
+                        let _ = event_tx.send(TuiEvent::Info(
+                            "Context is already within the window — nothing to compact.".into(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let _ = event_tx.send(TuiEvent::Error(format!("Compaction failed: {e}")));
+                }
+            }
         }
         TuiAction::FollowUp(text) => {
             let Some(agent) = agent_cell.read().await.clone() else {

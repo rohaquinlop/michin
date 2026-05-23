@@ -23,6 +23,7 @@ use crate::model::Model;
 use crate::provider::{EventStream, Provider};
 use crate::types::{
     ContentBlock, Context, SimpleStreamOptions, StopReason, StreamOptions, ThinkingLevel, Tool,
+    Usage,
 };
 
 const CODEX_TOKEN_ENV: &str = "OPENAI_CODEX_TOKEN";
@@ -607,6 +608,29 @@ fn done_event() -> AssistantMessageEvent {
     }
 }
 
+/// Parse usage from a Codex/OpenAI Responses API usage block.
+/// Format: {"input_tokens": N, "output_tokens": N, "total_tokens": N,
+///          "input_tokens_details": {"cached_tokens": N}}
+fn parse_codex_usage(usage: &Value) -> Usage {
+    Usage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        cache_write_tokens: 0,
+        cache_read_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        cost: None,
+    }
+}
+
 #[derive(Default)]
 struct CodexEventParser {
     text_started: bool,
@@ -808,6 +832,12 @@ impl CodexEventParser {
                     .and_then(|o| o.as_array())
                     .cloned()
                     .unwrap_or_default();
+
+                // Parse usage from the top-level response if available.
+                let usage = data
+                    .get("response")
+                    .and_then(|r| r.get("usage"))
+                    .map(parse_codex_usage);
                 for item in &output {
                     if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
                         let name = item
@@ -866,7 +896,7 @@ impl CodexEventParser {
                     } else {
                         StopReason::Stop
                     },
-                    usage: None,
+                    usage,
                 });
                 self.done_seen = true;
             }

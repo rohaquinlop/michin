@@ -1157,3 +1157,83 @@ async fn test_agent_steer() {
         "should contain steered response, got: {full}"
     );
 }
+
+#[tokio::test]
+async fn test_manual_compaction_trims_messages() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![vec![
+        AssistantMessageEvent::text_delta("All done."),
+        AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+
+    // Inject many messages to exceed the 128k context window.
+    {
+        let mut raw: Vec<Message> = Vec::new();
+        let pad = "padding text to consume more tokens ".repeat(10);
+        for i in 0..5000 {
+            raw.push(Message::User {
+                content: vec![ContentBlock::text(format!("user message {i} {pad}"))],
+                timestamp: i as u64,
+            });
+            raw.push(Message::Assistant {
+                content: vec![ContentBlock::text(format!("assistant response {i} {pad}"))],
+                api: None,
+                provider: None,
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: (i + 5000) as u64,
+            });
+        }
+        agent.load_messages(raw).await;
+    }
+
+    let before_count = agent.state().await.messages.len();
+    assert_eq!(before_count, 10000);
+
+    // Manual compaction should trim.
+    let trimmed = agent.compact_context().await.unwrap();
+    assert!(trimmed > 0, "should trim messages from 128k context window");
+
+    let after_count = agent.state().await.messages.len();
+    assert!(
+        after_count < before_count,
+        "after {after_count} should be less than {before_count}"
+    );
+}
+
+#[tokio::test]
+async fn test_context_stats_returns_token_counts() {
+    let model = test_model();
+    let mock = MockProvider::new(vec![vec![
+        AssistantMessageEvent::text_delta("ok"),
+        AssistantMessageEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        model: model.clone(),
+    });
+
+    let agent = Agent::new(model, registry, catalog);
+    agent
+        .prompt(vec![ContentBlock::text("hello world")])
+        .await
+        .unwrap();
+
+    let (msg_count, token_count, _real) = agent.context_stats().await;
+    assert_eq!(msg_count, 2);
+    assert!(token_count > 0, "token count should be positive");
+}

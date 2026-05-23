@@ -20,6 +20,14 @@ pub struct StatusBar {
     pub detail: String,
     pub turn_index: u32,
     pub show_diagnostics: bool,
+    /// Context token percentage (0-100) from last API call.
+    pub ctx_pct: u32,
+    /// Context window size (set by TUI on model switch).
+    pub context_window: u32,
+    /// Reserve tokens for the model's response.
+    pub reserve_tokens: u32,
+    /// Context tokens from last API call.
+    pub context_tokens: u32,
     /// Extension status rows: rows[0] is primary bottom row.
     pub extension_rows: Vec<StatusRow>,
     /// Number of rows that need their own visual row (from tui.row() callbacks),
@@ -47,6 +55,10 @@ impl StatusBar {
             detail: String::new(),
             turn_index: 0,
             show_diagnostics: false,
+            ctx_pct: 0,
+            context_window: 0,
+            reserve_tokens: 4096,
+            context_tokens: 0,
             extension_rows: Vec::new(),
             extension_row_count: 0,
             spinner_idx: 0,
@@ -183,16 +195,45 @@ impl StatusBar {
         right_badge: &str,
         state_color: Color,
     ) {
-        let model_str = short_middle(&self.model, 28);
+        let model_str = if self.ctx_pct > 0 {
+            short_middle(&self.model, 16)
+        } else {
+            short_middle(&self.model, 28)
+        };
         let thinking_str = short_middle(&self.thinking, 10);
 
-        let model_spans = vec![
+        let ctx_color = if self.ctx_pct >= 90 {
+            self.theme.error
+        } else if self.ctx_pct >= 70 {
+            self.theme.warning
+        } else {
+            self.theme.success
+        };
+
+        let mut model_spans = vec![
             Span::styled("[".to_string(), Style::default().fg(self.theme.border)),
             Span::styled(model_str, Style::default().fg(self.theme.dim)),
             Span::styled(":".to_string(), Style::default().fg(self.theme.border)),
             Span::styled(thinking_str, Style::default().fg(self.theme.dim)),
-            Span::styled("]".to_string(), Style::default().fg(self.theme.border)),
         ];
+        if self.ctx_pct > 0 {
+            model_spans.push(Span::styled(
+                " ".to_string(),
+                Style::default().fg(self.theme.border),
+            ));
+            model_spans.push(Span::styled(
+                "ctx:".to_string(),
+                Style::default().fg(self.theme.dim),
+            ));
+            model_spans.push(Span::styled(
+                format!("{}%", self.ctx_pct),
+                Style::default().fg(ctx_color),
+            ));
+        }
+        model_spans.push(Span::styled(
+            "]".to_string(),
+            Style::default().fg(self.theme.border),
+        ));
 
         let ext_left = ext_row.map(|r| join_parts(&r.left)).unwrap_or_default();
         let ext_right = ext_row.map(|r| join_parts(&r.right)).unwrap_or_default();

@@ -66,6 +66,10 @@ pub enum TuiAction {
     FollowUp(String),
     /// Start Codex OAuth flow (triggered from login_flow).
     StartCodexOAuth,
+    /// Request live session info (token counts, context window, etc.).
+    ShowSessionInfo,
+    /// Manually compact context now (even if under the auto-compaction threshold).
+    CompactContext,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -94,6 +98,8 @@ pub enum TuiEvent {
     AgentEnd,
     ContextCompacted {
         trimmed_count: u32,
+        tokens_before: u32,
+        tokens_after: u32,
     },
     Retrying {
         attempt: u32,
@@ -108,6 +114,17 @@ pub enum TuiEvent {
     },
     /// Informational system message (not an error).
     Info(String),
+    /// Live session info: token counts, context window, compaction status.
+    SessionInfo {
+        message_count: usize,
+        approx_tokens: u32,
+        real_input_tokens: Option<u32>,
+        context_window: u32,
+        compaction_enabled: bool,
+        reserve_tokens: u32,
+        model_id: String,
+        provider: String,
+    },
     Error(String),
     /// Load session history into the chat display.
     LoadHistory(Vec<HistoryEntry>),
@@ -127,6 +144,11 @@ pub enum TuiEvent {
     },
     /// Extension status line update from Rhai scripts.
     ExtensionStatus(ExtensionStatusPayload),
+    /// Real token usage from the last API call (input_tokens from usage).
+    ContextTokens {
+        tokens: u32,
+        pct: u32,
+    },
 }
 
 /// Structured status-bar data from extensions (Rhai scripts).
@@ -732,7 +754,8 @@ impl App {
                     "  /model          Open model picker (available models)",
                     "  /thinking <lvl> Set thinking level (off, low, medium, high)",
                     "  /clear          Clear the chat display",
-                    "  /session        Show current session info",
+                    "  /session        Show session info (tokens, context window, compaction)",
+                    "  /compact        Manually compact context to fit in context window",
                     "  /fork           Fork the current session",
                     "  /sessions       List recent sessions (in picker press s to sort)",
                     "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
@@ -793,16 +816,16 @@ impl App {
                 self.chat.clear_messages();
             }
             "session" | "s" => {
-                let info = format!(
-                    "Session: {}\nModel: {}\nThinking: {}",
-                    self.status.session_id, self.status.model, self.status.thinking
-                );
+                let _ = self.action_tx.send(TuiAction::ShowSessionInfo);
+            }
+            "compact" | "comp" => {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
-                    text: info,
+                    text: "Compacting context...".into(),
                     tool_name: None,
                     is_streaming: false,
                 });
+                let _ = self.action_tx.send(TuiAction::CompactContext);
             }
             "login" => {
                 // Start the login flow.
@@ -1169,14 +1192,20 @@ impl App {
                     }
                 ));
             }
-            TuiEvent::ContextCompacted { trimmed_count } => {
+            TuiEvent::ContextCompacted {
+                trimmed_count,
+                tokens_before,
+                tokens_after,
+            } => {
                 self.status.set_agent_state("compacting");
                 if trimmed_count == 1 {
-                    self.status
-                        .set_detail(&format!("trimmed {trimmed_count} old message"));
+                    self.status.set_detail(&format!(
+                        "trimmed {trimmed_count} old message (~{tokens_before}→~{tokens_after} tok)"
+                    ));
                 } else {
-                    self.status
-                        .set_detail(&format!("trimmed {trimmed_count} old messages"));
+                    self.status.set_detail(&format!(
+                        "trimmed {trimmed_count} old messages (~{tokens_before}→~{tokens_after} tok)"
+                    ));
                 }
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
@@ -1227,6 +1256,44 @@ impl App {
                         is_streaming: false,
                     });
                 }
+            }
+            TuiEvent::SessionInfo {
+                message_count,
+                approx_tokens,
+                real_input_tokens,
+                context_window,
+                compaction_enabled,
+                reserve_tokens,
+                model_id,
+                provider,
+            } => {
+                let avail = context_window.saturating_sub(reserve_tokens);
+                let display_tokens = real_input_tokens.unwrap_or(approx_tokens);
+                let token_source = if real_input_tokens.is_some() {
+                    "(API)"
+                } else {
+                    "(est)"
+                };
+                let pct = if avail > 0 {
+                    (display_tokens as f64 / avail as f64 * 100.0) as u32
+                } else {
+                    0
+                };
+                let comp_state = if compaction_enabled {
+                    format!("on (auto at > {avail} tokens, reserve: {reserve_tokens})")
+                } else {
+                    "off".into()
+                };
+                let info = format!(
+                    "Session: {}\nModel: {model_id} ({provider})\nMessages: {message_count}\nContext tokens: ~{display_tokens} {token_source} / {avail} available ({pct}%)\nContext window: {context_window} tokens\nAuto-compaction: {comp_state}\n\nUse /compact to trim context now.",
+                    self.status.session_id
+                );
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: info,
+                    tool_name: None,
+                    is_streaming: false,
+                });
             }
             TuiEvent::Error(msg) => {
                 self.turn_intent = infer_intent_from_error(&msg).to_string();
@@ -1285,6 +1352,10 @@ impl App {
                 self.status.set_extension_rows(payload.rows);
                 self.status
                     .set_extension_row_count(payload.extension_row_count);
+            }
+            TuiEvent::ContextTokens { tokens, pct } => {
+                self.status.context_tokens = tokens;
+                self.status.ctx_pct = pct;
             }
         }
     }
