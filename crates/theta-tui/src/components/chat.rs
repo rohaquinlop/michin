@@ -87,6 +87,10 @@ impl Chat {
         self.cache_dirty = true;
     }
 
+    pub fn cache_dirty(&self) -> bool {
+        self.cache_dirty
+    }
+
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.active_tool_message_idx.clear();

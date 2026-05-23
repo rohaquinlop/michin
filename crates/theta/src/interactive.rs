@@ -390,6 +390,16 @@ pub async fn run_tui(
                 TuiEvent::ToolProgress { name, message } => {
                     pending_progress.insert(name, message);
                 }
+                // Lifecycle events must never be dropped — blocking send ensures
+                // the spinner and streaming state never desync from the agent.
+                evt @ (TuiEvent::TurnStart | TuiEvent::TurnEnd { .. } | TuiEvent::AgentEnd) => {
+                    if !pending_progress.is_empty() {
+                        for (name, message) in pending_progress.drain() {
+                            let _ = event_tx.try_send(TuiEvent::ToolProgress { name, message });
+                        }
+                    }
+                    let _ = event_tx.send(evt).await;
+                }
                 evt => {
                     if !pending_progress.is_empty() {
                         let pending = pending_progress.len();

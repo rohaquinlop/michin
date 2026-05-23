@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem},
 };
 use tokio::sync::mpsc;
+use tokio::time::{Duration, MissedTickBehavior};
 
 use crate::components::CommandEntry;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
@@ -345,21 +346,39 @@ impl App {
         term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> anyhow::Result<()> {
         let mut reader = EventStream::new();
+        // Keep the UI responsive and animate status spinner even when no new
+        // chat text arrives.
+        let mut redraw_tick = tokio::time::interval(Duration::from_millis(80));
+        redraw_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut needs_render = true;
 
         while self.running {
-            term.draw(|frame| self.draw(frame))?;
+            if needs_render {
+                term.draw(|frame| self.draw(frame))?;
+                needs_render = false;
+            }
 
             tokio::select! {
+                _ = redraw_tick.tick() => {
+                    needs_render = true;
+                }
                 crossterm_event = reader.next() => {
                     if let Some(Ok(event)) = crossterm_event {
                         self.handle_input_event(&event);
+                        needs_render = true;
                     }
                 }
                 Some(event) = self.event_rx.recv() => {
                     self.handle_agent_event(event);
+                    needs_render = true;
+                    // Drain remaining events in the same loop turn to avoid
+                    // channel backlog under high event throughput.
                     for _ in 0..63 {
                         match self.event_rx.try_recv() {
-                            Ok(next) => self.handle_agent_event(next),
+                            Ok(next) => {
+                                self.handle_agent_event(next);
+                                needs_render = true;
+                            }
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                                 self.running = false;
