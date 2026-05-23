@@ -1654,4 +1654,29 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed.as_secs() < 10);
     }
+
+    #[test]
+    fn test_clear_messages() {
+        let mut chat = Chat::new(Theme::default());
+        chat.add_message(ChatMessage {
+            role: ChatRole::User,
+            text: "hello".into(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        chat.add_message(ChatMessage {
+            role: ChatRole::Assistant,
+            text: "hi".into(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        assert_eq!(chat.messages.len(), 2);
+
+        chat.clear_messages();
+
+        assert!(chat.messages.is_empty());
+        assert!(chat.active_tool_message_idx.is_empty());
+        assert_eq!(chat.cached_message_count, 0);
+        assert!(chat.cache_dirty);
+    }
 }
