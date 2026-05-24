@@ -4,10 +4,10 @@
 
 ## Conversational Style
 
-- Keep answers short and concise.
+- Short, concise answers.
 - No emojis in commits, code, or docs.
-- No fluff or cheerful filler. Technical prose only.
-- Answer questions first, then implement.
+- No fluff. Technical prose only.
+- Answer first, then implement.
 
 ## Project Philosophy
 
@@ -15,7 +15,7 @@ Theta = minimal terminal coding-agent harness in Rust, inspired by [pi](https://
 
 > **Adapt theta to your workflows, not the other way around.**
 
-Extend Theta without forking internals: custom tools via Rust traits, skills via Markdown files, prompt templates, scripts via Rhai, themes. No sub-agents, no plan mode in core.
+Extend without forking internals: custom tools via Rust traits, skills via Markdown, prompt templates, Rhai scripts, themes. No sub-agents, no plan mode in core.
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Use this `AGENTS.md` as canonical implementation guidance and phase status.
 
 ## Phase Completion Status
 
-All six phases complete. Project in active maintenance and polish.
+All six phases complete. Active maintenance and polish.
 
 | Phase            | Status | Key Deliverables                                                                                                                                |
 | ---------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -97,7 +97,7 @@ All six phases complete. Project in active maintenance and polish.
 | `crates/theta/src/config.rs`                                    | `ThetaConfig` — config.toml parsing, `AuthConfig` — auth.json with env fallback, `to_agent_config()`                    |
 | `crates/theta/src/settings.rs`                                  | `ThetaSettings` — persistent settings.json (last model, thinking, steering mode, etc.)                                  |
 | `crates/theta/src/interactive.rs`                               | TUI mode glue: agent creation, model resolution, auth auto-switch, TUI ↔ agent bridge                                   |
-| `crates/theta/src/system_prompt.rs`                             | System prompt builder: AGENTS.md, CLAUDE.md, skills, extensions, tools, runtime context, guidelines                     |
+| `crates/theta/src/system_prompt.rs`                             | System prompt builder: AGENTS.md, CLAUDE.md, skills, extensions, tools, runtime context, guidelines, active skills block |
 | `crates/theta/src/skills.rs`                                    | Skill discovery (global + project-local), YAML frontmatter parsing, `<available_skills>` XML generation                 |
 | `crates/theta/src/scripts.rs`                                   | Extension script discovery for system prompt injection                                                                  |
 | `crates/theta/src/session.rs`                                   | `SessionManager` — pi-compatible JSONL sessions in `~/.theta/sessions/`                                                 |
@@ -114,18 +114,18 @@ All six phases complete. Project in active maintenance and polish.
 ## Rust Conventions
 
 - **Edition 2024** across all crates.
-- **`tokio`** (full features) for all async. No `async-std` or `smol`.
-- **`serde` + `serde_json`** for serialization. `serde_yaml` only for skill frontmatter parsing.
+- **`tokio`** (full features) for async. No `async-std` or `smol`.
+- **`serde` + `serde_json`** for serialization. `serde_yaml` only for skill frontmatter.
 - **`tracing`** for logging, not `log` or `println!`.
-- **`anyhow`** for application errors (binary + tui), **`thiserror`** for library errors (ai, agent-core, settings, config).
+- **`anyhow`** for app errors (binary + tui), **`thiserror`** for library errors (ai, agent-core, settings, config).
 - No `unwrap()` in library code. Use `?` or proper error handling. `expect()` only with clear message.
 - No `unsafe` unless necessary, documented with safety comment.
-- No panic in library code paths. Libraries return `Result`, never abort.
+- No panic in library code. Libraries return `Result`, never abort.
 - Traits over inheritance. Extension points are `#[async_trait]` traits.
 - `tokio::sync::RwLock` over `std::sync::RwLock` for state held across `.await`. Std variant makes futures `!Send`.
-- `std::sync::Mutex` for short-lived locks that never cross await. `tokio::sync::Mutex` only when lock must be held across `.await`.
+- `std::sync::Mutex` for short-lived locks never crossing await. `tokio::sync::Mutex` only when lock must be held across `.await`.
 - `Arc<Mutex<Vec<T>>>` for shared queues between agent and loop — steer/follow-up push from external threads while loop drains.
-- Single-line helpers with one call site forbidden. Inline them.
+- Single-line helpers with one call site: inline them.
 - Read files in full before wide-ranging changes. Don't rely only on `grep` snippets.
 - Dependencies in `Cargo.toml` use workspace references. New deps go in `[workspace.dependencies]`.
 
@@ -133,7 +133,7 @@ All six phases complete. Project in active maintenance and polish.
 
 Four providers, two implementations:
 
-1. **`OpenAiCompatProvider`** (`crates/theta-ai/src/providers/openai_compat.rs`) — handles OpenAI, DeepSeek, OpenCode. All speak OpenAI's `/v1/chat/completions` API. Per-model compat flags handle differences.
+1. **`OpenAiCompatProvider`** (`crates/theta-ai/src/providers/openai_compat.rs`) — handles OpenAI, DeepSeek, OpenCode. All speak OpenAI's `/v1/chat/completions`. Per-model compat flags handle differences.
 
 2. **`OpenAiCodexProvider`** (`crates/theta-ai/src/providers/openai_codex.rs`) — ChatGPT Plus session-token auth targeting `chatgpt.com/backend-api`. WebSocket + SSE fallback.
 
@@ -151,27 +151,27 @@ Four providers, two implementations:
 - **OpenAI Codex** (`crates/theta-models/src/codex.rs`): same model IDs as OpenAI
   — auth via `OPENAI_CODEX_TOKEN` env var or OAuth (`theta login openai-codex`)
 - **DeepSeek** (`crates/theta-models/src/deepseek.rs`): `deepseek-v4-pro` (1M ctx), `deepseek-v4-flash` (1M ctx)
-- **OpenCode Zen** (`crates/theta-models/src/opencode.rs`): dynamically fetched from `opencode.ai/zen/v1/models` at runtime, static `opencode` fallback. Free/rate-limited models excluded. Costs via `known_cost()`.
+- **OpenCode Zen** (`crates/theta-models/src/opencode.rs`): fetched from `opencode.ai/zen/v1/models` at runtime, static `opencode` fallback. Free/rate-limited excluded. Costs via `known_cost()`.
 
-**API keys:** Read from env vars and `~/.theta/auth.json`. OAuth tokens auto-refresh. `AuthConfig::merge_with_existing()` preserves unrelated provider credentials when saving.
+**API keys:** Read from env vars and `~/.theta/auth.json`. OAuth tokens auto-refresh. `AuthConfig::merge_with_existing()` preserves unrelated provider credentials on save.
 
 No Anthropic, no Google, no Mistral in MVP. Deferred.
 
 ### Codex Transport Notes
 
-- Codex provider supports WebSocket + SSE fallback.
+- Supports WebSocket + SSE fallback.
 - WebSocket TLS via `tokio-tungstenite` with `rustls-tls-webpki-roots`.
 - WS fails → fallback to SSE.
 - Don't emit duplicate synthetic `Done(stop)` after parser already emitted `Done(toolUse)` or other terminal reason.
 
 ## Session Format
 
-**Pi-compatible JSONL.** Theta reads/writes same session format as pi.
+**Pi-compatible JSONL.** Theta reads/writes same format as pi.
 
 - Sessions portable between Pi and Theta.
 - JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_level_change`.
 - **Storage:** `~/.theta/sessions/` with `index.json`.
-- `model_change` and `thinking_level_change` emitted automatically when agent switches models or thinking levels.
+- `model_change` and `thinking_level_change` emitted automatically on switch.
 
 Don't invent new format. Copy pi's entry types exactly.
 
@@ -212,7 +212,7 @@ Seven built-in tools, each implementing `theta_agent_core::AgentTool`:
 
 2. **Rhai Scripts** (`~/.theta/extensions/*.rhai`, `./.theta/extensions/*.rhai`) — Runtime hooks: `tool.before()`, `tool.after()`, `tui.status()`, `tui.row()`. Auto-discovered on agent creation. No recompile needed.
 
-3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Users fork Theta, implement traits, build own binary. WASM component model deferred.
+3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Fork Theta, implement traits, build own binary. WASM component model deferred.
 
 When user says "modify/extend theta" without specifics: ask whether they want skill (knowledge/instructions), script (runtime hooks), or Rust change (custom tools/TUI).
 
@@ -308,24 +308,24 @@ skills = []
 **Turn modes (deterministic, resolved at turn start):**
 - `Execute` — action required (tools expected)
 - `Inspect` — read-only operations
-- `AnalyzeOnly` — no tool calls allowed, LLM analysis only
+- `AnalyzeOnly` — no tool calls, LLM analysis only
 - `PlanOnly` — planning only, no execution
 - `Clarify` — information gathering from user
 
 **Turn termination (`TurnEndReason`):**
-- `Completed` — normal completion
+- `Completed` — normal
 - `BlockedMissingInfo`, `BlockedPermission`, `BlockedRuntimeConstraint` — explicit blockers
 - `ProviderFailure` — provider/API error
 - `ToolFailure` — tool execution error
 - `MaxToolRounds` — hit inner-loop cap
-- `NoopAfterRetry` — turn retried with no progress
+- `NoopAfterRetry` — retried with no progress
 - `AbortedByUser` — user abort
-- `SafetyRejected` — command policy blocked the action
+- `SafetyRejected` — command policy blocked
 
 **Turn enforcement (Pi-style):**
 - Intent flags: `requires_action`, `requires_inspection`, `requires_commit_ops`, `requires_reproduction`, `requires_validation`, `requires_plan_only`, `requires_clarification`
 - Action/inspection/commit/reproduction turns with no relevant tool calls get one corrective retry
-- Explicit blockers (missing info/permission) end turn without forced loops
+- Explicit blockers end turn without forced loops
 - Bounded one-shot retry per enforcement path
 
 **Command safety policy** (`command_policy` module):
@@ -342,15 +342,15 @@ skills = []
 
 **Loop guard:** `max_same_tool_call_repeats` (default 6) — aborts inner loop if same tool call signature repeats without progress.
 
-**Tool watchdog:** `ToolWatchdogConfig` — `stall_warning_ms` (8000) and `hard_timeout_ms` (60000). Emits `AgentEvent::ToolWatchdogWarning` when a tool stalls.
+**Tool watchdog:** `ToolWatchdogConfig` — `stall_warning_ms` (8000) and `hard_timeout_ms` (60000). Emits `AgentEvent::ToolWatchdogWarning` on stall.
 
 **Provider circuit breaker:** `CircuitBreakerConfig` — opens after `failure_threshold` (default 3) consecutive transient failures, stays open for `open_cooldown_ms` (default 30000). Emits `AgentEvent::ProviderCircuitOpen`.
 
-**Provider fallback chain:** When a provider call fails, the agent can fall back through a configured list of model IDs. Emits `AgentEvent::ProviderFallback`.
+**Provider fallback chain:** On provider call failure, agent falls back through configured model ID list. Emits `AgentEvent::ProviderFallback`.
 
-**Run reports:** Each agent run produces a structured `RunReport` with a timeline of `RunReportEvent` entries (turn start, mode resolution, turn decisions, agent end). Accessible via agent state.
+**Run reports:** Each run produces a structured `RunReport` with `RunReportEvent` timeline (turn start, mode resolution, turn decisions, agent end). Accessible via agent state.
 
-**Runtime profiles:** Named presets (`Dev`, `Safe`, `Prod`) that set all hardening parameters at once. `Safe` is default. Overridable granularly via `[profile_overrides]`.
+**Runtime profiles:** Named presets (`Dev`, `Safe`, `Prod`) set all hardening parameters at once. `Safe` is default. Overridable via `[profile_overrides]`.
 
 **Event flow:** `broadcast::channel(8192)`. `AgentEnd` always emitted (even on error). TUI subscribes via `agent.subscribe()`. Additional events: `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`.
 
@@ -364,7 +364,7 @@ skills = []
 
 ## Retry
 
-- **Backoff:** Exponential. Configurable via `retry.max_retries` (default 2) and `retry.base_delay_ms` (default 1000) in config.toml.
+- **Backoff:** Exponential. Configurable via `retry.max_retries` (default 2) and `retry.base_delay_ms` (default 1000).
 - **Event:** `AgentEvent::Retrying { attempt, delay_ms }`.
 - **Retryable:** 429, 5xx, connection/timeout errors. Non-retryable (4xx non-429) fail immediately.
 - **Detection:** `RetryConfig::is_retryable()` checks error message strings.
@@ -409,6 +409,20 @@ Scripts auto-discovered on agent creation. No `/reload` needed. Script errors ne
 
 Extensions block injected into system prompt so agents can write scripts when user asks with explicit trigger phrases.
 
+## Startup Skills
+
+Theta can auto-invoke skills at session start via config.toml:
+
+```toml
+[startup]
+skills = ["caveman ultra", "other-skill lite"]
+```
+
+Each entry is `"<skill-name> <level>"`. Levels optional if skill doesn't use them.
+When user asks "auto-load X at start" or "run X every session", write this config.
+
+Do NOT edit config.toml without explicit user request or clear intent.
+
 ## Commands
 
 ```bash
@@ -439,8 +453,8 @@ After code changes (not docs): run `cargo fmt && cargo clippy -- -D warnings && 
 ## Git Rules
 
 - Never commit unless user explicitly asks.
-- Never push, pull, or interact with remotes. Remote ops always done by user.
-- Stage only files you changed: `git add <specific-files>`. Never `git add -A` or `git add .`.
+- Never push, pull, or interact with remotes. User does remote ops.
+- Stage only changed files: `git add <specific-files>`. Never `git add -A` or `git add .`.
 - Check `git status` before every commit.
 - No `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`. These destroy work.
 - Rebase, don't merge. `git pull --rebase` when needed.
@@ -448,10 +462,8 @@ After code changes (not docs): run `cargo fmt && cargo clippy -- -D warnings && 
 
 ## Adding a New LLM Provider (Future)
 
-When new provider needed beyond four existing:
-
 1. If OpenAI-compatible: add compat flags to `Model` struct, update `OpenAiCompatProvider`
-2. If needs new API or auth flow: implement `Provider` trait in `theta-ai/src/providers/`
+2. If needs new API or auth: implement `Provider` trait in `theta-ai/src/providers/`
 3. Add model definitions to `theta-models/src/<provider>.rs`
 4. Register in `BuiltInCatalog::new()` in `theta-models/src/lib.rs`
 5. Add env var in `config.rs::provider_env_var()` and `auth.rs::get_env_token()`
@@ -460,7 +472,7 @@ When new provider needed beyond four existing:
 
 ## Non-Goals
 
-Intentionally out of scope:
+Out of scope:
 
 - Anthropic, Google, Mistral, or Bedrock providers
 - Slack bot, web UI, or vLLM infrastructure
