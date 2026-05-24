@@ -10,6 +10,7 @@ use theta_ai::ContentBlock;
 
 use crate::scripts;
 use crate::skills;
+use crate::skills::Skill;
 use crate::tools::{ToolContext, builtin_tools};
 
 pub async fn build_system_prompt(
@@ -17,6 +18,16 @@ pub async fn build_system_prompt(
     model_id: &str,
     thinking_level: Option<&str>,
     _latest_user_input: Option<&str>,
+) -> Vec<ContentBlock> {
+    build_system_prompt_with_skills(working_dir, model_id, thinking_level, &[]).await
+}
+
+/// Build system prompt with active startup skills injected at system-prompt authority.
+pub async fn build_system_prompt_with_skills(
+    working_dir: &Path,
+    model_id: &str,
+    thinking_level: Option<&str>,
+    startup_skills: &[String],
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -26,6 +37,14 @@ pub async fn build_system_prompt(
 
     // Available skills.
     let discovered = skills::discover_skills(working_dir).await;
+
+    // Active startup skills — inject their full bodies at system-prompt level.
+    if !startup_skills.is_empty()
+        && let Some(active_block) = build_active_skills_block(&discovered, startup_skills)
+    {
+        parts.push(active_block);
+    }
+
     if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
         parts.push(skills_block);
     }
@@ -51,6 +70,45 @@ pub async fn build_system_prompt(
 ",
         ),
     }]
+}
+
+/// Build an `<active_skills>` block for skills activated at session start.
+/// These are injected with system-prompt-level authority, not as user messages.
+fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) -> Option<String> {
+    let mut block = String::from("\n<active_skills>\n");
+    block.push_str("The following skills are ACTIVE for this entire session. Their instructions\n");
+    block.push_str("carry the same authority as system instructions. Follow them on every turn\n");
+    block.push_str("until you are told to stop.\n\n");
+
+    let mut found_any = false;
+    for invocation in startup_skills {
+        // Parse "skill-name level" or just "skill-name"
+        let (skill_name, level) = match invocation.find(' ') {
+            Some(idx) => (&invocation[..idx], invocation[idx + 1..].trim()),
+            None => (invocation.as_str(), ""),
+        };
+
+        if let Some(skill) = discovered.iter().find(|s| s.name == skill_name) {
+            found_any = true;
+            block.push_str(&format!("## Active Skill: {}\n", skill.name));
+            if !level.is_empty() {
+                block.push_str(&format!("Level: {}\n", level));
+            }
+            block.push_str(&format!("Location: {}\n\n", skill.location.display()));
+            block.push_str(skill.body.trim());
+            block.push_str("\n\n");
+            block.push_str(
+                "--- RESPONSE DIRECTIVE: Apply the skill instructions above to EVERY response \
+                 you produce. Re-read this directive before generating each reply. ---\n\n",
+            );
+        }
+    }
+
+    if !found_any {
+        return None;
+    }
+    block.push_str("</active_skills>");
+    Some(block)
 }
 
 async fn load_project_context(working_dir: &Path) -> Option<String> {
@@ -295,7 +353,21 @@ Do NOT create an extension from general task language.
 
 When the user says "modify theta" or "extend theta" without specifying how,
 ask: 1) A skill (Markdown file), 2) An extension (Rhai script), or 3) A Rust
-change (fork + recompile)."#;
+change (fork + recompile).
+
+## Startup Skills
+
+Theta can auto-invoke skills at session start via config.toml:
+
+```toml
+[startup]
+skills = ["caveman ultra", "other-skill lite"]
+```
+
+Each entry is `"<skill-name> <level>"`. Levels optional if skill doesn't use them.
+When a user asks "auto-load X at start" or "run X every session", write this config.
+
+Do NOT edit config.toml without explicit user request or clear intent."#;
 
 #[cfg(test)]
 mod tests {

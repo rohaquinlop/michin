@@ -19,7 +19,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::config::ThetaConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::build_system_prompt;
+use crate::system_prompt::{build_system_prompt, build_system_prompt_with_skills};
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -393,12 +393,6 @@ pub async fn run_tui(
         app.send_initial_message(prompt.to_string());
     }
 
-    // Auto-invoke startup skills from config (e.g. ["caveman ultra"]).
-    for skill_invocation in &config.startup_skills {
-        let msg = format!("/skill:{skill_invocation}");
-        app.send_initial_message(msg);
-    }
-
     // Forward all events directly — no coalescing. The TUI already
     // rate-limits progress display via last_tool_progress_at. Coalescing
     // progress here causes a "BUM!" effect where progress accumulates
@@ -439,7 +433,13 @@ async fn create_agent(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking), None).await;
+    let system_blocks = build_system_prompt_with_skills(
+        working_dir,
+        model_id,
+        Some(thinking),
+        &config.startup_skills,
+    )
+    .await;
     agent.set_system_prompt(system_blocks).await;
 
     // Load script hooks from ~/.theta/extensions/*.rhai and ./.theta/extensions/*.rhai.
@@ -455,8 +455,8 @@ async fn create_agent(
 /// Spawn the event bridge — subscribes to agent events, forwards to TUI.
 fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, _hz: u64) {
     tokio::spawn(async move {
-        // Cache immutable config values.
         let reserve_tokens = agent.config().compaction.reserve_tokens;
+        let context_window = agent.state().await.model.context_window;
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut saw_assistant_text_delta = false;
@@ -464,10 +464,6 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
         let mut latest_turn_end_reason = "completed".to_string();
 
         loop {
-            // Block until next event — no tokio::select! competing with a timer.
-            // A select! between events.recv() and a timer causes Lagged(n) errors
-            // when the timer branch is selected and the broadcast buffer fills up,
-            // dropping every event including TextDelta, ToolCallStart, etc.
             let received = events.recv().await;
             match received {
                 Ok(AgentEvent::MessageStart) => {
@@ -517,11 +513,10 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     });
                 }
                 Ok(AgentEvent::MessageEnd { message }) => {
+                    // Forward token usage to TUI status bar.
                     if let theta_ai::Message::Assistant { content, usage, .. } = &message {
-                        // Forward real token usage to TUI status bar.
                         if let Some(u) = usage {
-                            let state = agent.state().await;
-                            let avail = state.model.context_window.saturating_sub(reserve_tokens);
+                            let avail = context_window.saturating_sub(reserve_tokens);
                             let pct = if avail > 0 {
                                 (u.input_tokens as f64 / avail as f64 * 100.0) as u32
                             } else {
@@ -561,6 +556,9 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                             }
                         }
                     }
+                    // Forward MessageEnd so the TUI knows LLM streaming is
+                    // complete and tool execution is about to begin.
+                    let _ = event_tx.send(TuiEvent::MessageEnd);
                     saw_assistant_text_delta = false;
                     saw_thinking_delta = false;
                 }

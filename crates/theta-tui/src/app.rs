@@ -10,7 +10,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem},
 };
 use tokio::sync::mpsc;
-use tokio::time::{Duration, MissedTickBehavior};
 
 use crate::components::CommandEntry;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
@@ -106,6 +105,11 @@ pub enum TuiEvent {
         reason: String,
         details: String,
     },
+    /// Fires when LLM streaming completes and tool execution is about to
+    /// begin. The TUI uses this to know that the current assistant message
+    /// is complete (no more TextDelta) and any subsequent events are tool
+    /// execution phase.
+    MessageEnd,
     AgentEnd,
     ContextCompacted {
         trimmed_count: u32,
@@ -221,6 +225,10 @@ pub struct App {
     theme: Theme,
     theme_idx: usize,
     streaming: bool,
+    /// Set to true when MessageEnd fires — marks the transition from LLM
+    /// streaming to tool execution phase. ToolStart events arriving after
+    /// this flag is set are shown with a visual transition cue.
+    tool_exec_phase: bool,
     current_tool: Option<String>,
     tools_in_turn: usize,
     retries_in_turn: u32,
@@ -321,6 +329,7 @@ impl App {
             action_tx,
             event_rx,
             streaming: false,
+            tool_exec_phase: false,
             current_tool: None,
             tools_in_turn: 0,
             retries_in_turn: 0,
@@ -356,62 +365,42 @@ impl App {
         term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> anyhow::Result<()> {
         let mut reader = EventStream::new();
-        // Keep the UI responsive and animate status spinner even when no new
-        // chat text arrives.
-        let mut redraw_tick = tokio::time::interval(Duration::from_millis(33));
-        redraw_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut needs_render = true;
+        // Two render triggers:
+        // 1. Fixed 30fps tick for scrolling, cursor blink, spinner animation
+        // 2. Immediate render after draining an agent event burst
+        //
+        // The tick uses biased selection to prefer crossterm/event branches
+        // over the timer. This prevents term.draw() (5-16ms) from blocking
+        // event ingestion — events are always processed before rendering.
+        let mut redraw_tick = tokio::time::interval(std::time::Duration::from_millis(33));
+        redraw_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         while self.running {
-            if needs_render {
-                term.draw(|frame| self.draw(frame))?;
-                needs_render = false;
-            }
-
             tokio::select! {
-                _ = redraw_tick.tick() => {
-                    needs_render = true;
-                }
+                biased;
                 crossterm_event = reader.next() => {
                     if let Some(Ok(event)) = crossterm_event {
                         self.handle_input_event(&event);
-                        needs_render = true;
                     }
+                    let _ = term.draw(|frame| self.draw(frame));
                 }
                 Some(event) = self.event_rx.recv() => {
-                    // Drain ALL pending events then render once. This is
-                    // essential because term.draw() takes 5-16ms and blocks
-                    // the event loop. Rendering per-event would create a
-                    // backlog of hundreds of unprocessed events.
-                    //
-                    // The 30-event drain from before was fine — the real
-                    // "BUM!" was caused by the lossless bridge coalescing
-                    // ToolProgress events, which is already fixed.
+                    // Process ONE event, then render immediately.
+                    // No drain loop — rendering after each event means
+                    // intermediate states (tool preparing → running →
+                    // done) are always visible before moving on. This
+                    // trades away the drain optimization (useful for
+                    // TextDelta bursts from LLM streaming) in favor of
+                    // always showing the user the current state.
                     self.handle_agent_event(event);
-                    loop {
-                        match self.event_rx.try_recv() {
-                            Ok(next) => self.handle_agent_event(next),
-                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                                self.running = false;
-                                break;
-                            }
-                        }
-                    }
-                    self.render_frame(term);
-                    needs_render = false;
+                    let _ = term.draw(|frame| self.draw(frame));
+                }
+                _ = redraw_tick.tick() => {
+                    let _ = term.draw(|frame| self.draw(frame));
                 }
             }
         }
         Ok(())
-    }
-
-    /// Render a single frame to the terminal.
-    fn render_frame(
-        &mut self,
-        term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    ) {
-        let _ = term.draw(|frame| self.draw(frame));
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -1157,18 +1146,22 @@ impl App {
             }
             TuiEvent::ToolCallPrepared { name, .. } => {
                 self.status.set_detail(&format!("preparing {name}"));
+                // Show a visual cue that a tool call is being prepared
+                // during LLM streaming (before execution). This creates a
+                // tool message immediately so the user sees the transition
+                // from text streaming to tool preparation.
+                self.chat
+                    .upsert_tool_message(&name, &format!("{name} preparing..."), true);
             }
             TuiEvent::ToolStart { name, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("ToolExec");
                 self.status.set_detail(&format!("{name} running..."));
                 self.tools_in_turn += 1;
-                self.chat.add_message(ChatMessage {
-                    role: ChatRole::Tool,
-                    text: "running".into(),
-                    tool_name: Some(name),
-                    is_streaming: true,
-                });
+                self.tool_exec_phase = true;
+                // Update the preparing message to "running". If ToolCallPrepared
+                // already created a message, this updates it in-place.
+                self.chat.upsert_tool_message(&name, "running", true);
             }
             TuiEvent::ToolProgress { name, message } => {
                 let interval =
@@ -1248,7 +1241,10 @@ impl App {
             TuiEvent::TurnEnd { stop_reason } => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.chat.finish_last(ChatRole::Thinking);
-                self.streaming = false;
+                // Don't set streaming = false here! If TurnEnd arrives in the
+                // same burst as subsequent tool events (ToolStart, TextDelta for
+                // next turn), setting streaming=false causes TextDelta events to
+                // be silently dropped. Only AgentEnd marks the true end of output.
                 let turn_result = if stop_reason == "error" {
                     "failed"
                 } else {
@@ -1291,6 +1287,13 @@ impl App {
             TuiEvent::TurnDecision { reason, details } => {
                 self.status.last_turn_decision = reason;
                 self.status.set_detail(&truncate_status_text(&details, 100));
+            }
+            TuiEvent::MessageEnd => {
+                // LLM streaming is done. Finish the assistant/thinking messages
+                // so the cursor is removed and subsequent tool events render cleanly.
+                self.chat.finish_last(ChatRole::Assistant);
+                self.chat.finish_last(ChatRole::Thinking);
+                self.status.set_detail("tools resolving");
             }
             TuiEvent::ContextCompacted {
                 trimmed_count,
@@ -1339,8 +1342,12 @@ impl App {
                         msg.is_streaming = false;
                     }
                 }
-                self.chat.invalidate_render_cache();
+                // Don't invalidate render cache! The incremental cache is
+                // already up-to-date after processing all tool events. Invalidating
+                // here forces a full rebuild on the next render, wasting the
+                // progressive cache updates that made streaming work.
                 self.streaming = false;
+                self.tool_exec_phase = false;
                 self.current_tool = None;
                 if self.status.agent_state != "Completed"
                     && self.status.agent_state != "Blocked"

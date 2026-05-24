@@ -136,7 +136,36 @@ impl Chat {
             self.active_tool_message_idx
                 .insert(tool_name, self.messages.len() - 1);
         }
-        self.cache_dirty = true;
+        // Append to render cache immediately so the cache stays in sync.
+        self.append_last_to_cache();
+    }
+
+    /// Add or update a "preparing" tool message. If a preparing message for
+    /// this tool already exists (from ToolCallPrepared), update it in-place.
+    /// Otherwise push a new message. Returns the message index.
+    pub fn upsert_tool_message(&mut self, name: &str, text: &str, is_streaming: bool) -> usize {
+        if let Some(&idx) = self.active_tool_message_idx.get(name)
+            && let Some(msg) = self.messages.get_mut(idx)
+            && msg.role == ChatRole::Tool
+            && msg.tool_name.as_deref() == Some(name)
+        {
+            msg.text = text.to_string();
+            msg.is_streaming = is_streaming;
+            self.update_msg_in_cache(idx);
+            return idx;
+        }
+        let idx = self.messages.len();
+        self.messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            text: text.to_string(),
+            tool_name: Some(name.to_string()),
+            is_streaming,
+        });
+        if is_streaming {
+            self.active_tool_message_idx.insert(name.to_string(), idx);
+        }
+        self.append_last_to_cache();
+        idx
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -151,16 +180,7 @@ impl Chat {
         {
             last.text.push_str(text);
             last.is_streaming = is_streaming;
-            // Incremental: re-format only the last message in-place in the cache.
-            // Avoids full rebuild on every token delta.
-            if let Some(inner_width) = self.cached_inner_width
-                && inner_width > 0
-                && self.cached_msg_ranges.len() == self.messages.len()
-            {
-                self.replace_msg_in_cache(self.messages.len() - 1, inner_width);
-            } else {
-                self.cache_dirty = true;
-            }
+            self.update_last_in_cache();
             return;
         }
         self.messages.push(ChatMessage {
@@ -169,7 +189,9 @@ impl Chat {
             tool_name: None,
             is_streaming,
         });
-        self.cache_dirty = true;
+        // Append to render cache immediately so subsequent
+        // TextDelta events hit the fast incremental path.
+        self.append_last_to_cache();
     }
 
     pub fn update_tool(&mut self, name: &str, text: &str, is_streaming: bool) {
@@ -184,15 +206,8 @@ impl Chat {
             if !is_streaming {
                 self.active_tool_message_idx.remove(name);
             }
-            // Incremental: re-format only this message in-place in the cache.
-            if let Some(inner_width) = self.cached_inner_width
-                && inner_width > 0
-                && self.cached_msg_ranges.len() == self.messages.len()
-            {
-                self.replace_msg_in_cache(idx, inner_width);
-            } else {
-                self.cache_dirty = true;
-            }
+            // Incremental: re-format this message in-place in the cache.
+            self.update_msg_in_cache(idx);
             return;
         }
 
@@ -206,7 +221,7 @@ impl Chat {
         if is_streaming {
             self.active_tool_message_idx.insert(name.to_string(), idx);
         }
-        self.cache_dirty = true;
+        self.append_last_to_cache();
     }
 
     pub fn complete_tool_compact(&mut self, name: &str, text: &str) {
@@ -218,14 +233,7 @@ impl Chat {
             msg.text = text.to_string();
             msg.is_streaming = false;
             self.active_tool_message_idx.remove(name);
-            if let Some(inner_width) = self.cached_inner_width
-                && inner_width > 0
-                && self.cached_msg_ranges.len() == self.messages.len()
-            {
-                self.replace_msg_in_cache(idx, inner_width);
-            } else {
-                self.cache_dirty = true;
-            }
+            self.update_msg_in_cache(idx);
             return;
         }
 
@@ -235,7 +243,7 @@ impl Chat {
             tool_name: Some(name.to_string()),
             is_streaming: false,
         });
-        self.cache_dirty = true;
+        self.append_last_to_cache();
     }
 
     pub fn finish_last(&mut self, role: ChatRole) {
@@ -248,7 +256,7 @@ impl Chat {
             {
                 self.active_tool_message_idx.remove(name);
             }
-            self.cache_dirty = true;
+            self.update_last_in_cache();
         }
     }
 
@@ -686,6 +694,71 @@ impl Chat {
                 range.1 = (range.1 as isize + delta) as usize;
             }
         }
+    }
+
+    /// Append the just-pushed last message to the render cache immediately,
+    /// including a gap line when needed. This keeps the cache in sync so
+    /// subsequent streaming deltas hit the fast replace_msg_in_cache path
+    /// instead of waiting for the next rebuild_render_cache call.
+    fn append_last_to_cache(&mut self) {
+        let Some(inner_width) = self.cached_inner_width else {
+            self.cache_dirty = true;
+            return;
+        };
+        if inner_width == 0 {
+            return;
+        }
+        let msg_idx = self.messages.len() - 1;
+        let msg = &self.messages[msg_idx];
+        let insert_gap = if self.cached_message_count > 0
+            && let Some(prev) = self.messages.get(self.cached_message_count - 1)
+        {
+            should_insert_gap(prev.role.clone(), msg.role.clone())
+        } else {
+            false
+        };
+        if insert_gap {
+            self.cached_visible_line_texts.push(String::new());
+            self.cached_wrapped_lines.push(Line::raw(""));
+        }
+        let start_line = self.cached_wrapped_lines.len();
+        let lines = self.format_message(msg, inner_width);
+        for line in wrap_styled_lines(&lines, inner_width) {
+            self.cached_visible_line_texts.push(line_text(&line));
+            self.cached_wrapped_lines.push(line);
+        }
+        let end_line = self.cached_wrapped_lines.len();
+        self.cached_msg_ranges.push((start_line, end_line));
+        self.cached_message_count = self.messages.len();
+        self.cache_dirty = false;
+    }
+
+    /// Update the last message in the render cache incrementally.
+    /// Falls back to cache_dirty if the cache is not ready.
+    fn update_last_in_cache(&mut self) {
+        let Some(inner_width) = self.cached_inner_width else {
+            self.cache_dirty = true;
+            return;
+        };
+        if inner_width == 0 || self.cached_msg_ranges.len() != self.messages.len() {
+            self.cache_dirty = true;
+            return;
+        }
+        self.replace_msg_in_cache(self.messages.len() - 1, inner_width);
+    }
+
+    /// Update a specific message in the render cache incrementally.
+    /// Falls back to cache_dirty if the cache is not ready.
+    pub fn update_msg_in_cache(&mut self, msg_idx: usize) {
+        let Some(inner_width) = self.cached_inner_width else {
+            self.cache_dirty = true;
+            return;
+        };
+        if inner_width == 0 || self.cached_msg_ranges.len() != self.messages.len() {
+            self.cache_dirty = true;
+            return;
+        }
+        self.replace_msg_in_cache(msg_idx, inner_width);
     }
 
     fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
