@@ -671,6 +671,50 @@ async fn scenario_vcs_mutation_is_blocked_without_explicit_user_request() {
 }
 
 #[tokio::test]
+async fn scenario_clarify_turn_mutation_attempt_is_blocked() {
+    let model = test_model();
+    let provider = MockProvider::new(vec![Ok(vec![
+        AssistantMessageEvent::ToolCallStart {
+            id: "c_edit".into(),
+            name: "edit".into(),
+        },
+        AssistantMessageEvent::tool_call_delta(
+            "c_edit",
+            r#"{"file_path":"AGENTS.md","old_string":"foo","new_string":"bar"}"#,
+        ),
+        AssistantMessageEvent::ToolCallEnd {
+            id: "c_edit".into(),
+        },
+        AssistantMessageEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ])]);
+    let agent = Agent::new(
+        model.clone(),
+        make_registry(provider),
+        Arc::new(Catalog { model }),
+    );
+    agent
+        .add_tool(Arc::new(MatrixTool {
+            name: "edit".into(),
+            sleep_ms: 0,
+        }))
+        .await;
+    agent
+        .prompt(vec![ContentBlock::text(
+            "which information would you add to AGENTS.md in order to update it?",
+        )])
+        .await
+        .expect("turn should complete with safety rejection");
+    let state = agent.state().await;
+    assert_eq!(
+        state.last_turn_end_reason,
+        Some(TurnEndReason::SafetyRejected)
+    );
+}
+
+#[tokio::test]
 #[ignore = "soak test; run manually for long-run stability characterization"]
 async fn scenario_long_run_soak_stability() {
     let model = test_model();
