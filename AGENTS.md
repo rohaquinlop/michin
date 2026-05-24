@@ -66,9 +66,10 @@ All six phases complete. Project in active maintenance and polish.
 | `crates/theta-agent-core/src/agent.rs`                          | `Agent` struct: prompt, continue, steer, follow_up, subscribe, hooks                                                    |
 | `crates/theta-agent-core/src/loop_mod.rs`                       | Core loop: nested outer/inner, turn enforcement, steering drain, abort                                                  |
 | `crates/theta-agent-core/src/compact.rs`                        | Truncation compaction + inline text summary of trimmed messages                                                         |
-| `crates/theta-agent-core/src/types.rs`                          | `AgentTool` trait, `ToolResult`, `ToolCall`, `AgentLoopConfig`, `CompactionConfig`, `RetryConfig`, `ExtensionStatusRow` |
-| `crates/theta-agent-core/src/events.rs`                         | `AgentEvent` enum — all events exposed to TUI                                                                           |
-| `crates/theta-agent-core/src/hooks.rs`                          | `Hooks` trait: `beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`                              |
+| `crates/theta-agent-core/src/command_policy.rs`                 | Centralized command safety policy engine: `evaluate_tool_call()`, `required_user_authorization()`, `AuthorizationClass`, `SafetyDecision` |
+| `crates/theta-agent-core/src/types.rs`                          | `AgentTool` trait, `ToolResult`, `ToolCall`, `AgentLoopConfig`, `CompactionConfig`, `RetryConfig`, `ExtensionStatusRow`, `RuntimeProfile`, `TurnMode`, `TurnEndReason`, `SafetyDecisionKind`, `CircuitBreakerConfig`, `ToolWatchdogConfig`, `RunReport`, `RunReportEvent` |
+| `crates/theta-agent-core/src/events.rs`                         | `AgentEvent` enum — includes `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback` |
+| `crates/theta-agent-core/src/hooks.rs`                          | `Hooks` trait: `beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`, `tui_status_lines()`, `tui_status_rows()` |
 | `crates/theta-tui/src/app.rs`                                   | `App` — top-level TUI state machine, event loop bridge                                                                  |
 | `crates/theta-tui/src/components/mod.rs`                        | `Component` trait, `Action` enum, re-exports                                                                            |
 | `crates/theta-tui/src/components/chat.rs`                       | Chat view with message rendering                                                                                        |
@@ -238,7 +239,61 @@ When user says "modify/extend theta" without specifics: ask whether they want sk
 
 ## Config and Settings
 
-**Config:** `~/.theta/config.toml` — model defaults, thinking level, compaction, retry, provider timeout, agent loop guards, startup skills, working dir, theme.
+**Config:** `~/.theta/config.toml`.
+
+```toml
+[model]
+default = "deepseek-v4-flash"
+
+[thinking]
+default = "default"
+
+[agent]
+# Guard: abort turn if same tool+args repeats this many times
+max_same_tool_call_repeats = 6
+# Tool watchdog: warn if no progress after this many ms
+tool_stall_warning_ms = 8000
+# Hard timeout for individual tool call execution (ms)
+tool_timeout_ms = 60000
+# Fallback model IDs in preference order on provider failure
+provider_fallback_chain = []
+# Circuit breaker: open after this many consecutive transient failures
+provider_failure_threshold = 3
+# Circuit breaker: stay open for this many ms before half-open
+provider_open_cooldown_ms = 30000
+
+[compaction]
+enabled = true
+reserve_tokens = 4096
+
+[retry]
+max_retries = 2
+base_delay_ms = 1000
+
+[provider]
+timeout_ms = 120000
+
+[skills]
+auto_load = []
+
+[startup]
+skills = []
+
+[profile]
+# One of: "dev", "safe" (default), "prod"
+# Sets appropriate defaults for all agent safety parameters
+
+[profile_overrides]
+# Optional granular overrides on top of the chosen profile
+# max_retries, base_delay_ms, provider_timeout_ms,
+# tool_stall_warning_ms, tool_timeout_ms,
+# provider_fallback_chain, provider_failure_threshold,
+# provider_open_cooldown_ms, max_same_tool_call_repeats,
+# command_policy_strict
+
+[theme]
+# "default" or "monokai"
+```
 
 **Auth:** `~/.theta/auth.json` — provider tokens with expiry and OAuth auto-refresh. Env var fallback for all providers.
 
@@ -250,11 +305,35 @@ When user says "modify/extend theta" without specifics: ask whether they want sk
 - **Outer loop:** follow-up turns, hooks (`shouldStopAfterTurn`, `prepareNextTurn`)
 - **Inner loop:** LLM call → stream accumulation → tool execution → tool results → repeat
 
+**Turn modes (deterministic, resolved at turn start):**
+- `Execute` — action required (tools expected)
+- `Inspect` — read-only operations
+- `AnalyzeOnly` — no tool calls allowed, LLM analysis only
+- `PlanOnly` — planning only, no execution
+- `Clarify` — information gathering from user
+
+**Turn termination (`TurnEndReason`):**
+- `Completed` — normal completion
+- `BlockedMissingInfo`, `BlockedPermission`, `BlockedRuntimeConstraint` — explicit blockers
+- `ProviderFailure` — provider/API error
+- `ToolFailure` — tool execution error
+- `MaxToolRounds` — hit inner-loop cap
+- `NoopAfterRetry` — turn retried with no progress
+- `AbortedByUser` — user abort
+- `SafetyRejected` — command policy blocked the action
+
 **Turn enforcement (Pi-style):**
 - Intent flags: `requires_action`, `requires_inspection`, `requires_commit_ops`, `requires_reproduction`, `requires_validation`, `requires_plan_only`, `requires_clarification`
 - Action/inspection/commit/reproduction turns with no relevant tool calls get one corrective retry
 - Explicit blockers (missing info/permission) end turn without forced loops
 - Bounded one-shot retry per enforcement path
+
+**Command safety policy** (`command_policy` module):
+- Centralized `evaluate_tool_call(mode, tool_call, strict)` engine
+- `required_user_authorization()` classifies bash commands into `AuthorizationClass`: `FileMutation`, `VcsMutation`, `Commit`, `DependencyMutation`
+- Detects dangerous operations (git push/merge/rebase/reset, cargo add, npm install, etc.)
+- Returns `SafetyDecisionKind::Allowed` or `Rejected`
+- Strict mode configurable via `command_policy_strict` in profile_overrides
 
 **Steering vs Follow-up:**
 - `steer()`: injects message mid-turn, aborts current stream via `AtomicBool`, drains queue, continues
@@ -263,7 +342,17 @@ When user says "modify/extend theta" without specifics: ask whether they want sk
 
 **Loop guard:** `max_same_tool_call_repeats` (default 6) — aborts inner loop if same tool call signature repeats without progress.
 
-**Event flow:** `broadcast::channel(256)`. `AgentEnd` always emitted (even on error). TUI subscribes via `agent.subscribe()`.
+**Tool watchdog:** `ToolWatchdogConfig` — `stall_warning_ms` (8000) and `hard_timeout_ms` (60000). Emits `AgentEvent::ToolWatchdogWarning` when a tool stalls.
+
+**Provider circuit breaker:** `CircuitBreakerConfig` — opens after `failure_threshold` (default 3) consecutive transient failures, stays open for `open_cooldown_ms` (default 30000). Emits `AgentEvent::ProviderCircuitOpen`.
+
+**Provider fallback chain:** When a provider call fails, the agent can fall back through a configured list of model IDs. Emits `AgentEvent::ProviderFallback`.
+
+**Run reports:** Each agent run produces a structured `RunReport` with a timeline of `RunReportEvent` entries (turn start, mode resolution, turn decisions, agent end). Accessible via agent state.
+
+**Runtime profiles:** Named presets (`Dev`, `Safe`, `Prod`) that set all hardening parameters at once. `Safe` is default. Overridable granularly via `[profile_overrides]`.
+
+**Event flow:** `broadcast::channel(8192)`. `AgentEnd` always emitted (even on error). TUI subscribes via `agent.subscribe()`. Additional events: `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`.
 
 ## Compaction
 
@@ -282,10 +371,11 @@ When user says "modify/extend theta" without specifics: ask whether they want sk
 
 ## Testing
 
-- **Unit tests:** 168 total across all crates (29 ai, 2 agent-core-compact, 12 agent-core-loop, 18 agent-core-agent, 55 ai-types, 10 config, 8 models, 34 theta). All passing.
+- **Unit tests:** maintained across all crates.
 - **Integration tests:** in `crates/*/tests/`, behind `#[cfg(feature = "integration-tests")]`.
 - **LLM-dependent tests:** local-only, no paid API keys in CI.
 - **Faux provider:** mock `theta-ai` provider for testing agent loop without real APIs.
+- **Policy scenario matrix:** `policy_scenario_matrix.rs` covers circuit breaker, tool watchdog, command policy strict/permissive modes, authorization class detection, fallback chain, run reports.
 
 Critical loop regression tests must cover:
 - action turn with promise/no-tools → retry → tool execution
@@ -293,6 +383,11 @@ Critical loop regression tests must cover:
 - inspection turn offer-only → retry → read-only tool execution
 - commit-op turn offer-only → retry → git command execution
 - no duplicate terminal stop-reason downgrades
+- circuit breaker open/close/half-open
+- tool watchdog stall and hard timeout
+- command policy strict vs permissive per turn mode
+- provider fallback chain activation
+- run report generation
 
 ## Script Extensions (Rhai)
 
