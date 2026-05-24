@@ -421,10 +421,29 @@ impl SessionManager {
         Ok(appended)
     }
 
-    /// List all sessions from the index.
+    /// List sessions from the index, filtered by the current working directory.
+    ///
+    /// When `working_dir` is set (non-empty), only sessions whose `project`
+    /// matches the working directory are returned. When `working_dir` is empty
+    /// (e.g., in tests), all sessions are returned.
     pub async fn list(&self) -> SessionResult<Vec<SessionMeta>> {
         let index = self.load_index().await?;
-        Ok(index.sessions.clone())
+        let sessions = if self.working_dir.as_os_str().is_empty() {
+            index.sessions.clone()
+        } else {
+            let wd = self.working_dir.to_string_lossy();
+            index
+                .sessions
+                .iter()
+                .filter(|m| {
+                    m.project
+                        .as_deref()
+                        .is_some_and(|p| p == wd.as_ref())
+                })
+                .cloned()
+                .collect()
+        };
+        Ok(sessions)
     }
 
     /// Mark a session run as in-progress.
