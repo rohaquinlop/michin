@@ -159,22 +159,58 @@ impl SessionPicker {
         // Header.
         let header = Paragraph::new(Text::from(vec![
             Line::from(Span::styled(
-                "Recent Sessions",
+                "Sessions",
                 Style::default().fg(self.theme.accent),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Up/Down move | Enter resume | s sort | n new | Esc new",
+                "j/k move  •  Enter resume  •  s sort  •  n new  •  Esc close",
                 Style::default().fg(self.theme.dim),
             )),
         ]));
         frame.render_widget(header, chunks[0]);
 
-        // Session list.
-        let items: Vec<ListItem> = self
-            .sessions
+        // Compute max title and when widths for aligned columns.
+        // Truncate long titles to 50 chars so a single outlier doesn't
+        // waste horizontal space.
+        const TITLE_TRUNCATE: usize = 50;
+        let mut truncated_titles: Vec<String> = Vec::with_capacity(self.sessions.len());
+        let mut when_strings: Vec<String> = Vec::with_capacity(self.sessions.len());
+
+        for s in &self.sessions {
+            let title_chars: Vec<char> = s.title.chars().collect();
+            let title = if title_chars.len() > TITLE_TRUNCATE {
+                let truncated: String = title_chars[..TITLE_TRUNCATE].iter().collect();
+                format!("{}…", truncated)
+            } else {
+                s.title.clone()
+            };
+            truncated_titles.push(title);
+            when_strings.push(format_relative_time(s.created_at));
+        }
+
+        let max_title = truncated_titles
             .iter()
-            .map(|s| ListItem::new(Span::raw(session_row_label(s))))
+            .map(|t| t.chars().count())
+            .max()
+            .unwrap_or(0);
+        let max_when = when_strings
+            .iter()
+            .map(|w| w.chars().count())
+            .max()
+            .unwrap_or(0);
+
+        // Session list.
+        let items: Vec<ListItem> = (0..self.sessions.len())
+            .map(|i| {
+                ListItem::new(Span::raw(session_row_label(
+                    &self.sessions[i],
+                    &truncated_titles[i],
+                    &when_strings[i],
+                    max_title,
+                    max_when,
+                )))
+            })
             .collect();
 
         let list = List::new(items)
@@ -182,7 +218,7 @@ impl SessionPicker {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.dim))
-                    .title(format!("Sessions (sort: {})", self.sort_mode_label())),
+                    .title(format!("sort: {}", self.sort_mode_label())),
             )
             .highlight_style(Style::default().fg(self.theme.accent).bg(Color::DarkGray))
             .highlight_symbol("> ");
@@ -226,13 +262,16 @@ fn format_relative_time(ts: u64) -> String {
     }
 }
 
-fn session_row_label(session: &SessionInfo) -> String {
-    let model = session.model.as_deref().unwrap_or("unknown");
-    let branch = session.branch.as_deref().unwrap_or("-");
-    let when = format_relative_time(session.created_at);
+fn session_row_label(
+    session: &SessionInfo,
+    truncated_title: &str,
+    when: &str,
+    title_width: usize,
+    when_width: usize,
+) -> String {
     format!(
-        "{branch} | {model} | {when} | {} msgs | ~{} tok | {}",
-        session.message_count, session.token_count, session.title
+        "{:<title_width$}  │  {:<when_width$}  │  {} msgs",
+        truncated_title, when, session.message_count
     )
 }
 
@@ -278,18 +317,66 @@ mod tests {
     }
 
     #[test]
-    fn session_row_label_starts_with_identity() {
+    fn session_row_label_aligns_both_separators() {
         let session = SessionInfo {
             id: "s1".to_string(),
             title: "conversation".to_string(),
             model: Some("gpt-5.5".to_string()),
             branch: Some("feature/ui".to_string()),
             token_count: 3200,
-            created_at: 1_000,
+            created_at: 1_000_000_000_000,
             message_count: 18,
         };
-        let row = session_row_label(&session);
-        assert!(row.starts_with("feature/ui | gpt-5.5 | "));
-        assert!(row.contains("18 msgs"));
+        // Simulate: max_title=21, max_when=8 ("just now")
+        let max_w = 21usize;
+        let max_when = 8usize;
+
+        let short = "conversation".to_string();
+        let row_short = session_row_label(&session, &short, "18h ago", max_w, max_when);
+        let row_justnow = session_row_label(&session, &short, "just now", max_w, max_when);
+        let long = "quite long title here".to_string();
+        let row_long = session_row_label(&session, &long, "5m ago", max_w, max_when);
+
+        // Find byte positions of both separators in each row
+        let seps: Vec<(usize, usize)> = [&row_short, &row_justnow, &row_long]
+            .iter()
+            .map(|r| {
+                let first = r.find('│').unwrap();
+                let second = r.char_indices()
+                    .filter(|(_, c)| *c == '│')
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap();
+                (first, second)
+            })
+            .collect();
+
+        // All first separators at same byte position
+        assert_eq!(seps[0].0, seps[1].0, "first │ should align across rows");
+        assert_eq!(seps[0].0, seps[2].0, "first │ should align across rows");
+
+        // All second separators at same byte position
+        assert_eq!(seps[0].1, seps[1].1, "second │ should align across rows");
+        assert_eq!(seps[0].1, seps[2].1, "second │ should align across rows");
+
+        // Verify expected positions:
+        // title(21) + "  "(2) = 23 for first │
+        // then │(3 bytes) + "  "(2) + when(8) + "  "(2) before second │
+        // = 23 + 3 + 2 + 8 + 2 = 38 for second │
+        assert_eq!(seps[0].0, 23, "first │ at byte 23");
+        assert_eq!(seps[0].1, 38, "second │ at byte 38");
+    }
+
+    #[test]
+    fn truncation_handles_multi_byte_chars_safely() {
+        // Title with multi-byte UTF-8 chars — Vec<char> slicing
+        // must not panic.
+        let title = "áéíóú — accented chars";  // 27 chars, 31 bytes
+        let title_chars: Vec<char> = title.chars().collect();
+        assert!(title_chars.len() > 5);
+        // Truncate to 5 chars
+        let truncated: String = title_chars[..5].iter().collect();
+        assert_eq!(truncated.chars().count(), 5);
+        assert_eq!(truncated, "áéíóú");
     }
 }
