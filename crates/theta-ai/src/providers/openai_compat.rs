@@ -276,17 +276,12 @@ pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::type
                     "type": "enabled",
                     "reasoning_effort": s,
                 });
-            } else if level != crate::types::ThinkingLevel::Off {
-                // DeepSeek currently supports reasoning effort values `high`
-                // and `max`; degrade unsupported non-off levels to `high`.
-                body["thinking"] = json!({
-                    "type": "enabled",
-                    "reasoning_effort": "high",
-                });
-            } else {
+            } else if level == crate::types::ThinkingLevel::Off {
                 // Explicitly disable thinking
                 body["thinking"] = json!({"type": "disabled"});
             }
+            // Unmapped non-Off levels (minimal/low/medium on DeepSeek):
+            // do nothing — let model use its default behavior.
         }
         _ => {
             // OpenAI / OpenCode: reasoning_effort field
@@ -489,6 +484,9 @@ pub fn parse_sse_line(line: &str) -> Option<AssistantMessageEvent> {
 #[derive(Debug, Default)]
 struct OpenAiCompatStreamParser {
     tool_calls: Vec<OpenAiToolCallState>,
+    /// Tracks whether ThinkingStart has been emitted for the current
+    /// reasoning_content stream. Reset on ThinkingEnd or finish reason.
+    thinking_started: bool,
 }
 
 #[derive(Debug, Default)]
@@ -713,9 +711,23 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
         && let Some(text) = reasoning.as_str()
         && !text.is_empty()
     {
+        if !parser.thinking_started {
+            parser.thinking_started = true;
+            events.push(AssistantMessageEvent::ThinkingStart);
+        }
         events.push(AssistantMessageEvent::ThinkingDelta {
             thinking: text.to_string(),
         });
+    }
+
+    // Transition from reasoning to text: emit ThinkingEnd.
+    if parser.thinking_started
+        && let Some(content) = delta.and_then(|d| d.get("content"))
+        && let Some(text) = content.as_str()
+        && !text.is_empty()
+    {
+        parser.thinking_started = false;
+        events.push(AssistantMessageEvent::ThinkingEnd);
     }
 
     // Regular text content
@@ -759,6 +771,12 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                     });
                 }
             }
+        }
+
+        // If thinking was in progress, end it before finish reason.
+        if parser.thinking_started {
+            parser.thinking_started = false;
+            events.push(AssistantMessageEvent::ThinkingEnd);
         }
 
         if reason == "tool_calls" {
@@ -860,14 +878,19 @@ mod tests {
 
     #[test]
     fn test_parse_thinking_delta() {
-        let event = parse_sse_line(
-            r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think..."},"index":0}]}"#,
+        let mut parser = OpenAiCompatStreamParser::new();
+        let events = parser.parse_data(
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me think..."},"index":0}]}"#,
         );
-        assert!(event.is_some());
-        if let Some(AssistantMessageEvent::ThinkingDelta { thinking }) = event {
+        assert_eq!(events.len(), 2, "expected ThinkingStart + ThinkingDelta");
+        assert!(
+            matches!(&events[0], AssistantMessageEvent::ThinkingStart),
+            "first event should be ThinkingStart"
+        );
+        if let AssistantMessageEvent::ThinkingDelta { thinking } = &events[1] {
             assert_eq!(thinking, "Let me think...");
         } else {
-            panic!("Expected ThinkingDelta");
+            panic!("Expected ThinkingDelta as second event");
         }
     }
 
@@ -1314,8 +1337,11 @@ mod tests {
         };
         let mut body = json!({});
         apply_thinking_params(&mut body, &model, crate::types::ThinkingLevel::Medium);
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["reasoning_effort"], "high");
+        // Medium is unmapped on DeepSeek — no thinking params sent, model default.
+        assert!(
+            body.get("thinking").is_none(),
+            "unmapped level should not send thinking params"
+        );
 
         let mut body_off = json!({});
         apply_thinking_params(&mut body_off, &model, crate::types::ThinkingLevel::Off);

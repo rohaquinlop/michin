@@ -36,6 +36,12 @@ pub enum AgentEvent {
     /// A streamed thinking/reasoning delta from the assistant.
     ThinkingDelta { thinking: String },
 
+    /// Thinking/reasoning has started in the stream.
+    ThinkingStart,
+
+    /// Thinking/reasoning has ended.
+    ThinkingEnd,
+
     /// A tool call has started streaming.
     ToolCallStart { id: String, name: String },
 

@@ -712,6 +712,12 @@ async fn run_llm_stream(
                     thinking: thinking.clone(),
                 });
             }
+            AssistantMessageEvent::ThinkingStart if emit_events => {
+                let _ = event_tx.send(AgentEvent::ThinkingStart);
+            }
+            AssistantMessageEvent::ThinkingEnd if emit_events => {
+                let _ = event_tx.send(AgentEvent::ThinkingEnd);
+            }
             AssistantMessageEvent::ToolCallStart { id, name } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallStart {
                     id: id.clone(),
