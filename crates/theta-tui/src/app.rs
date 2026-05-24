@@ -246,6 +246,7 @@ pub struct App {
     last_tool_progress_at: Option<std::time::Instant>,
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
+    window_title: Option<String>,
 }
 
 impl App {
@@ -293,6 +294,7 @@ impl App {
         event_rx: mpsc::UnboundedReceiver<TuiEvent>,
         message_tx: mpsc::UnboundedSender<String>,
         action_tx: mpsc::UnboundedSender<TuiAction>,
+        window_title: Option<String>,
     ) -> Self {
         let mut status = StatusBar::new(theme.clone());
         status.model = model.to_string();
@@ -346,12 +348,17 @@ impl App {
             tool_progress_hz: settings.tool_progress_hz.max(1),
             last_tool_progress_at: None,
             login_flow: None,
+            window_title,
         }
     }
 
     /// Run the TUI event loop.
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        terminal::setup()?;
+        if let Some(ref title) = self.window_title {
+            terminal::setup_with_title(title)?;
+        } else {
+            terminal::setup()?;
+        }
         let mut term = terminal::create_terminal()?;
 
         let result = self.run_loop(&mut term).await;

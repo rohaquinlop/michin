@@ -17,6 +17,29 @@ pub fn setup() -> io::Result<()> {
     Ok(())
 }
 
+/// Setup raw mode and alternate screen, and set terminal window title.
+pub fn setup_with_title(title: &str) -> io::Result<()> {
+    enable_raw_mode()?;
+    set_window_title(title)?;
+    io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(EnableMouseCapture)?;
+    io::stdout().execute(EnableBracketedPaste)?;
+    Ok(())
+}
+
+/// Set the terminal window title via ANSI escape sequence.
+/// Uses OSC 0 (icon + window title) and OSC 2 (window title only)
+/// for broad terminal compatibility.
+pub fn set_window_title(title: &str) -> io::Result<()> {
+    use std::io::Write;
+    // OSC 0 ; title ST — sets both icon and window title
+    write!(io::stdout(), "\x1b]0;{title}\x07")?;
+    // OSC 2 ; title ST — sets window title explicitly
+    write!(io::stdout(), "\x1b]2;{title}\x07")?;
+    io::stdout().flush()?;
+    Ok(())
+}
+
 /// Restore terminal to normal mode.
 pub fn restore() -> io::Result<()> {
     io::stdout().execute(DisableBracketedPaste)?;

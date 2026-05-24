@@ -1,5 +1,9 @@
 //! Theta: minimal terminal coding agent harness.
 
+/// Override the terminal window title shown in your terminal emulator tab/title bar.
+/// Set to `Some("Your Title")` to customize, or `None` to leave unchanged.
+pub static WINDOW_TITLE: Option<&str> = Some("θ");
+
 pub mod cli;
 pub mod config;
 pub mod extensions;
