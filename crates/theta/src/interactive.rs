@@ -891,9 +891,18 @@ async fn handle_tui_action(
                 }
             }
         }
-        TuiAction::SwitchModel { model_id, provider } => {
+        TuiAction::SwitchModel {
+            model_id,
+            provider,
+            request_id,
+        } => {
+            let acknowledge = |event_tx: &mpsc::UnboundedSender<TuiEvent>| {
+                let _ = event_tx.send(TuiEvent::ActionAck { request_id });
+            };
+
             let Some(agent) = agent_cell.read().await.clone() else {
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                acknowledge(event_tx);
                 return;
             };
             let runtime_models = runtime_models_cell.read().await.clone();
@@ -911,11 +920,13 @@ async fn handle_tui_action(
                             let _ = event_tx.send(TuiEvent::Error(format!(
                                 "Model {model_id} is unavailable: missing auth for {provider}"
                             )));
+                            acknowledge(event_tx);
                             return;
                         }
                     },
                     Err(e) => {
                         let _ = event_tx.send(TuiEvent::Error(format!("Failed to load auth: {e}")));
+                        acknowledge(event_tx);
                         return;
                     }
                 };
@@ -927,6 +938,7 @@ async fn handle_tui_action(
                 // context shows the correct level and startup skills are re-applied.
                 let state = agent.state().await;
                 let current_thinking = thinking_level_to_string(state.thinking_level);
+                drop(state);
                 let blocks = build_system_prompt_with_skills(
                     working_dir,
                     &model_id,
@@ -949,16 +961,24 @@ async fn handle_tui_action(
                 let mut s = crate::settings::load_settings().await;
                 s.last_model = Some(model_id.to_string());
                 crate::settings::save_settings(&s).await.ok();
+                acknowledge(event_tx);
             } else {
                 let _ = event_tx.send(TuiEvent::Error(format!("Model not found: {model_id}")));
+                acknowledge(event_tx);
             }
         }
-        TuiAction::SetThinking(level) => {
+        TuiAction::SetThinking { level, request_id } => {
+            let acknowledge = |event_tx: &mpsc::UnboundedSender<TuiEvent>| {
+                let _ = event_tx.send(TuiEvent::ActionAck { request_id });
+            };
+
             let Some(agent) = agent_cell.read().await.clone() else {
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                acknowledge(event_tx);
                 return;
             };
-            let tl = match level.to_lowercase().as_str() {
+            let normalized = level.to_lowercase();
+            let tl = match normalized.as_str() {
                 "off" => theta_ai::ThinkingLevel::Off,
                 "minimal" => theta_ai::ThinkingLevel::Minimal,
                 "low" => theta_ai::ThinkingLevel::Low,
@@ -969,14 +989,17 @@ async fn handle_tui_action(
                     let _ = event_tx.send(TuiEvent::Error(format!(
                         "Invalid thinking level: {level}. Use off/minimal/low/medium/high/xhigh"
                     )));
+                    acknowledge(event_tx);
                     return;
                 }
             };
             agent.set_thinking_level(tl).await;
             // Persist thinking preference (merge with existing settings).
             let mut s = crate::settings::load_settings().await;
-            s.last_thinking = Some(level.to_string());
+            s.last_thinking = Some(normalized.clone());
             crate::settings::save_settings(&s).await.ok();
+            let _ = event_tx.send(TuiEvent::ThinkingSet { level: normalized });
+            acknowledge(event_tx);
         }
         TuiAction::ShowThinkingSelector => {
             let Some(agent) = agent_cell.read().await.clone() else {

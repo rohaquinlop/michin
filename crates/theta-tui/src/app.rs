@@ -1,5 +1,7 @@
 //! Application — main TUI event loop and layout management.
 
+use std::collections::{HashSet, VecDeque};
+
 use crossterm::event::EventStream;
 use futures::StreamExt;
 use ratatui::{
@@ -46,9 +48,13 @@ pub enum TuiAction {
     SwitchModel {
         model_id: String,
         provider: Option<String>,
+        request_id: u64,
     },
     /// Change thinking level.
-    SetThinking(String),
+    SetThinking {
+        level: String,
+        request_id: u64,
+    },
     /// Fork the current session.
     ForkSession,
     /// Login result from the login flow.
@@ -156,6 +162,10 @@ pub enum TuiEvent {
     ModelSwitched {
         model: String,
     },
+    /// A config action (model/thinking) has been applied or rejected.
+    ActionAck {
+        request_id: u64,
+    },
     QueueStatus {
         steer: usize,
         follow_up: usize,
@@ -175,6 +185,10 @@ pub enum TuiEvent {
     ThinkingLevels {
         levels: Vec<String>,
         current: String,
+    },
+    /// Thinking level was applied by backend.
+    ThinkingSet {
+        level: String,
     },
 }
 
@@ -259,6 +273,9 @@ pub struct App {
     /// Active login flow (replaces chat+editor when set).
     login_flow: Option<LoginFlow>,
     window_title: Option<String>,
+    pending_config_actions: HashSet<u64>,
+    next_config_request_id: u64,
+    queued_pending_messages: VecDeque<String>,
 }
 
 impl App {
@@ -281,16 +298,11 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
-        self.chat.add_message(ChatMessage {
-            role: ChatRole::User,
-            text: text.clone(),
-            tool_name: None,
-            is_streaming: false,
-        });
-        self.status.set_agent_state("streaming");
-        self.streaming = true;
+        if self.queue_message_while_config_pending(Some(text.clone())) {
+            return;
+        }
+        self.send_user_message_now(text);
         self.status.set_detail("sending initial prompt");
-        let _ = self.message_tx.send(text);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -363,6 +375,9 @@ impl App {
             last_tool_progress_at: None,
             login_flow: None,
             window_title,
+            pending_config_actions: HashSet::new(),
+            next_config_request_id: 1,
+            queued_pending_messages: VecDeque::new(),
         }
     }
 
@@ -550,13 +565,24 @@ impl App {
                     }
                     crossterm::event::KeyCode::Enter => {
                         if let Some(entry) = self.model_selector.selected_model() {
-                            let _ = self.action_tx.send(TuiAction::SwitchModel {
-                                model_id: entry.id.clone(),
-                                provider: Some(entry.provider.clone()),
-                            });
+                            let model_id = entry.id.clone();
+                            let provider = entry.provider.clone();
+                            let request_id = self.begin_config_action();
+                            if !self.send_config_action(
+                                request_id,
+                                TuiAction::SwitchModel {
+                                    model_id: model_id.clone(),
+                                    provider: Some(provider),
+                                    request_id,
+                                },
+                                "model",
+                            ) {
+                                self.model_selector.hide();
+                                return;
+                            }
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
-                                text: format!("Switching model to {}...", entry.id),
+                                text: format!("Switching model to {model_id}..."),
                                 tool_name: None,
                                 is_streaming: false,
                             });
@@ -590,13 +616,22 @@ impl App {
                     }
                     crossterm::event::KeyCode::Enter => {
                         if let Some(level) = self.thinking_selector.selected_level() {
-                            self.status.thinking = level.to_string();
-                            let _ = self
-                                .action_tx
-                                .send(TuiAction::SetThinking(level.to_string()));
+                            let level = level.to_string();
+                            let request_id = self.begin_config_action();
+                            if !self.send_config_action(
+                                request_id,
+                                TuiAction::SetThinking {
+                                    level: level.clone(),
+                                    request_id,
+                                },
+                                "thinking",
+                            ) {
+                                self.thinking_selector.hide();
+                                return;
+                            }
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
-                                text: format!("Thinking level set to {level}"),
+                                text: format!("Setting thinking level to {level}..."),
                                 tool_name: None,
                                 is_streaming: false,
                             });
@@ -732,6 +767,66 @@ impl App {
         }
     }
 
+    fn begin_config_action(&mut self) -> u64 {
+        let request_id = self.next_config_request_id;
+        self.next_config_request_id = self.next_config_request_id.wrapping_add(1);
+        self.pending_config_actions.insert(request_id);
+        request_id
+    }
+
+    fn send_config_action(&mut self, request_id: u64, action: TuiAction, kind: &str) -> bool {
+        if self.action_tx.send(action).is_ok() {
+            return true;
+        }
+        self.pending_config_actions.remove(&request_id);
+        self.status.set_detail("failed to dispatch config update");
+        self.chat.add_message(ChatMessage {
+            role: ChatRole::System,
+            text: format!("Failed to dispatch {kind} update. Please retry."),
+            tool_name: None,
+            is_streaming: false,
+        });
+        false
+    }
+
+    fn queue_message_while_config_pending(&mut self, text: Option<String>) -> bool {
+        if self.pending_config_actions.is_empty() {
+            return false;
+        }
+        if let Some(text) = text
+            && !text.trim().is_empty()
+        {
+            self.queued_pending_messages.push_back(text);
+        }
+        let pending = self.pending_config_actions.len();
+        self.status.set_detail(&format!(
+            "waiting for model/thinking update ({pending} pending)"
+        ));
+        true
+    }
+
+    fn send_user_message_now(&mut self, text: String) {
+        self.chat.add_message(ChatMessage {
+            role: ChatRole::User,
+            text: text.clone(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        self.status.set_agent_state("streaming");
+        self.streaming = true;
+        self.status.set_detail("awaiting assistant response");
+        let _ = self.message_tx.send(text);
+    }
+
+    fn flush_queued_message_if_ready(&mut self) {
+        if !self.pending_config_actions.is_empty() || self.streaming {
+            return;
+        }
+        if let Some(text) = self.queued_pending_messages.pop_front() {
+            self.send_user_message_now(text);
+        }
+    }
+
     fn handle_action(&mut self, action: Action) {
         match action {
             Action::SendMessage(text) => {
@@ -763,16 +858,10 @@ impl App {
                         self.status.set_detail("queued steer message");
                     }
                 } else {
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::User,
-                        text: text.clone(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                    self.status.set_agent_state("streaming");
-                    self.streaming = true;
-                    self.status.set_detail("awaiting assistant response");
-                    let _ = self.message_tx.send(text);
+                    if self.queue_message_while_config_pending(Some(text.clone())) {
+                        return;
+                    }
+                    self.send_user_message_now(text);
                 }
             }
             Action::Quit => {
@@ -878,10 +967,18 @@ impl App {
                 if arg.is_empty() {
                     self.model_selector.show();
                 } else {
-                    let _ = self.action_tx.send(TuiAction::SwitchModel {
-                        model_id: arg.to_string(),
-                        provider: None,
-                    });
+                    let request_id = self.begin_config_action();
+                    if !self.send_config_action(
+                        request_id,
+                        TuiAction::SwitchModel {
+                            model_id: arg.to_string(),
+                            provider: None,
+                            request_id,
+                        },
+                        "model",
+                    ) {
+                        return;
+                    }
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: format!("Switching model to {arg}..."),
@@ -906,11 +1003,20 @@ impl App {
                         });
                     }
                 } else {
-                    let _ = self.action_tx.send(TuiAction::SetThinking(arg.to_string()));
-                    self.status.thinking = arg.to_string();
+                    let request_id = self.begin_config_action();
+                    if !self.send_config_action(
+                        request_id,
+                        TuiAction::SetThinking {
+                            level: arg.to_string(),
+                            request_id,
+                        },
+                        "thinking",
+                    ) {
+                        return;
+                    }
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
-                        text: format!("Thinking level set to {arg}"),
+                        text: format!("Setting thinking level to {arg}..."),
                         tool_name: None,
                         is_streaming: false,
                     });
@@ -1157,15 +1263,10 @@ impl App {
                     } else {
                         format!("/{command} {arg}")
                     };
-                    self.chat.add_message(ChatMessage {
-                        role: ChatRole::User,
-                        text: full.clone(),
-                        tool_name: None,
-                        is_streaming: false,
-                    });
-                    self.status.set_agent_state("streaming");
-                    self.streaming = true;
-                    let _ = self.message_tx.send(full);
+                    if self.queue_message_while_config_pending(Some(full.clone())) {
+                        return;
+                    }
+                    self.send_user_message_now(full);
                 } else {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
@@ -1535,6 +1636,19 @@ impl App {
             TuiEvent::ModelSwitched { model } => {
                 self.status.model = model;
             }
+            TuiEvent::ActionAck { request_id } => {
+                self.pending_config_actions.remove(&request_id);
+                if self.pending_config_actions.is_empty() {
+                    if self
+                        .status
+                        .detail
+                        .starts_with("waiting for model/thinking update")
+                    {
+                        self.status.set_detail("settings updated");
+                    }
+                    self.flush_queued_message_if_ready();
+                }
+            }
             TuiEvent::QueueStatus { steer, follow_up } => {
                 self.steer_queue_count = steer;
                 self.follow_up_queue_count = follow_up;
@@ -1554,6 +1668,7 @@ impl App {
                 self.status.ctx_pct = pct;
             }
             TuiEvent::ThinkingLevels { levels, current } => {
+                self.status.thinking = current.clone();
                 let entries = levels
                     .into_iter()
                     .map(|id| {
@@ -1575,6 +1690,15 @@ impl App {
                 if !show_selector {
                     self.thinking_selector.hide();
                 }
+            }
+            TuiEvent::ThinkingSet { level } => {
+                self.status.thinking = level.clone();
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: format!("Thinking level set to {level}"),
+                    tool_name: None,
+                    is_streaming: false,
+                });
             }
         }
     }
