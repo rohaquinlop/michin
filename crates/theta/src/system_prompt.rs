@@ -112,14 +112,30 @@ fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) ->
 }
 
 async fn load_project_context(working_dir: &Path) -> Option<String> {
+    // 1. Find root AGENTS.md (walk up from working dir)
     let agents_path = find_context_file(working_dir, "AGENTS.md").await?;
     let agents = tokio::fs::read_to_string(&agents_path).await.ok()?;
+    let project_root = agents_path.parent().unwrap_or(working_dir);
+
     let mut context = format!(
         "# Project Context
 
 {agents}"
     );
 
+    // 2. Discover nested AGENTS.md files (walk down from project root)
+    let nested = discover_nested_agents(project_root).await;
+    for (relative_path, content) in &nested {
+        context.push_str(&format!(
+            "
+
+# Crate Context: {relative_path}
+
+{content}"
+        ));
+    }
+
+    // 3. CLAUDE.md (only if different from root AGENTS.md)
     if let Some(claude_path) = find_context_file(working_dir, "CLAUDE.md").await
         && claude_path != agents_path
         && let Ok(claude) = tokio::fs::read_to_string(&claude_path).await
@@ -133,6 +149,7 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
         ));
     }
 
+    // 4. Theta context file
     let theta_ctx = working_dir.join(".theta").join("context.md");
     if theta_ctx.exists()
         && let Ok(ctx) = tokio::fs::read_to_string(&theta_ctx).await
@@ -147,6 +164,70 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
     }
 
     Some(context)
+}
+
+/// Discover all AGENTS.md files nested under `root`, excluding ignorable directories.
+/// Returns a sorted Vec of (relative_path, content) pairs.
+/// Does NOT include the root AGENTS.md (handled separately).
+async fn discover_nested_agents(root: &Path) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    // Manual stack to avoid async_recursion dependency
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+
+    while let Some(current) = dirs.pop() {
+        // Check for AGENTS.md in this directory (skip root level)
+        if current != root {
+            let candidate = current.join("AGENTS.md");
+            if candidate.exists()
+                && let Ok(content) = tokio::fs::read_to_string(&candidate).await
+                && let Ok(relative) = candidate.strip_prefix(root)
+            {
+                let rel_path = relative
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !rel_path.is_empty() {
+                    results.push((rel_path, content));
+                }
+            }
+        }
+
+        // Enumerate subdirectories
+        let mut entries = match tokio::fs::read_dir(&current).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if entry.file_type().await.is_ok_and(|ft| ft.is_dir()) {
+                if is_ignorable_dir(&name) {
+                    continue;
+                }
+                dirs.push(entry.path());
+            }
+        }
+    }
+
+    // Sort by relative path for deterministic ordering
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Directories to skip when walking for nested AGENTS.md files.
+fn is_ignorable_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "target"
+            | "node_modules"
+            | ".theta"
+            | ".github"
+            | ".vscode"
+            | ".idea"
+            | ".DS_Store"
+    ) || name.starts_with('.')
 }
 
 async fn find_context_file(start: &Path, filename: &str) -> Option<PathBuf> {
@@ -371,7 +452,7 @@ Do NOT edit config.toml without explicit user request or clear intent."#;
 
 #[cfg(test)]
 mod tests {
-    use super::{RESPONSE_CONTRACT, build_tools_prompt};
+    use super::{RESPONSE_CONTRACT, build_tools_prompt, is_ignorable_dir};
     use std::path::Path;
 
     #[test]
@@ -398,5 +479,79 @@ mod tests {
     fn response_contract_contains_tool_discipline() {
         assert!(RESPONSE_CONTRACT.contains("3-5 files"));
         assert!(RESPONSE_CONTRACT.contains("function-calling"));
+    }
+
+    #[test]
+    fn ignorable_dirs_reject_vcs_and_build() {
+        assert!(is_ignorable_dir(".git"));
+        assert!(is_ignorable_dir("target"));
+        assert!(is_ignorable_dir("node_modules"));
+        assert!(is_ignorable_dir(".theta"));
+        assert!(is_ignorable_dir(".github"));
+        assert!(is_ignorable_dir(".vscode"));
+        assert!(is_ignorable_dir(".idea"));
+        assert!(is_ignorable_dir(".DS_Store"));
+    }
+
+    #[test]
+    fn ignorable_dirs_reject_dot_prefix() {
+        assert!(is_ignorable_dir(".cache"));
+        assert!(is_ignorable_dir(".config"));
+        assert!(is_ignorable_dir(".local"));
+    }
+
+    #[test]
+    fn ignorable_dirs_accept_normal_names() {
+        assert!(!is_ignorable_dir("src"));
+        assert!(!is_ignorable_dir("crates"));
+        assert!(!is_ignorable_dir("docs"));
+        assert!(!is_ignorable_dir("tests"));
+    }
+
+    #[tokio::test]
+    async fn discover_nested_agents_finds_crate_files() {
+        // CARGO_MANIFEST_DIR is crates/theta, parent is crates/
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let nested = super::discover_nested_agents(root).await;
+
+        let found_crates: Vec<&str> = nested.iter().map(|(p, _)| p.as_str()).collect();
+
+        // Per-crate AGENTS.md files (relative to crates/)
+        assert!(
+            found_crates.contains(&"theta-ai"),
+            "missing theta-ai: {:?}",
+            found_crates
+        );
+        assert!(
+            found_crates.contains(&"theta-agent-core"),
+            "missing theta-agent-core: {:?}",
+            found_crates
+        );
+        assert!(
+            found_crates.contains(&"theta-tui"),
+            "missing theta-tui: {:?}",
+            found_crates
+        );
+        assert!(
+            found_crates.contains(&"theta-models"),
+            "missing theta-models: {:?}",
+            found_crates
+        );
+        assert!(
+            found_crates.contains(&"theta-script"),
+            "missing theta-script: {:?}",
+            found_crates
+        );
+
+        // Each should have non-empty content
+        for (_path, content) in &nested {
+            assert!(!content.is_empty(), "empty AGENTS.md found");
+        }
+
+        // Should NOT include root AGENTS.md
+        assert!(
+            !found_crates.contains(&""),
+            "root AGENTS.md should not be in nested results"
+        );
     }
 }
