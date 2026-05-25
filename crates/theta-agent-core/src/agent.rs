@@ -11,7 +11,7 @@ use tracing;
 
 use theta_ai::Provider as ProviderKind;
 use theta_ai::providers::ProviderRegistry;
-use theta_ai::{ContentBlock, Message, Model, ModelCatalog};
+use theta_ai::{ContentBlock, Message, Model};
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
@@ -30,10 +30,6 @@ pub struct Agent {
 
     /// Provider registry for LLM calls.
     provider: Arc<ProviderRegistry>,
-
-    /// Model catalog for model lookup.
-    #[allow(dead_code)]
-    model_catalog: Arc<dyn ModelCatalog>,
 
     /// Lifecycle hooks.
     hooks: Arc<dyn Hooks>,
@@ -60,18 +56,16 @@ struct ActiveRun {
 }
 
 impl Agent {
-    /// Create a new agent with the given model, provider, and model catalog.
+    /// Create a new agent with the given model, provider, and available models.
     pub fn new(
         model: Model,
         provider: Arc<ProviderRegistry>,
-        model_catalog: Arc<dyn ModelCatalog>,
+        available_models: Vec<Model>,
     ) -> Self {
-        let available_models = model_catalog.list().into_iter().cloned().collect();
         Self {
             state: RwLock::new(AgentState::new(model, available_models)),
             event_tx: broadcast::channel(8192).0,
             provider,
-            model_catalog,
             hooks: Arc::new(NoopHooks),
             active_run: Mutex::new(None),
             config: AgentLoopConfig::default(),

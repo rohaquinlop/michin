@@ -48,9 +48,6 @@ pub struct ScriptEngine {
     tui_status_handlers: Arc<Mutex<HashMap<String, ToolHandler>>>,
     /// TUI row layout callbacks: index → Rhai callback returning #{ left, center, right }.
     tui_row_handlers: Arc<Mutex<HashMap<usize, ToolHandler>>>,
-    /// Shared mutable state accessible from all script hooks via set_state/get_state.
-    #[allow(dead_code)]
-    shared_state: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ScriptEngine {
@@ -197,7 +194,6 @@ impl ScriptEngine {
             registration_context,
             tui_status_handlers,
             tui_row_handlers,
-            shared_state,
         }
     }
 

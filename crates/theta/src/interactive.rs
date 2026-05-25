@@ -435,11 +435,12 @@ async fn create_agent(
     status_notify: &Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<Agent> {
     let catalog = BuiltInCatalog::new();
+    let available_models: Vec<theta_ai::Model> = catalog.list().into_iter().cloned().collect();
     let registry = default_registry();
     registry.set_api_key(model.provider, api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;

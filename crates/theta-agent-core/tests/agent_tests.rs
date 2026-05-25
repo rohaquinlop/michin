@@ -245,7 +245,11 @@ async fn test_agent_text_response() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     let mut rx = agent.subscribe();
 
     let handle = tokio::spawn(async move {
@@ -302,7 +306,11 @@ async fn test_agent_tool_loop() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .add_tool(Arc::new(MockTool::new("mock", ToolExecutionMode::Parallel)))
         .await;
@@ -358,7 +366,11 @@ async fn test_agent_retries_empty_assistant_turn() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .prompt(vec![ContentBlock::text("Explain changes")])
         .await
@@ -421,7 +433,11 @@ async fn test_agent_allows_long_progressive_tool_runs_without_round_cap() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .add_tool(Arc::new(MockTool::new(
             "mock",
@@ -499,7 +515,11 @@ async fn test_agent_stops_repeated_identical_tool_call_loop() {
         models: vec![model.clone()],
     });
 
-    let agent = Arc::new(Agent::new(model, registry, catalog));
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
     agent
         .add_tool(Arc::new(MockTool::new(
             "mock",
@@ -597,7 +617,11 @@ async fn test_duplicate_tool_call_id_in_turn_is_deduped() {
     let catalog = Arc::new(TestModelCatalog {
         models: vec![model.clone()],
     });
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .add_tool(Arc::new(MockTool::new(
             "mock",
@@ -650,7 +674,11 @@ async fn test_action_turn_with_explicit_blocker_does_not_retry() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .prompt(vec![ContentBlock::text("implement it")])
         .await
@@ -688,7 +716,11 @@ async fn test_agent_abort() {
         models: vec![model.clone()],
     });
 
-    let agent = Arc::new(Agent::new(model, registry, catalog));
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
     let agent_clone = agent.clone();
 
     let handle = tokio::spawn(async move {
@@ -724,7 +756,11 @@ async fn test_agent_already_running() {
         models: vec![model.clone()],
     });
 
-    let agent = Arc::new(Agent::new(model, registry, catalog));
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
     let agent_clone = agent.clone();
 
     // Start a prompt in background (will block).
@@ -772,7 +808,11 @@ async fn test_agent_follow_up() {
         models: vec![model.clone()],
     });
 
-    let agent = Arc::new(Agent::new(model, registry, catalog));
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
 
     // Queue a follow-up before starting.
     agent.follow_up(vec![ContentBlock::text("follow up question")]);
@@ -819,7 +859,11 @@ async fn test_agent_event_subscription() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     let mut rx = agent.subscribe();
 
     let handle = tokio::spawn(async move {
@@ -876,7 +920,11 @@ async fn test_agent_state_transcript() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
 
     agent
         .prompt(vec![ContentBlock::text("hello")])
@@ -936,7 +984,11 @@ async fn test_agent_steer() {
         models: vec![model.clone()],
     });
 
-    let agent = Arc::new(Agent::new(model, registry, catalog));
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
     let agent_clone = agent.clone();
 
     let mut rx = agent.subscribe();
@@ -994,7 +1046,11 @@ async fn test_manual_compaction_trims_messages() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
 
     // Inject many messages to exceed the 128k context window.
     {
@@ -1048,7 +1104,11 @@ async fn test_context_stats_returns_token_counts() {
         models: vec![model.clone()],
     });
 
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .prompt(vec![ContentBlock::text("hello world")])
         .await
@@ -1089,7 +1149,11 @@ async fn test_run_report_events_include_standard_fields() {
     let catalog = Arc::new(TestModelCatalog {
         models: vec![model.clone()],
     });
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     agent
         .add_tool(Arc::new(MockTool::new(
             "mock",
@@ -1155,7 +1219,11 @@ async fn test_provider_fallback_chain_uses_next_model() {
         models: vec![primary.clone(), fallback.clone()],
     });
 
-    let mut agent = Agent::new(primary, registry, catalog);
+    let mut agent = Agent::new(
+        primary,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     let mut cfg = AgentLoopConfig::default();
     cfg.retry.max_retries = 0;
     cfg.provider_fallback_chain = vec![fallback.id.clone()];
@@ -1218,7 +1286,11 @@ async fn test_circuit_breaker_opens_and_emits_event() {
     let catalog = Arc::new(TestModelCatalog {
         models: vec![model.clone()],
     });
-    let mut agent = Agent::new(model, registry, catalog);
+    let mut agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
     let mut cfg = AgentLoopConfig::default();
     cfg.retry.max_retries = 0;
     cfg.provider_circuit_breaker.failure_threshold = 1;
@@ -1255,7 +1327,11 @@ async fn test_turn_mode_resolver_uses_runtime_override_source() {
     let catalog = Arc::new(TestModelCatalog {
         models: vec![model.clone()],
     });
-    let agent = Agent::new(model, registry, catalog);
+    let agent = Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
 
     agent
         .prompt(vec![ContentBlock::text("implement this")])

@@ -112,12 +112,13 @@ async fn prompt(
         .unwrap_or("medium");
 
     let catalog = BuiltInCatalog::new();
+    let available_models: Vec<theta_ai::Model> = catalog.list().into_iter().cloned().collect();
     let (model, key) = resolve_auth_for_model(config, &catalog, model_id).await?;
 
     let registry = default_registry();
     registry.set_api_key(model.provider, key);
 
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf())) {
         agent.add_tool(tool).await;

@@ -28,7 +28,6 @@ pub struct CodexCredentials {
 }
 
 /// Result of the token exchange step.
-#[allow(dead_code)]
 enum TokenExchangeResult {
     Success {
         access_token: String,
@@ -99,13 +98,17 @@ pub async fn login_codex() -> Result<CodexCredentials, OAuthError> {
 
     // Exchange code for tokens.
     let token_result = exchange_code(&code, &verifier).await?;
-    let TokenExchangeResult::Success {
-        access_token,
-        refresh_token,
-        expires_in,
-    } = token_result
-    else {
-        return Err(OAuthError::TokenExchange("token exchange failed".into()));
+    let (access_token, refresh_token, expires_in) = match token_result {
+        TokenExchangeResult::Success {
+            access_token,
+            refresh_token,
+            expires_in,
+        } => (access_token, refresh_token, expires_in),
+        TokenExchangeResult::Failure { status, message } => {
+            return Err(OAuthError::TokenExchange(format!(
+                "token exchange failed (HTTP {status}): {message}"
+            )));
+        }
     };
 
     // Extract account_id from JWT.

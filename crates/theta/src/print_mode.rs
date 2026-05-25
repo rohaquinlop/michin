@@ -29,6 +29,7 @@ pub async fn run_prompt_print_mode(
 
     // Resolve model + auth with provider fallback.
     let catalog = BuiltInCatalog::new();
+    let available_models: Vec<theta_ai::Model> = catalog.list().into_iter().cloned().collect();
     let (model, api_key) = resolve_auth(config, &catalog, model_id).await?;
 
     // Provider registry.
@@ -37,7 +38,7 @@ pub async fn run_prompt_print_mode(
 
     // Register tools.
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
@@ -213,6 +214,7 @@ pub async fn run_continue_print_mode(
         .unwrap_or_else(|| model_id.to_string());
 
     let catalog = BuiltInCatalog::new();
+    let available_models: Vec<theta_ai::Model> = catalog.list().into_iter().cloned().collect();
     let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
     // Provider registry.
@@ -221,7 +223,7 @@ pub async fn run_continue_print_mode(
 
     // Register tools.
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
@@ -352,13 +354,14 @@ pub async fn run_resume_print_mode(
         });
 
     let catalog = BuiltInCatalog::new();
+    let available_models: Vec<theta_ai::Model> = catalog.list().into_iter().cloned().collect();
     let (model, api_key) = resolve_auth(config, &catalog, &effective_model).await?;
 
     let registry = default_registry();
     registry.set_api_key(model.provider, &api_key);
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), Arc::new(catalog));
+    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;

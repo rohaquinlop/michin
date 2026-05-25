@@ -11,7 +11,7 @@ use theta_agent_core::{
     Agent, AgentError, AgentTool, ToolExecutionMode, ToolResult, ToolUpdateSender,
 };
 use theta_ai::event::AssistantMessageEvent;
-use theta_ai::model::{Model, ModelCatalog, ModelCompat};
+use theta_ai::model::{Model, ModelCompat};
 use theta_ai::providers::ProviderRegistry;
 use theta_ai::types::{
     Api, ContentBlock, Context, Message, Modality, ModelCost, Provider as ProviderKind,
@@ -233,24 +233,6 @@ fn test_model() -> Model {
     }
 }
 
-struct TestModelCatalog {
-    model: Model,
-}
-
-impl ModelCatalog for TestModelCatalog {
-    fn find(&self, _provider: ProviderKind, _model_id: &str) -> Option<&Model> {
-        Some(&self.model)
-    }
-
-    fn list(&self) -> Vec<&Model> {
-        vec![&self.model]
-    }
-
-    fn list_by_provider(&self, _provider: ProviderKind) -> Vec<&Model> {
-        vec![&self.model]
-    }
-}
-
 #[tokio::test]
 async fn system_prompt_guardrails_drive_tool_execution_with_mock_provider() {
     let model = test_model();
@@ -260,11 +242,7 @@ async fn system_prompt_guardrails_drive_tool_execution_with_mock_provider() {
     let mut registry = ProviderRegistry::new();
     registry.register(Api::OpenAiCompletions, Box::new(provider));
 
-    let agent = Agent::new(
-        model.clone(),
-        Arc::new(registry),
-        Arc::new(TestModelCatalog { model }),
-    );
+    let agent = Agent::new(model.clone(), Arc::new(registry), vec![model.clone()]);
     agent.add_tool(Arc::new(MockTool)).await;
 
     let wd = std::env::current_dir().expect("cwd");
@@ -354,11 +332,7 @@ async fn persisted_session_with_orphan_toolcall_is_sanitized_on_resume() {
     let model = test_model();
     let mut registry = ProviderRegistry::new();
     registry.register(Api::OpenAiCompletions, Box::new(ReplayValidationProvider));
-    let agent = Agent::new(
-        model.clone(),
-        Arc::new(registry),
-        Arc::new(TestModelCatalog { model }),
-    );
+    let agent = Agent::new(model.clone(), Arc::new(registry), vec![model.clone()]);
     agent.load_messages(reopened.messages).await;
 
     agent

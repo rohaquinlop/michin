@@ -10,7 +10,7 @@ use futures::Stream;
 
 use theta_agent_core::*;
 use theta_ai::event::AssistantMessageEvent;
-use theta_ai::model::{Model, ModelCatalog, ModelCompat};
+use theta_ai::model::{Model, ModelCompat};
 use theta_ai::providers::ProviderRegistry;
 use theta_ai::types::{
     Api, ContentBlock, Context, Message, Modality, ModelCost, Provider as ProviderKind,
@@ -131,21 +131,6 @@ fn test_model() -> Model {
     }
 }
 
-struct Catalog {
-    model: Model,
-}
-impl ModelCatalog for Catalog {
-    fn find(&self, _provider: ProviderKind, _model_id: &str) -> Option<&Model> {
-        Some(&self.model)
-    }
-    fn list(&self) -> Vec<&Model> {
-        vec![&self.model]
-    }
-    fn list_by_provider(&self, _provider: ProviderKind) -> Vec<&Model> {
-        vec![&self.model]
-    }
-}
-
 fn make_registry(provider: MockProvider) -> Arc<ProviderRegistry> {
     let mut reg = ProviderRegistry::new();
     reg.register(Api::OpenAiCompletions, Box::new(provider));
@@ -170,11 +155,7 @@ async fn scenario_provider_timeout_or_transient_failure_retries() {
         ]),
     ]);
 
-    let mut agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let mut agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     let mut cfg = AgentLoopConfig::default();
     cfg.retry.max_retries = 1;
     agent.set_config(cfg);
@@ -212,11 +193,7 @@ async fn scenario_tool_timeout_emits_tool_error() {
             },
         ]),
     ]);
-    let mut agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let mut agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     agent
         .add_tool(Arc::new(MatrixTool {
             name: "slow".into(),
@@ -264,11 +241,7 @@ async fn scenario_repeated_tool_signature_stops_loop() {
         ]));
     }
     let provider = MockProvider::new(responses);
-    let mut agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let mut agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     agent
         .add_tool(Arc::new(MatrixTool {
             name: "mock".into(),
@@ -310,11 +283,7 @@ async fn scenario_commit_tool_call_is_allowed_when_user_explicitly_requests_comm
             usage: None,
         },
     ])]);
-    let agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     agent
         .add_tool(Arc::new(MatrixTool {
             name: "bash".into(),
@@ -349,11 +318,7 @@ async fn scenario_dependency_mutation_is_allowed_with_explicit_request() {
             usage: None,
         },
     ])]);
-    let agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     agent
         .add_tool(Arc::new(MatrixTool {
             name: "bash".into(),
@@ -404,11 +369,7 @@ async fn scenario_long_run_soak_stability() {
     ]));
 
     let provider = MockProvider::new(responses);
-    let agent = Agent::new(
-        model.clone(),
-        make_registry(provider),
-        Arc::new(Catalog { model }),
-    );
+    let agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
     agent
         .add_tool(Arc::new(MatrixTool {
             name: "mock".into(),
