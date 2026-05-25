@@ -123,6 +123,7 @@ All six phases complete. Active maintenance and polish.
 - No panic in library code. Libraries return `Result`, never abort.
 - Traits over inheritance. Extension points are `#[async_trait]` traits.
 - `tokio::sync::RwLock` over `std::sync::RwLock` for state held across `.await`. Std variant makes futures `!Send`.
+- Never hold `agent.state().await` guards across awaited calls that may take a write lock (`set_system_prompt`, `set_model`, `set_thinking_level`, `load_messages`, etc.). Read needed fields, `drop(state)`, then await.
 - `std::sync::Mutex` for short-lived locks never crossing await. `tokio::sync::Mutex` only when lock must be held across `.await`.
 - `Arc<Mutex<Vec<T>>>` for shared queues between agent and loop — steer/follow-up push from external threads while loop drains.
 - Single-line helpers with one call site: inline them.
@@ -236,6 +237,8 @@ When user says "modify/extend theta" without specifics: ask whether they want sk
 | `/settings`         | Open settings overlay (steering mode, transport, show-thinking)                              |
 | `/session`          | Show current session info + API context usage                                                |
 | Mouse scroll        | Scroll chat history                                                                          |
+
+TUI config actions (`/model`, `/thinking`, selector equivalents) are async and acknowledged from the interactive handler. Input submitted while a config action is pending is queued and released only after ack to avoid stale model/thinking races.
 
 ## Config and Settings
 
