@@ -183,6 +183,9 @@ pub struct CompactionConfig {
     pub enabled: bool,
     /// Tokens to reserve for the model's response.
     pub reserve_tokens: u32,
+    /// How many tokens of recent conversation to preserve during compaction.
+    /// Older messages are summarized.
+    pub keep_recent_tokens: u32,
     /// Strategy for handling trimmed context.
     pub strategy: CompactionStrategy,
     /// Maximum output tokens for compaction summaries.
@@ -194,6 +197,7 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             reserve_tokens: 4096,
+            keep_recent_tokens: 20_000,
             strategy: CompactionStrategy::Llm,
             summary_max_tokens: 512,
         }

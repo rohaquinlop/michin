@@ -147,6 +147,8 @@ pub enum TuiEvent {
     ClearChat,
     /// Informational system message (not an error).
     Info(String),
+    /// Set the agent state in the status bar (e.g. "compacting").
+    SetAgentState(String),
     /// Live session info: token counts, context window, compaction status.
     SessionInfo {
         message_count: usize,
@@ -155,6 +157,7 @@ pub enum TuiEvent {
         context_window: u32,
         compaction_enabled: bool,
         reserve_tokens: u32,
+        keep_recent_tokens: u32,
         model_id: String,
         provider: String,
     },
@@ -1631,6 +1634,9 @@ impl App {
             TuiEvent::ClearChat => {
                 self.chat.clear_messages();
             }
+            TuiEvent::SetAgentState(state) => {
+                self.status.set_agent_state(&state);
+            }
             TuiEvent::Info(msg) => {
                 if self.diag_enabled || !is_diagnostic_message(&msg) {
                     self.chat.add_message(ChatMessage {
@@ -1648,6 +1654,7 @@ impl App {
                 context_window,
                 compaction_enabled,
                 reserve_tokens,
+                keep_recent_tokens,
                 model_id,
                 provider,
             } => {
@@ -1664,7 +1671,7 @@ impl App {
                     0
                 };
                 let comp_state = if compaction_enabled {
-                    format!("on (auto at > {avail} tokens, reserve: {reserve_tokens})")
+                    format!("on (keep recent: {keep_recent_tokens}, reserve: {reserve_tokens})")
                 } else {
                     "off".into()
                 };

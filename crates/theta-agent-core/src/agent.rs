@@ -203,11 +203,24 @@ impl Agent {
             // Force-enable compaction for manual trigger (ignore config.enabled).
             let mut force_config = self.config.compaction.clone();
             force_config.enabled = true;
+
+            // Manual compact: preserve keep_recent_tokens of recent
+            // conversation, summarize everything older. Keep a fixed
+            // useful window (default 20K tokens) rather than basing
+            // it on the model's context window.
+            // available = context_window - reserve_tokens - system_tokens
+            // We set context_window so that available = keep_recent_tokens.
+            let effective_window = self
+                .config
+                .compaction
+                .keep_recent_tokens
+                .saturating_add(self.config.compaction.reserve_tokens)
+                .saturating_add(system_tokens);
             (
                 crate::compact::compact_messages(
                     &llm_msgs,
                     system_tokens,
-                    state.model.context_window,
+                    effective_window,
                     &force_config,
                 ),
                 self.config.compaction.clone(),

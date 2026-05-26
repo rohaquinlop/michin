@@ -232,6 +232,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
@@ -258,6 +259,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
@@ -287,6 +289,7 @@ mod tests {
             &CompactionConfig {
                 enabled: false,
                 reserve_tokens: 0,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
@@ -306,6 +309,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 95,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
@@ -329,6 +333,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },
@@ -351,6 +356,7 @@ mod tests {
             &CompactionConfig {
                 enabled: true,
                 reserve_tokens: 0,
+                keep_recent_tokens: 0,
                 strategy: CompactionStrategy::Textual,
                 summary_max_tokens: 512,
             },

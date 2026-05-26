@@ -85,6 +85,9 @@ pub struct CompactionSettings {
     /// Tokens to reserve for the model's response.
     #[serde(default = "default_reserve_tokens")]
     pub reserve_tokens: u32,
+    /// How many tokens of recent conversation to preserve during compaction.
+    #[serde(default = "default_keep_recent_tokens")]
+    pub keep_recent_tokens: u32,
     /// Strategy to preserve trimmed context.
     #[serde(default)]
     pub strategy: CompactionStrategySetting,
@@ -101,6 +104,7 @@ impl Default for CompactionSettings {
         Self {
             enabled: true,
             reserve_tokens: 4096,
+            keep_recent_tokens: 20_000,
             strategy: CompactionStrategySetting::Llm,
             summarize_with_llm: None,
             summary_max_tokens: 512,
@@ -225,6 +229,9 @@ fn default_true() -> bool {
 }
 fn default_reserve_tokens() -> u32 {
     4096
+}
+fn default_keep_recent_tokens() -> u32 {
+    20_000
 }
 fn default_summary_max_tokens() -> u32 {
     512
@@ -657,6 +664,7 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
         compaction: theta_agent_core::CompactionConfig {
             enabled: tc.compaction.enabled,
             reserve_tokens: tc.compaction.reserve_tokens,
+            keep_recent_tokens: tc.compaction.keep_recent_tokens,
             strategy,
             summary_max_tokens: tc.compaction.summary_max_tokens,
         },

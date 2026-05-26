@@ -1251,6 +1251,7 @@ async fn handle_tui_action(
                 context_window: state.model.context_window,
                 compaction_enabled: agent.config().compaction.enabled,
                 reserve_tokens: agent.config().compaction.reserve_tokens,
+                keep_recent_tokens: agent.config().compaction.keep_recent_tokens,
                 model_id: state.model.id.clone(),
                 provider: provider_to_string(state.model.provider),
             });
@@ -1260,19 +1261,38 @@ async fn handle_tui_action(
                 let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
                 return;
             };
+            let _ = event_tx.send(TuiEvent::SetAgentState("compacting".into()));
             match agent.compact_context().await {
                 Ok(trimmed) => {
+                    let _ = event_tx.send(TuiEvent::SetAgentState("idle".into()));
+                    // Update the ctx% in the status bar.
+                    let (_, approx_tokens, _) = agent.context_stats().await;
+                    let state = agent.state().await;
+                    let avail = state
+                        .model
+                        .context_window
+                        .saturating_sub(agent.config().compaction.reserve_tokens);
+                    let pct = if avail > 0 {
+                        (approx_tokens as f64 / avail as f64 * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    let _ = event_tx.send(TuiEvent::ContextTokens {
+                        tokens: approx_tokens,
+                        pct,
+                    });
                     if trimmed > 0 {
                         let _ = event_tx.send(TuiEvent::Info(format!(
                             "Compacted {trimmed} old messages from context."
                         )));
                     } else {
                         let _ = event_tx.send(TuiEvent::Info(
-                            "Context is already within the window — nothing to compact.".into(),
+                            "No older messages to compact — context already minimal.".into(),
                         ));
                     }
                 }
                 Err(e) => {
+                    let _ = event_tx.send(TuiEvent::SetAgentState("idle".into()));
                     let _ = event_tx.send(TuiEvent::Error(format!("Compaction failed: {e}")));
                 }
             }
