@@ -414,6 +414,8 @@ fn mode_from_state(state: &str) -> &str {
         "done"
     } else if state == "Failed" {
         "failed"
+    } else if state == "Cancelled" || state.starts_with("cancel") {
+        "cancel"
     } else if state.starts_with("compacting") {
         "compact"
     } else if state.starts_with("error") {

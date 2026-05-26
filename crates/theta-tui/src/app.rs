@@ -81,6 +81,8 @@ pub enum TuiAction {
     ShowThinkingSelector,
     /// Manually compact context now (even if under the auto-compaction threshold).
     CompactContext,
+    /// Abort the currently running agent turn.
+    AbortAgent,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -121,7 +123,10 @@ pub enum TuiEvent {
     /// is complete (no more TextDelta) and any subsequent events are tool
     /// execution phase.
     MessageEnd,
-    AgentEnd,
+    /// Fires when the agent run completes (or is aborted).
+    AgentEnd {
+        aborted: bool,
+    },
     ContextCompacted {
         trimmed_count: u32,
         tokens_before: u32,
@@ -276,6 +281,10 @@ pub struct App {
     pending_config_actions: HashSet<u64>,
     next_config_request_id: u64,
     queued_pending_messages: VecDeque<String>,
+    /// Set to true when user presses Cancel while idle — second Cancel quits.
+    quit_confirmation: bool,
+    /// Timestamp of the first cancel press — if too old, resets the confirm.
+    quit_confirm_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -291,6 +300,22 @@ impl App {
     /// Update the session ID in the status bar (for lazy session creation).
     pub fn set_session_id(&mut self, id: String) {
         self.status.session_id = id;
+    }
+
+    /// Clear quit confirmation if the 2-second window has expired.
+    fn clear_expired_quit_confirmation(&mut self) {
+        if !self.quit_confirmation {
+            return;
+        }
+        if let Some(at) = self.quit_confirm_at
+            && at.elapsed().as_millis() >= 2000
+        {
+            self.quit_confirmation = false;
+            self.quit_confirm_at = None;
+            if self.status.detail == "Press Esc/Ctrl+C again to exit" {
+                self.status.set_detail("");
+            }
+        }
     }
 
     /// Inject an initial user message (used for startup prompt text).
@@ -378,6 +403,8 @@ impl App {
             pending_config_actions: HashSet::new(),
             next_config_request_id: 1,
             queued_pending_messages: VecDeque::new(),
+            quit_confirmation: false,
+            quit_confirm_at: None,
         }
     }
 
@@ -432,6 +459,7 @@ impl App {
                     let _ = term.draw(|frame| self.draw(frame));
                 }
                 _ = redraw_tick.tick() => {
+                    self.clear_expired_quit_confirmation();
                     let _ = term.draw(|frame| self.draw(frame));
                 }
             }
@@ -556,6 +584,9 @@ impl App {
     }
 
     fn handle_input_event(&mut self, event: &crossterm::event::Event) {
+        // Clear expired quit confirmation before processing.
+        self.clear_expired_quit_confirmation();
+
         // Model selector mode — handle keys exclusively.
         if self.model_selector.visible {
             if let crossterm::event::Event::Key(key) = event {
@@ -806,6 +837,8 @@ impl App {
     }
 
     fn send_user_message_now(&mut self, text: String) {
+        self.quit_confirmation = false;
+        self.quit_confirm_at = None;
         self.chat.add_message(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
@@ -866,6 +899,35 @@ impl App {
             }
             Action::Quit => {
                 self.running = false;
+            }
+            Action::Cancel => {
+                if self.streaming {
+                    // Cancel the current agent turn.
+                    let _ = self.action_tx.send(TuiAction::AbortAgent);
+                    self.status.set_detail("cancelling...");
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Cancelling current agent execution...".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                } else {
+                    // Idle: quit confirmation (Esc twice, or Ctrl+C twice).
+                    let now = std::time::Instant::now();
+                    let within_timeout = self
+                        .quit_confirm_at
+                        .map(|t| now.duration_since(t).as_millis() < 2000)
+                        .unwrap_or(false);
+                    if self.quit_confirmation && within_timeout {
+                        // Second press within 2s — confirm quit.
+                        self.running = false;
+                    } else {
+                        // First press — show confirmation.
+                        self.quit_confirmation = true;
+                        self.quit_confirm_at = Some(now);
+                        self.status.set_detail("Press Esc/Ctrl+C again to exit");
+                    }
+                }
             }
             Action::ShowModelSelector => {
                 self.model_selector.show();
@@ -954,6 +1016,7 @@ impl App {
                     "  /tools-rate <hz> Set tool progress update rate (1-60)",
                     "  /expand <id|last-tool> Show full tool summary",
                     "  /skill:<name>   Invoke a skill",
+                    "  /cancel         Cancel current agent execution",
                     "  /exit           Exit Theta",
                     "  /help           Show this help",
                 ]
@@ -1255,6 +1318,25 @@ impl App {
             "exit" => {
                 self.running = false;
             }
+            "cancel" => {
+                if self.streaming {
+                    let _ = self.action_tx.send(TuiAction::AbortAgent);
+                    self.status.set_detail("cancelling...");
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Cancelling current agent execution...".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                } else {
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: "No agent execution to cancel.".into(),
+                        tool_name: None,
+                        is_streaming: false,
+                    });
+                }
+            }
             _ if command.starts_with("skill:") => {
                 let Some(skill_name) = command.strip_prefix("skill:") else {
                     return;
@@ -1520,7 +1602,7 @@ impl App {
                 self.status.turn_index = 0;
                 self.status.set_detail("session created");
             }
-            TuiEvent::AgentEnd => {
+            TuiEvent::AgentEnd { aborted } => {
                 self.chat.finish_last(ChatRole::Assistant);
                 self.chat.finish_last(ChatRole::Thinking);
                 for msg in &mut self.chat.messages {
@@ -1535,7 +1617,10 @@ impl App {
                 self.streaming = false;
                 self.tool_exec_phase = false;
                 self.current_tool = None;
-                if self.status.agent_state != "Completed"
+                if aborted {
+                    self.status.set_agent_state("Cancelled");
+                    self.status.set_detail("execution cancelled");
+                } else if self.status.agent_state != "Completed"
                     && self.status.agent_state != "Blocked"
                     && self.status.agent_state != "Failed"
                 {

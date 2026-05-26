@@ -121,7 +121,7 @@ fn progress_burst_sim() {
                 message: msg,
             });
         }
-        let _ = raw_tx.send(TuiEvent::AgentEnd);
+        let _ = raw_tx.send(TuiEvent::AgentEnd { aborted: false });
         drop(raw_tx);
         let produce_elapsed = produce_start.elapsed();
 
@@ -129,7 +129,7 @@ fn progress_burst_sim() {
         let drain_start = Instant::now();
         while let Some(evt) = bounded_rx.recv().await {
             drained += 1;
-            if matches!(evt, TuiEvent::AgentEnd) {
+            if matches!(evt, TuiEvent::AgentEnd { .. }) {
                 break;
             }
         }
