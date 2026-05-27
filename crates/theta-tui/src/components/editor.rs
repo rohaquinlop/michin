@@ -270,18 +270,18 @@ impl Editor {
         self.clamp_scroll();
     }
 
-    fn move_up(&mut self) {
+    /// Move cursor up one visual line.
+    /// Returns `true` if cursor was already at the first visual line
+    /// (caller may want to navigate history instead).
+    fn move_up(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         if self.vis_lines.is_empty() {
-            return;
+            return false;
         }
         let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
         if vl == 0 {
-            // Already at first visual line — move to earliest byte.
-            self.cursor = 0;
-            self.desired_col = 0;
-            self.scroll = 0;
-            return;
+            // At first visual line — signal caller to handle history.
+            return true;
         }
         let target_line = vl.saturating_sub(1);
         let clamped_col = self
@@ -310,20 +310,18 @@ impl Editor {
         // Update desired_col to the new position.
         self.desired_col = self.byte_to_vis_col(self.cursor);
         self.ensure_cursor_visible();
+        false
     }
 
-    fn move_down(&mut self) {
+    fn move_down(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         if self.vis_lines.is_empty() {
-            return;
+            return false;
         }
         let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
         if vl >= self.vis_lines.len().saturating_sub(1) {
-            // Already at last visual line — move to end of text.
-            self.cursor = self.text.len();
-            self.desired_col = self.byte_to_vis_col(self.cursor);
-            self.ensure_cursor_visible();
-            return;
+            // Already at last visual line — signal caller to handle history.
+            return true;
         }
         let target_line = vl + 1;
         let clamped_col = self
@@ -350,6 +348,7 @@ impl Editor {
         // Update desired_col to the new position.
         self.desired_col = self.byte_to_vis_col(self.cursor);
         self.ensure_cursor_visible();
+        false
     }
 
     fn move_left(&mut self) {
@@ -364,10 +363,17 @@ impl Editor {
             // Go to the last byte offset of the previous visual line.
             let prev = &self.vis_lines[vl - 1];
             if let Some(&last_byte) = prev.last() {
+                let orig = self.cursor;
                 self.cursor = last_byte;
                 // Advance past that character so we're AFTER it.
                 if let Some(ch) = self.text[last_byte..].chars().next() {
                     self.cursor = last_byte + ch.len_utf8();
+                }
+                // Wrapped visual line with no gap (e.g. "Hello"+"World"
+                // at width=5): end of prev line and start of current line
+                // share the same byte offset. Move onto the last char.
+                if self.cursor == orig {
+                    self.cursor = last_byte;
                 }
             }
         } else if let Some(prev) = self.text[..self.cursor].chars().last() {
@@ -470,7 +476,8 @@ impl Editor {
         }
     }
 
-    fn move_page_up(&mut self) {
+    /// Move cursor up one page. Returns `true` if at first visual line.
+    fn move_page_up(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         let height = self
             .last_inner_area
@@ -478,11 +485,14 @@ impl Editor {
             .unwrap_or(10)
             .max(1);
         for _ in 0..height {
-            self.move_up();
+            if self.move_up() {
+                return true;
+            }
         }
+        false
     }
 
-    fn move_page_down(&mut self) {
+    fn move_page_down(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         let height = self
             .last_inner_area
@@ -490,8 +500,11 @@ impl Editor {
             .unwrap_or(10)
             .max(1);
         for _ in 0..height {
-            self.move_down();
+            if self.move_down() {
+                return true;
+            }
         }
+        false
     }
 
     fn move_text_start(&mut self) {
@@ -1084,29 +1097,44 @@ impl Component for Editor {
                 self.history_down();
             }
             // ── Vertical navigation: Up/Down moves cursor ──
+            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::Up, ..
             } => {
-                self.move_up();
+                if self.move_up() {
+                    // At first visual line → browse history.
+                    self.history_up();
+                }
             }
+            // ── Down: moves cursor down, history at last line ──
+            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
                 ..
             } => {
-                self.move_down();
+                if self.move_down() {
+                    // At last visual line → browse history forward.
+                    self.history_down();
+                }
             }
             // ── Page Up / Page Down ──
+            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::PageUp,
                 ..
             } => {
-                self.move_page_up();
+                if self.move_page_up() {
+                    self.history_up();
+                }
             }
+            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::PageDown,
                 ..
             } => {
-                self.move_page_down();
+                if self.move_page_down() {
+                    self.history_down();
+                }
             }
             // ── Line start/end ──
             crossterm::event::KeyEvent {
@@ -1575,9 +1603,9 @@ mod tests {
     #[test]
     fn up_down_on_single_line() {
         let mut ed = make_editor("hello");
-        // On a single line, up goes to start, down goes to end.
-        ed.move_up();
-        assert_eq!(ed.cursor, 0);
+        // On a single line, up returns true (at first visual line) without moving cursor.
+        assert!(ed.move_up());
+        assert_eq!(ed.cursor, 5);
         ed.move_down();
         assert_eq!(ed.cursor, 5);
     }
@@ -1601,9 +1629,9 @@ mod tests {
             "cursor={} should be on ijkl",
             ed.cursor
         );
-        // Move down → end of text.
-        ed.move_down();
-        assert_eq!(ed.cursor, 14);
+        // Move down at last line → returns true, cursor stays.
+        assert!(ed.move_down());
+        assert_eq!(ed.cursor, 10);
         // Move up back to line 2.
         ed.move_up();
         assert!(
