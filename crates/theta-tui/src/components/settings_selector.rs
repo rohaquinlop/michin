@@ -15,6 +15,7 @@ pub struct SettingsView {
     pub follow_up_mode: String,
     pub transport_preference: String,
     pub show_thinking: bool,
+    pub max_context_window: Option<u32>,
 }
 
 pub struct SettingsSelector {
@@ -72,6 +73,16 @@ impl SettingsSelector {
                 )),
                 Line::from("  Show model thinking text in UI by default"),
             ]),
+            ListItem::new(vec![
+                Line::from(format!(
+                    "maxContextWindow: {}",
+                    match self.view.max_context_window {
+                        Some(n) => format_number(n),
+                        None => "off (model default)".to_string(),
+                    }
+                )),
+                Line::from("  Max context token cap (250K default, off=model limit)"),
+            ]),
         ];
         let list = List::new(list_items)
             .block(
@@ -98,7 +109,7 @@ impl SettingsSelector {
                 self.state.select(Some(self.selected));
             }
             KeyCode::Down => {
-                self.selected = (self.selected + 1).min(3);
+                self.selected = (self.selected + 1).min(4);
                 self.state.select(Some(self.selected));
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected(),
@@ -131,6 +142,18 @@ impl SettingsSelector {
                 }
             }
             3 => self.view.show_thinking = !self.view.show_thinking,
+            4 => {
+                self.view.max_context_window = match self.view.max_context_window {
+                    None => Some(50_000),
+                    Some(50_000) => Some(100_000),
+                    Some(100_000) => Some(150_000),
+                    Some(150_000) => Some(200_000),
+                    Some(200_000) => Some(250_000),
+                    Some(250_000) => Some(300_000),
+                    Some(300_000) => None,
+                    Some(n) => Some(250_000),
+                }
+            }
             _ => {}
         }
     }
@@ -138,4 +161,16 @@ impl SettingsSelector {
     pub fn current_view(&self) -> SettingsView {
         self.view.clone()
     }
+}
+
+fn format_number(n: u32) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push('_');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }

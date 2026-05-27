@@ -842,10 +842,11 @@ async fn build_context(
     // Compaction: only call compact_messages when enabled. When disabled,
     // use sanitized_messages directly — no clone or token scan needed.
     let (mut messages, compaction_stats) = if config.compaction.enabled {
+        let effective_window = config.effective_context_window(state.model.context_window);
         let mut compact_result = crate::compact::compact_messages(
             &sanitized_messages,
             effective_sys_tokens,
-            state.model.context_window,
+            effective_window,
             &config.compaction,
         );
 

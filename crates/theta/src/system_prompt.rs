@@ -23,6 +23,7 @@ pub async fn build_system_prompt(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
+    max_context_window: Option<u32>,
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -35,7 +36,7 @@ pub async fn build_system_prompt(
         parts.push(tools_prompt);
     }
 
-    parts.push(build_runtime_context(working_dir, model_id, thinking_level));
+    parts.push(build_runtime_context(working_dir, model_id, thinking_level, max_context_window));
     parts.push(RESPONSE_CONTRACT.to_string());
 
     let text = parts.join("\n\n");
@@ -91,8 +92,9 @@ pub async fn build_system_prompt_with_skills(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
+    max_context_window: Option<u32>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
-    let system = build_system_prompt(working_dir, model_id, thinking_level).await;
+    let system = build_system_prompt(working_dir, model_id, thinking_level, max_context_window).await;
     let resource = build_resource_context(working_dir).await;
     (system, resource)
 }
@@ -295,6 +297,7 @@ fn build_runtime_context(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
+    max_context_window: Option<u32>,
 ) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -306,6 +309,14 @@ fn build_runtime_context(
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".into());
     let os = std::env::consts::OS;
 
+    let ctx_cap = match max_context_window {
+        Some(n) => {
+            let formatted = format_number(n);
+            format!("\n         Context window cap: {formatted} tokens (set in settings)")
+        }
+        None => String::new(),
+    };
+
     format!(
         "# Runtime Context
 
@@ -314,7 +325,7 @@ fn build_runtime_context(
          Shell: {shell}
          OS: {os}
          Model: {model_id}
-         Thinking level: {}",
+         Thinking level: {}{ctx_cap}",
         thinking_level.unwrap_or("default")
     )
 }
@@ -429,4 +440,17 @@ pub async fn apply_system_prompt_overrides(theta_dir: &Path, mut text: String) -
     }
 
     text
+}
+
+/// Format a u32 with thousands separators.
+fn format_number(n: u32) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push('_');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }

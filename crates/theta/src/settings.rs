@@ -41,6 +41,12 @@ pub struct ThetaSettings {
     /// Enter behavior in editor: "send" or "newline".
     #[serde(default = "default_enter_behavior")]
     pub enter_behavior: String,
+
+    /// Max context window in tokens. `None` disables the cap
+    /// (uses the model's full context window). `Some(n)` caps at n tokens.
+    /// Default is 250,000 — most LLMs perform better below this.
+    #[serde(default = "default_max_context_window")]
+    pub max_context_window: Option<u32>,
 }
 
 fn default_steering_mode() -> String {
@@ -67,6 +73,10 @@ fn default_enter_behavior() -> String {
     "send".to_string()
 }
 
+const fn default_max_context_window() -> Option<u32> {
+    Some(250_000)
+}
+
 impl Default for ThetaSettings {
     fn default() -> Self {
         Self {
@@ -78,6 +88,7 @@ impl Default for ThetaSettings {
             show_thinking: default_show_thinking(),
             tool_progress_hz: default_tool_progress_hz(),
             enter_behavior: default_enter_behavior(),
+            max_context_window: default_max_context_window(),
         }
     }
 }

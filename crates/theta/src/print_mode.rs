@@ -45,7 +45,7 @@ pub async fn run_prompt_print_mode(
     }
 
     // Build and set the system prompt for prompt mode.
-    let system_blocks = build_system_prompt(working_dir, model_id, Some("medium")).await;
+    let system_blocks = build_system_prompt(working_dir, model_id, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -233,7 +233,7 @@ pub async fn run_continue_print_mode(
     }
 
     // Build and set system prompt.
-    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -373,7 +373,7 @@ pub async fn run_resume_print_mode(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium")).await;
+    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {

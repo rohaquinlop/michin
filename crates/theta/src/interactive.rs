@@ -395,6 +395,7 @@ pub async fn run_tui(
             show_thinking: persisted.show_thinking,
             tool_progress_hz: persisted.tool_progress_hz,
             enter_behavior: persisted.enter_behavior,
+            max_context_window: persisted.max_context_window,
         },
         model_entries,
         commands,
@@ -456,13 +457,16 @@ async fn create_agent(
 
     let tool_ctx = ToolContext::new(working_dir.to_path_buf());
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
-    agent.set_config(crate::config::to_agent_config(config));
+    let mut loop_config = crate::config::to_agent_config(config);
+    let settings = crate::settings::load_settings().await;
+    loop_config.max_context_window = settings.max_context_window;
+    agent.set_config(loop_config);
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
 
     let (system_blocks, resource_blocks) =
-        build_system_prompt_with_skills(working_dir, model_id, Some(thinking)).await;
+        build_system_prompt_with_skills(working_dir, model_id, Some(thinking), settings.max_context_window).await;
     agent.set_system_prompt(system_blocks).await;
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
@@ -531,7 +535,8 @@ fn thinking_level_to_string(level: theta_ai::ThinkingLevel) -> String {
 fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEvent>, _hz: u64) {
     tokio::spawn(async move {
         let reserve_tokens = agent.config().compaction.reserve_tokens;
-        let context_window = agent.state().await.model.context_window;
+        let model_ctx = agent.state().await.model.context_window;
+        let context_window = agent.config().effective_context_window(model_ctx);
         let mut events = agent.subscribe();
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut tool_args: HashMap<String, String> = HashMap::new(); // id -> raw args JSON
@@ -986,10 +991,12 @@ async fn handle_tui_action(
                 let state = agent.state().await;
                 let current_thinking = thinking_level_to_string(state.thinking_level);
                 drop(state);
+                let max_ctx = agent.config().max_context_window;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
                     &model_id,
                     Some(&current_thinking),
+                    max_ctx,
                 )
                 .await;
                 agent.set_system_prompt(blocks).await;
@@ -1180,8 +1187,9 @@ async fn handle_tui_action(
                         .unwrap_or_else(|| model_id.to_string());
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
+                    let max_ctx = agent.config().max_context_window;
                     let (blocks, resource_blocks) =
-                        build_system_prompt_with_skills(working_dir, &mid, Some(&current_thinking))
+                        build_system_prompt_with_skills(working_dir, &mid, Some(&current_thinking), max_ctx)
                             .await;
                     agent.set_system_prompt(blocks).await;
                     if !resource_blocks.is_empty() {
@@ -1238,10 +1246,12 @@ async fn handle_tui_action(
             let current_model_id = state.model.id.clone();
             let current_thinking = thinking_level_to_string(state.thinking_level);
             drop(state);
+            let max_ctx = agent.config().max_context_window;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
                 &current_model_id,
                 Some(&current_thinking),
+                max_ctx,
             )
             .await;
             agent.set_system_prompt(blocks).await;
@@ -1280,7 +1290,9 @@ async fn handle_tui_action(
                 message_count: msg_count,
                 approx_tokens,
                 real_input_tokens,
-                context_window: state.model.context_window,
+                context_window: agent
+                    .config()
+                    .effective_context_window(state.model.context_window),
                 compaction_enabled: agent.config().compaction.enabled,
                 reserve_tokens: agent.config().compaction.reserve_tokens,
                 keep_recent_tokens: agent.config().compaction.keep_recent_tokens,
@@ -1300,9 +1312,9 @@ async fn handle_tui_action(
                     // Update the ctx% in the status bar.
                     let (_, approx_tokens, _) = agent.context_stats().await;
                     let state = agent.state().await;
-                    let avail = state
-                        .model
-                        .context_window
+                    let avail = agent
+                        .config()
+                        .effective_context_window(state.model.context_window)
                         .saturating_sub(agent.config().compaction.reserve_tokens);
                     let pct = if avail > 0 {
                         (approx_tokens as f64 / avail as f64 * 100.0) as u32

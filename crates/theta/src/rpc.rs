@@ -123,7 +123,7 @@ async fn prompt(
     for tool in builtin_tools(ToolContext::new(working_dir.to_path_buf())) {
         agent.add_tool(tool).await;
     }
-    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking)).await;
+    let system_blocks = build_system_prompt(working_dir, model_id, Some(thinking), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {

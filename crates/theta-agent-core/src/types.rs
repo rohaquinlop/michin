@@ -126,6 +126,21 @@ pub struct AgentLoopConfig {
     pub provider_circuit_breaker: CircuitBreakerConfig,
     /// Whether command safety policy should run in strict mode.
     pub command_policy_strict: bool,
+    /// Hard cap on context window tokens.
+    /// `None` means use the model's full context window.
+    /// `Some(n)` caps at `min(model.context_window, n)`.
+    /// Defaults to 250,000 — most models perform better below this.
+    pub max_context_window: Option<u32>,
+}
+
+impl AgentLoopConfig {
+    /// Compute the effective context window for compaction:
+    /// `min(model.context_window, max_context_window)`.
+    pub fn effective_context_window(&self, model_context_window: u32) -> u32 {
+        self.max_context_window
+            .map(|max| model_context_window.min(max))
+            .unwrap_or(model_context_window)
+    }
 }
 
 impl Default for AgentLoopConfig {
@@ -144,6 +159,7 @@ impl Default for AgentLoopConfig {
             provider_fallback_chain: Vec::new(),
             provider_circuit_breaker: CircuitBreakerConfig::default(),
             command_policy_strict: true,
+            max_context_window: Some(250_000),
         }
     }
 }

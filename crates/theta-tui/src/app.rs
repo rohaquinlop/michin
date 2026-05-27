@@ -216,6 +216,7 @@ pub struct SettingsPayload {
     pub show_thinking: bool,
     pub tool_progress_hz: u64,
     pub enter_behavior: String,
+    pub max_context_window: Option<u32>,
 }
 
 /// Which view is currently active.
