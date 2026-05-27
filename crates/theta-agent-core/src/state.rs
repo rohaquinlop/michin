@@ -20,7 +20,7 @@ pub struct AgentState {
     /// Available tools.
     pub tools: Vec<Arc<dyn AgentTool>>,
 
-    /// Resource context (skills, extensions, startup skills).
+    /// Resource context (skills, extensions).
     /// Injected at the start of the conversation, not in the system prompt.
     pub resource_context: Option<Vec<ContentBlock>>,
 

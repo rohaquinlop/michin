@@ -44,7 +44,7 @@ JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_leve
 
 ## Config and Auth
 
-- Config: `~/.theta/config.toml` (model default, thinking default, agent safety, compaction, retry, provider, skills, startup, profile, theme).
+- Config: `~/.theta/config.toml` (model default, thinking default, agent safety, compaction, retry, provider, profile, theme).
 - Auth: `~/.theta/auth.json` with env var fallback. OAuth tokens auto-refresh.
 
 ## Conventions

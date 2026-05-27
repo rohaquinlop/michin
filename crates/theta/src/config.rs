@@ -54,10 +54,6 @@ pub struct ThetaConfig {
     /// Explicit per-project/runtime overrides applied on top of profile defaults.
     #[serde(default)]
     pub profile_overrides: ProfileOverrides,
-
-    /// Skills to auto-invoke at session start (e.g. ["caveman ultra"]).
-    #[serde(default)]
-    pub startup_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

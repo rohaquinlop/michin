@@ -122,7 +122,7 @@ impl Agent {
         state.update_cached_tokens();
     }
 
-    /// Set the resource context (skills, extensions, startup skills).
+    /// Set the resource context (skills, extensions).
     /// This is injected as a synthetic user message, NOT in the system prompt.
     pub async fn set_resource_context(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;

@@ -3,8 +3,7 @@
 //! Two outputs:
 //! - `build_system_prompt()` — core operational instructions (project context,
 //!   tools, runtime, response contract). Set via `agent.set_system_prompt()`.
-//! - `build_resource_context()` — available resources (skills, extensions,
-//!   startup skills, auto-loading directive). Set via `agent.set_resource_context()`.
+//! - `build_resource_context()` — available resources (skills, extensions, auto-loading directive). Set via `agent.set_resource_context()`.
 //!
 //! This split keeps system instructions lean and moves resource listings
 //! into the conversation where the model sees them as context, not mandates.
@@ -16,11 +15,10 @@ use theta_ai::ContentBlock;
 
 use crate::scripts;
 use crate::skills;
-use crate::skills::Skill;
 use crate::tools::{ToolContext, builtin_tools};
 
 /// Build the core system prompt: project context + tools + runtime + response contract.
-/// Does NOT include skills, extensions, or startup skills.
+/// Does NOT include skills or extensions.
 pub async fn build_system_prompt(
     working_dir: &Path,
     model_id: &str,
@@ -48,23 +46,15 @@ pub async fn build_system_prompt(
     vec![ContentBlock::Text { text }]
 }
 
-/// Build the resource context: skills + extensions + auto-loading + startup skills.
+/// Build the resource context: skills + extensions + auto-loading.
 /// This gets injected as a synthetic user message, NOT the system prompt.
 pub async fn build_resource_context(
     working_dir: &Path,
-    startup_skills: &[String],
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
     // Available skills.
     let discovered = skills::discover_skills(working_dir).await;
-
-    // Active startup skills — inject their full bodies.
-    if !startup_skills.is_empty()
-        && let Some(active_block) = build_active_skills_block(&discovered, startup_skills)
-    {
-        parts.push(active_block);
-    }
 
     if let Some(skills_block) = skills::build_skills_prompt_block(&discovered) {
         parts.push(skills_block);
@@ -103,10 +93,9 @@ pub async fn build_system_prompt_with_skills(
     working_dir: &Path,
     model_id: &str,
     thinking_level: Option<&str>,
-    startup_skills: &[String],
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let system = build_system_prompt(working_dir, model_id, thinking_level).await;
-    let resource = build_resource_context(working_dir, startup_skills).await;
+    let resource = build_resource_context(working_dir).await;
     (system, resource)
 }
 
@@ -133,33 +122,6 @@ trigger phrases:
 Do NOT create an extension from general task language.
 For "modify/extend theta" without specifics, ask: 1) Skill, 2) Extension, 3) Rust change."#;
 
-/// Build an `<active_skills>` block for skills activated at session start.
-fn build_active_skills_block(discovered: &[Skill], startup_skills: &[String]) -> Option<String> {
-    let mut block = String::from("\n<active_skills>\n");
-    block.push_str("These skills are active for this session. Follow their instructions.\n\n");
-
-    let mut found_any = false;
-    for invocation in startup_skills {
-        let (skill_name, _level) = match invocation.find(' ') {
-            Some(idx) => (&invocation[..idx], invocation[idx + 1..].trim()),
-            None => (invocation.as_str(), ""),
-        };
-
-        if let Some(skill) = discovered.iter().find(|s| s.name == skill_name) {
-            found_any = true;
-            block.push_str(&format!("## Active Skill: {}\n", skill.name));
-            block.push_str(&format!("Location: {}\n\n", skill.location.display()));
-            block.push_str(skill.body.trim());
-            block.push_str("\n\n");
-        }
-    }
-
-    if !found_any {
-        return None;
-    }
-    block.push_str("</active_skills>");
-    Some(block)
-}
 
 // ── Project context discovery ──────────────────────────────────────
 
@@ -400,8 +362,7 @@ fn is_leap_year(y: i64) -> bool {
 // ── Response Contract ──────────────────────────────────────────────
 //
 // Slimmed down: only core behavioral directives. Skill auto-loading,
-// extension creation, and startup skills documentation live in the
-// resource context, not here.
+// extension creation docs live in the resource context, not here.
 
 const RESPONSE_CONTRACT: &str = r#"# Response Contract
 
@@ -525,14 +486,6 @@ mod tests {
         assert!(
             !RESPONSE_CONTRACT.contains("create an extension"),
             "Extension creation docs must not be in response contract"
-        );
-    }
-
-    #[test]
-    fn response_contract_no_longer_has_startup_skills_config() {
-        assert!(
-            !RESPONSE_CONTRACT.contains("[startup]"),
-            "Startup skills config docs must not be in response contract"
         );
     }
 

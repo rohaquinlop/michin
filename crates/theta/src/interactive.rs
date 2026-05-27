@@ -465,7 +465,6 @@ async fn create_agent(
         working_dir,
         model_id,
         Some(thinking),
-        &config.startup_skills,
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
@@ -987,7 +986,7 @@ async fn handle_tui_action(
                 let levels = compute_valid_thinking_levels(&m);
                 agent.set_model(m).await;
                 // Read thinking level before rebuilding prompt so runtime
-                // context shows the correct level and startup skills are re-applied.
+                // context shows the correct level.
                 let state = agent.state().await;
                 let current_thinking = thinking_level_to_string(state.thinking_level);
                 drop(state);
@@ -995,7 +994,6 @@ async fn handle_tui_action(
                     working_dir,
                     &model_id,
                     Some(&current_thinking),
-                    &config.startup_skills,
                 )
                 .await;
                 agent.set_system_prompt(blocks).await;
@@ -1190,7 +1188,6 @@ async fn handle_tui_action(
                         working_dir,
                         &mid,
                         Some(&current_thinking),
-                        &config.startup_skills,
                     )
                     .await;
                     agent.set_system_prompt(blocks).await;
@@ -1243,8 +1240,7 @@ async fn handle_tui_action(
             // Clear in-memory transcript — no session file until first message.
             agent.load_messages(Vec::new()).await;
             // Read current model and thinking level from agent state so
-            // runtime context shows the correct values and startup skills are
-            // re-applied.
+            // runtime context shows the correct values.
             let state = agent.state().await;
             let current_model_id = state.model.id.clone();
             let current_thinking = thinking_level_to_string(state.thinking_level);
@@ -1253,7 +1249,6 @@ async fn handle_tui_action(
                 working_dir,
                 &current_model_id,
                 Some(&current_thinking),
-                &config.startup_skills,
             )
             .await;
             agent.set_system_prompt(blocks).await;
