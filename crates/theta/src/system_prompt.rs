@@ -48,9 +48,7 @@ pub async fn build_system_prompt(
 
 /// Build the resource context: skills + extensions + auto-loading.
 /// This gets injected as a synthetic user message, NOT the system prompt.
-pub async fn build_resource_context(
-    working_dir: &Path,
-) -> Vec<ContentBlock> {
+pub async fn build_resource_context(working_dir: &Path) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
     // Available skills.
@@ -121,7 +119,6 @@ trigger phrases:
 
 Do NOT create an extension from general task language.
 For "modify/extend theta" without specifics, ask: 1) Skill, 2) Extension, 3) Rust change."#;
-
 
 // ── Project context discovery ──────────────────────────────────────
 

@@ -461,12 +461,8 @@ async fn create_agent(
         agent.add_tool(tool).await;
     }
 
-    let (system_blocks, resource_blocks) = build_system_prompt_with_skills(
-        working_dir,
-        model_id,
-        Some(thinking),
-    )
-    .await;
+    let (system_blocks, resource_blocks) =
+        build_system_prompt_with_skills(working_dir, model_id, Some(thinking)).await;
     agent.set_system_prompt(system_blocks).await;
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
@@ -1184,12 +1180,9 @@ async fn handle_tui_action(
                         .unwrap_or_else(|| model_id.to_string());
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
-                    let (blocks, resource_blocks) = build_system_prompt_with_skills(
-                        working_dir,
-                        &mid,
-                        Some(&current_thinking),
-                    )
-                    .await;
+                    let (blocks, resource_blocks) =
+                        build_system_prompt_with_skills(working_dir, &mid, Some(&current_thinking))
+                            .await;
                     agent.set_system_prompt(blocks).await;
                     if !resource_blocks.is_empty() {
                         agent.set_resource_context(resource_blocks).await;

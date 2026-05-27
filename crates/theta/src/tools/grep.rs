@@ -7,7 +7,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, shorten_path, truncate_output};
 
 pub struct GrepTool {
     ctx: ToolContext,
@@ -130,7 +130,7 @@ impl AgentTool for GrepTool {
                 }
                 if re.is_match(line) {
                     let file_path = path.strip_prefix(&self.ctx.working_dir).unwrap_or(&path);
-                    results.push(format!("{}:{}:{}", file_path.display(), line_idx + 1, line));
+                    results.push(format!("{}:{}:{}", shorten_path(file_path), line_idx + 1, line));
                     match_count += 1;
                 }
             }

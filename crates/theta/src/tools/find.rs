@@ -6,7 +6,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, truncate_output};
+use super::{ToolContext, TruncationLimits, format_path_io_error, resolve_path, shorten_path, truncate_output};
 
 pub struct FindTool {
     ctx: ToolContext,
@@ -109,7 +109,7 @@ impl AgentTool for FindTool {
                     let display = if let Ok(rel) = path.strip_prefix(&self.ctx.working_dir) {
                         rel.display().to_string()
                     } else {
-                        path.display().to_string()
+                        shorten_path(&path)
                     };
                     results.push(display);
                     count += 1;

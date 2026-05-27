@@ -6,7 +6,7 @@ use theta_agent_core::types::{AgentTool, ToolExecutionMode, ToolResult, ToolUpda
 use theta_ai::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolContext, format_path_io_error, resolve_path};
+use super::{ToolContext, format_path_io_error, resolve_path, shorten_path};
 
 pub struct WriteTool {
     ctx: ToolContext,
@@ -103,7 +103,7 @@ impl AgentTool for WriteTool {
                 text: format!(
                     "Successfully wrote {} bytes to {}",
                     content.len(),
-                    file_path.display()
+                    shorten_path(&file_path)
                 ),
             }],
             details: Some(serde_json::json!({

@@ -8,7 +8,7 @@ mod edit;
 mod read;
 mod write;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use bash::BashTool;
 pub use edit::EditTool;
@@ -130,11 +130,23 @@ fn classify_io_error(err: &std::io::Error) -> &'static str {
     }
 }
 
-fn format_path_io_error(action: &str, path: &std::path::Path, err: &std::io::Error) -> String {
+/// Shorten an absolute path for display by replacing the home directory
+/// prefix with `~`. If the path is not under the home directory, returns
+/// the path unchanged.
+pub(crate) fn shorten_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+fn format_path_io_error(action: &str, path: &Path, err: &std::io::Error) -> String {
     let reason = classify_io_error(err);
     format!(
         "{action} failed ({reason}) at '{}': {err}",
-        path.to_string_lossy()
+        shorten_path(path)
     )
 }
 
@@ -152,7 +164,7 @@ pub fn builtin_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolContext, resolve_path};
+    use super::{ToolContext, resolve_path, shorten_path};
 
     #[test]
     fn resolve_path_keeps_absolute_path() {
@@ -169,5 +181,20 @@ mod tests {
             resolved,
             std::path::PathBuf::from("/tmp/theta-workdir/src/main.rs")
         );
+    }
+
+    #[test]
+    fn shorten_path_replaces_home_with_tilde() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join("projects/theta");
+        let result = shorten_path(&path);
+        assert!(result.starts_with("~/"));
+        assert!(result.ends_with("projects/theta"));
+    }
+
+    #[test]
+    fn shorten_path_leaves_non_home_path_unchanged() {
+        let result = shorten_path(std::path::Path::new("/tmp/theta-workdir"));
+        assert_eq!(result, "/tmp/theta-workdir");
     }
 }
