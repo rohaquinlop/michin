@@ -118,6 +118,7 @@ impl Agent {
     pub async fn set_system_prompt(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;
         state.system_prompt = prompt;
+        state.update_cached_tokens();
     }
 
     /// Set the resource context (skills, extensions, startup skills).
@@ -125,6 +126,7 @@ impl Agent {
     pub async fn set_resource_context(&self, prompt: Vec<ContentBlock>) {
         let mut state = self.state.write().await;
         state.resource_context = Some(prompt);
+        state.update_cached_tokens();
     }
 
     /// Switch the active model.

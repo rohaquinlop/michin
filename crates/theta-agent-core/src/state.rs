@@ -46,6 +46,10 @@ pub struct AgentState {
     pub current_turn_id: Option<String>,
     /// Tool-call IDs already executed in current turn.
     pub executed_tool_call_ids_in_turn: HashSet<String>,
+    /// Cached approximate token count of the system prompt (computed once on set).
+    pub(crate) system_prompt_tokens: u32,
+    /// Cached approximate token count of the resource context (computed once on set).
+    pub(crate) resource_context_tokens: u32,
 }
 
 impl AgentState {
@@ -65,6 +69,8 @@ impl AgentState {
             current_run_id: None,
             current_turn_id: None,
             executed_tool_call_ids_in_turn: HashSet::new(),
+            system_prompt_tokens: 0,
+            resource_context_tokens: 0,
         }
     }
 
@@ -126,20 +132,20 @@ impl AgentState {
     }
 
     /// Approximate token count of the resource context blocks.
+    /// Uses the cached value computed when the resource context was set.
     pub fn resource_context_tokens(&self) -> u32 {
-        self.resource_context
-            .as_ref()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .map(|b| {
-                        theta_ai::approximate_token_count(
-                            &serde_json::to_string(b).unwrap_or_default(),
-                        )
-                    })
-                    .sum()
-            })
-            .unwrap_or(0)
+        self.resource_context_tokens
+    }
+
+    /// Recompute and cache system prompt and resource context token counts.
+    /// Called by Agent when these fields are set.
+    pub fn update_cached_tokens(&mut self) {
+        self.system_prompt_tokens = approximate_tokens_for_blocks(&self.system_prompt);
+        self.resource_context_tokens = self
+            .resource_context
+            .as_deref()
+            .map(approximate_tokens_for_blocks)
+            .unwrap_or(0);
     }
 
     /// Load past messages from a session (for continue/resume).
@@ -159,15 +165,7 @@ impl AgentState {
     /// Approximate total token count across all messages.
     pub fn token_count(&self) -> u32 {
         let msg_tokens: u32 = self.messages.iter().map(|m| m.token_count()).sum();
-        let sys_tokens: u32 = self
-            .system_prompt
-            .iter()
-            .map(|b| {
-                theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
-            })
-            .sum();
-        let res_tokens: u32 = self.resource_context_tokens();
-        msg_tokens + sys_tokens + res_tokens
+        msg_tokens + self.system_prompt_tokens + self.resource_context_tokens
     }
 
     /// The last API-reported input token count (real, from the most recent
@@ -193,6 +191,14 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Approximate token count for a slice of content blocks by serializing to JSON.
+fn approximate_tokens_for_blocks(blocks: &[ContentBlock]) -> u32 {
+    blocks
+        .iter()
+        .map(|b| theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default()))
+        .sum()
 }
 
 fn redact_field(key: &str, value: &str) -> String {

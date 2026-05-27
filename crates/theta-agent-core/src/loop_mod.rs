@@ -829,18 +829,8 @@ async fn build_context(
         Some(state.system_prompt.clone())
     };
 
-    // Approximate system prompt tokens.
-    let sys_tokens: u32 = system
-        .as_ref()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .map(|b| {
-                    theta_ai::approximate_token_count(&serde_json::to_string(b).unwrap_or_default())
-                })
-                .sum()
-        })
-        .unwrap_or(0);
+    // Approximate system prompt tokens — uses cached value from AgentState.
+    let sys_tokens: u32 = state.system_prompt_tokens;
 
     // Account for resource context tokens in compaction budget.
     let res_tokens: u32 = state.resource_context_tokens();
@@ -849,47 +839,61 @@ async fn build_context(
     let (sanitized_messages, replay_stats) =
         theta_ai::sanitize_messages_for_replay(&state.messages, &state.model);
 
-    let mut compact_result = crate::compact::compact_messages(
-        &sanitized_messages,
-        effective_sys_tokens,
-        state.model.context_window,
-        &config.compaction,
-    );
+    // Compaction: only call compact_messages when enabled. When disabled,
+    // use sanitized_messages directly — no clone or token scan needed.
+    let (mut messages, compaction_stats) = if config.compaction.enabled {
+        let mut compact_result = crate::compact::compact_messages(
+            &sanitized_messages,
+            effective_sys_tokens,
+            state.model.context_window,
+            &config.compaction,
+        );
 
-    if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm {
-        let trimmed_len = (compact_result.trimmed_count as usize).min(state.messages.len());
-        match summarize_compacted_messages(
-            state,
-            provider,
-            &state.messages[..trimmed_len],
-            config,
-            event_tx,
-        )
-        .await
+        if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm
         {
-            Ok(summary) => {
-                if let Some(first) = compact_result.messages.first_mut() {
-                    *first = summary;
-                } else {
-                    compact_result.messages.insert(0, summary);
+            let trimmed_len = (compact_result.trimmed_count as usize).min(state.messages.len());
+            match summarize_compacted_messages(
+                state,
+                provider,
+                &state.messages[..trimmed_len],
+                config,
+                event_tx,
+            )
+            .await
+            {
+                Ok(summary) => {
+                    if let Some(first) = compact_result.messages.first_mut() {
+                        *first = summary;
+                    } else {
+                        compact_result.messages.insert(0, summary);
+                    }
+                    compact_result.tokens_after = compact_result
+                        .messages
+                        .iter()
+                        .map(|message| message.token_count())
+                        .sum();
                 }
-                compact_result.tokens_after = compact_result
-                    .messages
-                    .iter()
-                    .map(|message| message.token_count())
-                    .sum();
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "LLM compaction summary failed; using deterministic summary");
+                Err(error) => {
+                    tracing::warn!(error = %error, "LLM compaction summary failed; using deterministic summary");
+                }
             }
         }
-    }
+
+        let stats = (compact_result.trimmed_count > 0).then_some(CompactionStats {
+            trimmed_count: compact_result.trimmed_count,
+            tokens_before: compact_result.tokens_before,
+            tokens_after: compact_result.tokens_after,
+        });
+        (compact_result.messages, stats)
+    } else {
+        (sanitized_messages, None)
+    };
 
     // Prepend resource context (skills, extensions) — never subject to compaction.
     if let Some(ref res_ctx) = state.resource_context
         && !res_ctx.is_empty()
     {
-        compact_result.messages.insert(
+        messages.insert(
             0,
             Message::User {
                 content: res_ctx.clone(),
@@ -908,20 +912,14 @@ async fn build_context(
         })
         .collect();
 
-    let stats = (compact_result.trimmed_count > 0).then_some(CompactionStats {
-        trimmed_count: compact_result.trimmed_count,
-        tokens_before: compact_result.tokens_before,
-        tokens_after: compact_result.tokens_after,
-    });
-
     (
         Context {
             system,
-            messages: compact_result.messages,
+            messages,
             tools,
             thinking_level: Some(state.thinking_level),
         },
-        stats,
+        compaction_stats,
         replay_stats.changed().then_some(replay_stats),
     )
 }
