@@ -119,7 +119,7 @@ After code changes (not docs): run `cargo fmt && cargo clippy -- -D warnings && 
 
 ## Tool System
 
-Seven built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Each implements `theta_agent_core::AgentTool`.
+Seven built-in tools: `read`, `write`, `edit`, `bash`. Each implements `theta_agent_core::AgentTool`.
 
 - Absolute paths honored directly (not clamped to working dir).
 - Output truncation at 2000 lines / 50KB.
@@ -127,6 +127,7 @@ Seven built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Eac
 ## Extension Model
 
 Three tiers:
+
 1. **Skills** (`SKILL.md` files) — Markdown with YAML frontmatter, discovered from `~/.theta/skills/` and `./.theta/skills/`.
 2. **Rhai Scripts** (`~/.theta/extensions/*.rhai`, `./.theta/extensions/*.rhai`) — Runtime hooks.
 3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Fork Theta, implement traits.

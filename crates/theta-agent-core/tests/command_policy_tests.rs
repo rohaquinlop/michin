@@ -59,7 +59,7 @@ fn always_on_policy_allows_bash_commands_not_catastrophic() {
 
 #[test]
 fn non_bash_tools_always_allowed() {
-    for name in ["read", "ls", "find", "grep", "write", "edit", "mock"] {
+    for name in ["read", "write", "edit", "mock"] {
         let tc = ToolCall {
             id: "w1".to_string(),
             name: name.to_string(),

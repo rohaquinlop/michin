@@ -8,30 +8,30 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 
 ## Key Files
 
-| File                                    | Purpose                                           |
-| --------------------------------------- | ------------------------------------------------- |
-| `src/main.rs`                           | Entry point                                       |
-| `src/cli.rs`                            | Clap argument parsing                             |
-| `src/config.rs`                         | `ThetaConfig`, `AuthConfig` with env fallback     |
-| `src/settings.rs`                       | Persistent settings.json                          |
-| `src/interactive.rs`                    | TUI mode glue: agent ↔ TUI bridge                 |
-| `src/system_prompt.rs`                  | System prompt builder (AGENTS.md, CLAUDE.md, skills, tools) |
-| `src/skills.rs`                         | Skill discovery, YAML frontmatter, XML generation |
-| `src/scripts.rs`                        | Extension script discovery                        |
-| `src/session.rs`                        | `SessionManager` — pi-compatible JSONL            |
-| `src/login.rs`                          | `theta login` OAuth entry point                   |
-| `src/oauth/codex.rs`                    | Codex OAuth token exchange and refresh            |
-| `src/rpc.rs`                            | JSON-RPC over stdin/stdout                        |
-| `src/prompts.rs`                        | Print-mode prompt execution                       |
-| `src/print_mode.rs`                     | Non-TUI streaming output formatter                |
-| `src/mentions.rs`                       | @-mention file content resolution                 |
-| `src/tools/mod.rs`                      | Tool registry, `ToolContext`, truncation          |
-| `src/tools/{bash,edit,find,grep,ls,read,write}.rs` | Built-in tool implementations          |
-| `src/extensions/mod.rs`                 | TUI extension row rendering                       |
+| File                                  | Purpose                                                     |
+| ------------------------------------- | ----------------------------------------------------------- |
+| `src/main.rs`                         | Entry point                                                 |
+| `src/cli.rs`                          | Clap argument parsing                                       |
+| `src/config.rs`                       | `ThetaConfig`, `AuthConfig` with env fallback               |
+| `src/settings.rs`                     | Persistent settings.json                                    |
+| `src/interactive.rs`                  | TUI mode glue: agent ↔ TUI bridge                           |
+| `src/system_prompt.rs`                | System prompt builder (AGENTS.md, CLAUDE.md, skills, tools) |
+| `src/skills.rs`                       | Skill discovery, YAML frontmatter, XML generation           |
+| `src/scripts.rs`                      | Extension script discovery                                  |
+| `src/session.rs`                      | `SessionManager` — pi-compatible JSONL                      |
+| `src/login.rs`                        | `theta login` OAuth entry point                             |
+| `src/oauth/codex.rs`                  | Codex OAuth token exchange and refresh                      |
+| `src/rpc.rs`                          | JSON-RPC over stdin/stdout                                  |
+| `src/prompts.rs`                      | Print-mode prompt execution                                 |
+| `src/print_mode.rs`                   | Non-TUI streaming output formatter                          |
+| `src/mentions.rs`                     | @-mention file content resolution                           |
+| `src/tools/mod.rs`                    | Tool registry, `ToolContext`, truncation                    |
+| `src/tools/{bash,edit,read,write}.rs` | Built-in tool implementations                               |
+| `src/extensions/mod.rs`               | TUI extension row rendering                                 |
 
 ## Tool System
 
-Seven built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
+Seven built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
 
 - All implement `theta_agent_core::AgentTool`.
 - `ToolContext` holds working directory — relative paths resolve against it.

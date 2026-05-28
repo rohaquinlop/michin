@@ -376,8 +376,8 @@ fn test_no_duplicate_tool_arguments_when_added_then_completed_repeat_same_call()
                 "type": "function_call",
                 "id": "fc_1",
                 "call_id": "call_1",
-                "name": "find",
-                "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
+                "name": "read",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
             }
         })),
         parser.parse_event(&serde_json::json!({
@@ -387,8 +387,8 @@ fn test_no_duplicate_tool_arguments_when_added_then_completed_repeat_same_call()
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "find",
-                    "arguments": "{\"path\":\".\",\"pattern\":\"*.toml\"}"
+                    "name": "read",
+                    "arguments": "{\"path\":\"Cargo.toml\"}"
                 }]
             }
         })),
@@ -406,8 +406,7 @@ fn test_no_duplicate_tool_arguments_when_added_then_completed_repeat_same_call()
             _ => None,
         })
         .expect("tool call block");
-    assert_eq!(tc["path"], ".");
-    assert_eq!(tc["pattern"], "*.toml");
+    assert_eq!(tc["path"], "Cargo.toml");
 }
 
 #[test]

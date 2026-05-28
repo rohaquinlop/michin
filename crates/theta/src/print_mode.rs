@@ -45,7 +45,8 @@ pub async fn run_prompt_print_mode(
     }
 
     // Build and set the system prompt for prompt mode.
-    let system_blocks = build_system_prompt(working_dir, model_id, Some("medium"), Some(250_000)).await;
+    let system_blocks =
+        build_system_prompt(working_dir, model_id, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -233,7 +234,8 @@ pub async fn run_continue_print_mode(
     }
 
     // Build and set system prompt.
-    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
+    let system_blocks =
+        build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -373,7 +375,8 @@ pub async fn run_resume_print_mode(
         agent.add_tool(tool).await;
     }
 
-    let system_blocks = build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
+    let system_blocks =
+        build_system_prompt(working_dir, &effective_model, Some("medium"), Some(250_000)).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -508,30 +511,6 @@ fn format_tool_log_summary(result: &theta_agent_core::types::ToolResult) -> Stri
                     .unwrap_or_else(|| "null".to_string());
                 format!("  exit={exit}")
             }
-        }
-        "grep" => {
-            let count = details
-                .get("match_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            format!("  {count} match(es)")
-        }
-        "ls" => {
-            let count = details
-                .get("entry_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            format!(
-                "  {count} entr{suffix}",
-                suffix = if count == 1 { "y" } else { "ies" }
-            )
-        }
-        "find" => {
-            let count = details
-                .get("match_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            format!("  {count} match(es)")
         }
         "write" => {
             let bytes = details

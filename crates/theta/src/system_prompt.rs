@@ -36,7 +36,12 @@ pub async fn build_system_prompt(
         parts.push(tools_prompt);
     }
 
-    parts.push(build_runtime_context(working_dir, model_id, thinking_level, max_context_window));
+    parts.push(build_runtime_context(
+        working_dir,
+        model_id,
+        thinking_level,
+        max_context_window,
+    ));
     parts.push(RESPONSE_CONTRACT.to_string());
 
     let text = parts.join("\n\n");
@@ -94,7 +99,8 @@ pub async fn build_system_prompt_with_skills(
     thinking_level: Option<&str>,
     max_context_window: Option<u32>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
-    let system = build_system_prompt(working_dir, model_id, thinking_level, max_context_window).await;
+    let system =
+        build_system_prompt(working_dir, model_id, thinking_level, max_context_window).await;
     let resource = build_resource_context(working_dir).await;
     (system, resource)
 }

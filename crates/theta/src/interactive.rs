@@ -1616,45 +1616,6 @@ pub fn format_tool_summary(
                 "bash done".to_string()
             }
         }
-        "grep" => {
-            if let Some(d) = details {
-                let pattern = d
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(unknown)");
-                let count = d.get("match_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!("grep /{pattern}/\n{count} match(es)")
-            } else {
-                "grep done".to_string()
-            }
-        }
-        "ls" => {
-            if let Some(d) = details {
-                let path = d
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(unknown)");
-                let count = d.get("entry_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!(
-                    "ls {path}\n{count} entr{suffix}",
-                    suffix = if count == 1 { "y" } else { "ies" }
-                )
-            } else {
-                "ls done".to_string()
-            }
-        }
-        "find" => {
-            if let Some(d) = details {
-                let pattern = d
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(unknown)");
-                let count = d.get("match_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!("find {pattern}\n{count} match(es)")
-            } else {
-                "find done".to_string()
-            }
-        }
         "write" => {
             if let Some(d) = details {
                 let path = d

@@ -1758,21 +1758,11 @@ fn tool_display_text(name: &str, args: &Option<String>, cwd: &str) -> String {
                 name.to_string()
             }
         }
-        "write" | "edit" | "read" | "ls" => {
+        "write" | "edit" | "read" => {
             if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
                 format!("{name}: {path}")
             } else {
                 name.to_string()
-            }
-        }
-        "grep" | "find" => {
-            let pattern = json.get("pattern").and_then(|v| v.as_str());
-            let path = json.get("path").and_then(|v| v.as_str());
-            match (pattern, path) {
-                (Some(p), Some(fp)) => format!("{name}: {p} in {fp}"),
-                (Some(p), None) => format!("{name}: {p}"),
-                (None, Some(fp)) => format!("{name}: {fp}"),
-                (None, None) => name.to_string(),
             }
         }
         _ => name.to_string(),
