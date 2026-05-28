@@ -442,8 +442,13 @@ async fn create_agent(
         agent.add_tool(tool).await;
     }
 
-    let (system_blocks, resource_blocks) =
-        build_system_prompt_with_skills(working_dir, model_id, Some(thinking), settings.max_context_window).await;
+    let (system_blocks, resource_blocks) = build_system_prompt_with_skills(
+        working_dir,
+        model_id,
+        Some(thinking),
+        settings.max_context_window,
+    )
+    .await;
     agent.set_system_prompt(system_blocks).await;
     if !resource_blocks.is_empty() {
         agent.set_resource_context(resource_blocks).await;
@@ -671,12 +676,29 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     latest_turn_end_reason = format!("{reason:?}");
                     if !matches!(reason, theta_agent_core::types::TurnEndReason::Completed) {
                         let detail = details.trim();
-                        let message = if detail.is_empty() {
-                            format!("Turn ended: {reason:?}")
+                        // Provider failures: log the full error chain via tracing,
+                        // but keep the chat message short — the user can't act on
+                        // HTTP connection traces.
+                        if matches!(
+                            reason,
+                            theta_agent_core::types::TurnEndReason::ProviderFailure
+                        ) {
+                            tracing::warn!(
+                                ?reason,
+                                detail = %detail,
+                                "turn terminated with provider failure"
+                            );
+                            let _ = event_tx.send(TuiEvent::Info(
+                                "Provider error — check logs for details".to_string(),
+                            ));
                         } else {
-                            format!("Turn ended: {reason:?}\n{detail}")
-                        };
-                        let _ = event_tx.send(TuiEvent::Info(message));
+                            let message = if detail.is_empty() {
+                                format!("Turn ended: {reason:?}")
+                            } else {
+                                format!("Turn ended: {reason:?}\n{detail}")
+                            };
+                            let _ = event_tx.send(TuiEvent::Info(message));
+                        }
                     }
                 }
                 Ok(AgentEvent::SafetyDecision {
@@ -717,9 +739,13 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     normalized_tool_call_ids,
                     deduped_tool_results,
                 }) => {
-                    let _ = event_tx.send(TuiEvent::Info(format!(
-                        "replay sanitized: dropped_assistant={dropped_assistant_messages}, synthesized_tool_results={synthesized_tool_results}, normalized_tool_call_ids={normalized_tool_call_ids}, deduped_tool_results={deduped_tool_results}"
-                    )));
+                    tracing::debug!(
+                        dropped_assistant_messages,
+                        synthesized_tool_results,
+                        normalized_tool_call_ids,
+                        deduped_tool_results,
+                        "replay sanitized"
+                    );
                 }
                 Ok(AgentEvent::Error { message }) => {
                     let _ = event_tx.send(TuiEvent::Error(message));
@@ -1155,9 +1181,13 @@ async fn handle_tui_action(
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
                     let max_ctx = agent.config().max_context_window;
-                    let (blocks, resource_blocks) =
-                        build_system_prompt_with_skills(working_dir, &mid, Some(&current_thinking), max_ctx)
-                            .await;
+                    let (blocks, resource_blocks) = build_system_prompt_with_skills(
+                        working_dir,
+                        &mid,
+                        Some(&current_thinking),
+                        max_ctx,
+                    )
+                    .await;
                     agent.set_system_prompt(blocks).await;
                     if !resource_blocks.is_empty() {
                         agent.set_resource_context(resource_blocks).await;

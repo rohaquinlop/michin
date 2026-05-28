@@ -1812,6 +1812,7 @@ fn is_diagnostic_message(msg: &str) -> bool {
         || msg.contains("tool calls detected")
         || msg.contains("assistant promised execution but emitted no tool calls")
         || msg.contains("Execution gap:")
+        || msg.starts_with("LLM error")
 }
 
 fn infer_intent_from_error(msg: &str) -> &'static str {

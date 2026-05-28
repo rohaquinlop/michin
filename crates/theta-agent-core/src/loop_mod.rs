@@ -355,13 +355,23 @@ async fn run_single_turn(
                     _ => false,
                 };
 
-                state.add_assistant_message(assistant_msg.clone());
+                // Don't persist error/aborted responses in the transcript —
+                // they cause the replay sanitizer to fire on every subsequent
+                // context build, spamming the TUI with "replay sanitized" messages.
+                let is_error_response =
+                    matches!(stop_reason, Some(StopReason::Error | StopReason::Aborted));
+                if !is_error_response {
+                    state.add_assistant_message(assistant_msg.clone());
+                }
                 let _ = event_tx.send(AgentEvent::MessageEnd {
                     message: assistant_msg,
                 });
 
-                let tool_calls =
-                    ToolCall::from_message(state.messages.last().expect("just pushed"));
+                let tool_calls = if is_error_response {
+                    Vec::new()
+                } else {
+                    ToolCall::from_message(state.messages.last().expect("just pushed"))
+                };
                 let has_tool_calls = !tool_calls.is_empty();
 
                 // Empty response: retry up to twice, then stop.
