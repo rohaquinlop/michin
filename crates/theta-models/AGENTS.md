@@ -36,3 +36,4 @@ Compile-time model definitions plus runtime OpenCode model fetch. Implements the
 - Cost calculation uses `known_cost()` for OpenCode models.
 - Free/rate-limited OpenCode models excluded from catalog.
 - Token limits must be accurate (used for compaction calculations).
+- Comments follow root `AGENTS.md` Comment Style rules.

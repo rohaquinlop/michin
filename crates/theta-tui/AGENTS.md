@@ -42,6 +42,7 @@ Terminal UI built with ratatui + crossterm. Chat view, multi-line editor with @-
 - Components implement the `Component` trait.
 - Theme changes must work in both `default` and `monokai`.
 - Config actions (`/model`, `/thinking`) are async with ack to avoid stale-state races.
+- Comments follow root `AGENTS.md` Comment Style rules.
 
 ## Testing
 

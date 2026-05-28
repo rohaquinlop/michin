@@ -37,3 +37,4 @@ Rhai-powered runtime hooks that bridge user scripts to `theta_agent_core::Hooks`
 - `call` reserved in Rhai. Use `ctx` for callback parameter.
 - Script callbacks must never panic — errors caught and logged.
 - Dependencies: `theta-agent-core` + `theta-ai` for hook bridging.
+- Comments follow root `AGENTS.md` Comment Style rules.

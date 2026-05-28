@@ -39,6 +39,7 @@ Two providers in `crates/theta-ai/src/providers/`:
 - Use `thiserror` for library errors.
 - No panics. Return `Result`.
 - No `unwrap()` — use `?` or explicit error handling.
+- Comments follow root `AGENTS.md` Comment Style rules.
 
 ## Testing
 

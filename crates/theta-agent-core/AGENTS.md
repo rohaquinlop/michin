@@ -60,6 +60,7 @@ Exponential backoff for 429, 5xx, connection/timeout. Non-retryable (4xx non-429
 - No panics. Return `Result`.
 - No `unwrap()` — use `?` or explicit error handling.
 - `AgentEnd` event always emitted (even on error).
+- Comments follow root `AGENTS.md` Comment Style rules.
 
 ## Testing
 

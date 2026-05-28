@@ -17,70 +17,56 @@ use crate::components::{Action, Component};
 use crate::keybinding::{EnterBehavior, is_enter_send, is_follow_up_key, is_newline_key};
 use crate::theme::Theme;
 
-/// State for inline autocomplete (file paths or slash commands).
+/// Inline autocomplete state.
 #[derive(Debug, Clone)]
 struct AutocompleteState {
-    /// Available items (file names or command names).
     items: Vec<String>,
-    /// Currently selected index.
     selected: usize,
-    /// Byte position in text where @ or / was typed.
+    /// Byte position where @ or / was typed.
     prefix_start: usize,
-    /// The filter query (text between @ or / and cursor).
+    /// Filter query between trigger and cursor.
     query: String,
-    /// Trigger character ('@' or '/').
+    /// '@' or '/'.
     trigger: char,
 }
 
-/// Multiline text editor with professional visual-line cursor navigation.
+/// Multiline text editor with visual-line cursor navigation.
 ///
 /// ## Cursor model
 ///
-/// The canonical cursor position is a byte offset into `text`.
-/// A cached `vis_lines` mapping (built by `rebuild_visual_lines`) gives us
-/// the visual layout: each entry is a `Vec<usize>` of byte offsets of each
-/// character in that visual line.  From these we derive the visual
-/// coordinates `(vis_line, vis_col)` on demand.
+/// Canonical cursor position is a byte offset into `text`.
+/// `vis_lines` (built by `rebuild_visual_lines`) maps each visual line
+/// to `Vec<usize>` of byte offsets per character, from which
+/// `(vis_line, vis_col)` is derived on demand.
 ///
-/// For vertical navigation we also track `desired_col` — the visual column
-/// the user "aimed for" when moving up/down.  This preserves horizontal
-/// position across lines of varying length.
+/// `desired_col` tracks horizontal aim during vertical navigation,
+/// preserving column position across lines of varying length.
 pub struct Editor {
-    /// The text buffer.
     pub text: String,
-    /// Cursor position — byte offset into `text`.
+    /// Byte offset into `text`.
     pub cursor: usize,
-    /// Cached visual lines: each entry is `[byte_offset, …]` for each
-    /// character on that visual line (from `rebuild_visual_lines`).
+    /// `[byte_offset, …]` per character on each visual line.
     vis_lines: Vec<Vec<usize>>,
-    /// Visual column maintained during vertical navigation.
+    /// Horizontal aim during vertical navigation.
     desired_col: usize,
-    /// Cached inner width used to build `vis_lines`.
+    /// Inner width used for vis_lines cache.
     pub cached_width: usize,
-    /// Whether the cache is dirty (text changed, width changed, etc.).
+    /// Cache invalidation flag.
     pub cache_dirty: bool,
 
-    /// Whether focused.
     focused: bool,
-    /// Theme.
     theme: Theme,
-    /// History of submitted messages.
     history: Vec<String>,
-    /// Current history index (for up/down browsing).
+    /// Position in history ring.
     history_idx: usize,
-    /// Temporary save for history browsing.
+    /// Stash for history restore.
     saved_text: String,
-    /// Scroll offset in visual lines.
     scroll: usize,
-    /// Inline autocomplete state (None = not active).
     autocomplete: Option<AutocompleteState>,
-    /// Working directory for file autocomplete.
     working_dir: PathBuf,
-    /// Known slash commands for command autocomplete.
     slash_commands: Vec<String>,
-    /// Enter key behavior.
     enter_behavior: EnterBehavior,
-    /// Last rendered inner area for hit-testing and cursor placement.
+    /// For hit-testing + cursor placement.
     pub last_inner_area: Option<Rect>,
 }
 
@@ -135,7 +121,7 @@ impl Editor {
         self.theme = theme;
     }
 
-    /// Insert text at the current cursor position (used by path picker).
+    /// Insert at cursor. Used by path picker.
     pub fn insert_at_cursor(&mut self, s: &str) {
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
@@ -158,7 +144,7 @@ impl Editor {
     // Visual line cache
     // ------------------------------------------------------------------
 
-    /// Rebuild `vis_lines` from `text` and `width` if dirty or width changed.
+    /// Rebuild visual line cache if dirty or width changed.
     pub fn rebuild_visual_lines(&mut self, width: usize) {
         if !self.cache_dirty && self.cached_width == width {
             return;
@@ -188,7 +174,7 @@ impl Editor {
         }
     }
 
-    /// After any text mutation, rebuild cache and re-clamp cursor + scroll.
+    /// Post-mutation: rebuild cache, clamp cursor, maintain scroll.
     pub fn after_mutate(&mut self) {
         self.cache_dirty = true;
         self.rebuild_visual_lines(self.nav_width());
@@ -201,7 +187,6 @@ impl Editor {
         self.ensure_cursor_visible();
     }
 
-    /// Ensure scroll is within valid range.
     pub fn clamp_scroll(&mut self) {
         if self.vis_lines.is_empty() {
             self.scroll = 0;
@@ -251,7 +236,7 @@ impl Editor {
     // Cursor navigation (visual-line based)
     // ------------------------------------------------------------------
 
-    /// Adjust scroll so the cursor visual line is visible.
+    /// Scroll to keep cursor line visible.
     fn ensure_cursor_visible(&mut self) {
         if self.vis_lines.is_empty() {
             return;
@@ -270,9 +255,7 @@ impl Editor {
         self.clamp_scroll();
     }
 
-    /// Move cursor up one visual line.
-    /// Returns `true` if cursor was already at the first visual line
-    /// (caller may want to navigate history instead).
+    /// Move cursor up. Returns true if at first line (caller handles history).
     pub fn move_up(&mut self) -> bool {
         self.rebuild_visual_lines(self.nav_width());
         if self.vis_lines.is_empty() {
@@ -581,9 +564,8 @@ impl Editor {
     // Autocomplete
     // ------------------------------------------------------------------
 
-    /// Start autocomplete after typing @ or /.
     fn start_autocomplete(&mut self, trigger: char) {
-        let prefix_start = self.cursor; // right after @ or /
+        let prefix_start = self.cursor;
         self.autocomplete = Some(AutocompleteState {
             items: Vec::new(),
             selected: 0,
@@ -594,13 +576,12 @@ impl Editor {
         self.update_autocomplete_items();
     }
 
-    /// Update autocomplete items based on current query.
     fn update_autocomplete_items(&mut self) {
         let Some(ref mut ac) = self.autocomplete else {
             return;
         };
 
-        // Extract query: text between prefix_start and cursor.
+        // Query = text between prefix_start and cursor.
         if self.cursor >= ac.prefix_start {
             ac.query = self.text[ac.prefix_start..self.cursor].to_string();
         } else {
@@ -616,7 +597,6 @@ impl Editor {
         ac.selected = 0;
     }
 
-    /// Apply the selected autocomplete item.
     fn accept_autocomplete(&mut self) {
         let _trigger = self
             .autocomplete
@@ -657,7 +637,6 @@ impl Editor {
         }
     }
 
-    /// Return autocomplete items for external rendering.
     pub fn autocomplete_items(&self) -> Vec<String> {
         self.autocomplete
             .as_ref()
@@ -665,7 +644,6 @@ impl Editor {
             .unwrap_or_default()
     }
 
-    /// Selected index in autocomplete items.
     pub fn autocomplete_selected(&self) -> usize {
         self.autocomplete
             .as_ref()
@@ -673,12 +651,10 @@ impl Editor {
             .unwrap_or(0)
     }
 
-    /// Whether autocomplete is currently active.
     pub fn autocomplete_active(&self) -> bool {
         self.autocomplete.is_some()
     }
 
-    /// Dismiss autocomplete without applying.
     fn dismiss_autocomplete(&mut self) {
         self.autocomplete = None;
     }

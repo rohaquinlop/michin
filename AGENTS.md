@@ -69,6 +69,17 @@ Each crate has its own `AGENTS.md` with crate-specific conventions. When working
 - Read files in full before wide-ranging changes. Don't rely only on `grep` snippets.
 - Dependencies in `Cargo.toml` use workspace references. New deps go in `[workspace.dependencies]`.
 
+## Comment Style
+
+- Comments explain WHY, not WHAT. The code says what; comments say why.
+- No field-level docs that restate the field name: `/// The text buffer.` for `pub text: String` is noise — remove or add semantic context.
+- No narrative inline comments that walk through code line-by-line. Each comment must add info not visible in the code.
+- Module-level docs (`//!`): one line describing purpose. Multi-line only when the module has non-obvious invariants or safety requirements.
+- Struct/enum docs (`///`): one line. Multi-line only when invariants, lifecycle, or safety constraints are non-obvious.
+- Section separator comments (`// ── Section ──`): keep lightweight. One per logical section, no box-drawing.
+- Good comments: why this approach, why not the obvious alternative, invariants, safety, non-obvious side effects, bug references.
+- LLM-facing text (tool descriptions, prompt templates): keep as-is — these are not just comments, they're data.
+
 ## Commands
 
 ```bash

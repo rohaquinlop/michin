@@ -10,18 +10,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Full theta configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThetaConfig {
-    /// Default model selection.
     #[serde(default)]
     pub model: ModelDefaults,
 
-    /// Thinking level default.
     #[serde(default)]
     pub thinking: ThinkingDefaults,
 
-    /// Provider auth tokens.
     #[serde(default)]
     pub auth: AuthConfig,
 
@@ -29,68 +25,61 @@ pub struct ThetaConfig {
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
 
-    /// TUI theme name ("default" or "monokai").
+    /// "default" or "monokai".
     #[serde(default)]
     pub theme: Option<String>,
 
-    /// Context compaction settings.
     #[serde(default)]
     pub compaction: CompactionSettings,
 
-    /// Provider retry settings.
     #[serde(default)]
     pub retry: RetrySettings,
 
-    /// Provider transport settings.
     #[serde(default)]
     pub provider: ProviderSettings,
 
-    /// Agent loop controls.
     #[serde(default)]
     pub agent: AgentSettings,
-    /// Named runtime hardening profile.
+    /// Runtime hardening profile. Overrides agent/retry/timeout defaults.
     #[serde(default)]
     pub profile: RuntimeProfileSetting,
-    /// Explicit per-project/runtime overrides applied on top of profile defaults.
+    /// Per-project overrides applied on top of profile defaults.
     #[serde(default)]
     pub profile_overrides: ProfileOverrides,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelDefaults {
-    /// Default model ID.
     pub default: Option<String>,
 
-    /// Per-provider default models.
     #[serde(default)]
     pub providers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThinkingDefaults {
-    /// Default thinking level (off, low, medium, high).
+    /// off, low, medium, high, xhigh.
     pub default: Option<String>,
 }
 
-/// Compaction settings loaded from config.toml.
+/// Compaction settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionSettings {
-    /// Whether automatic compaction is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Tokens to reserve for the model's response.
+    /// Tokens reserved for model response.
     #[serde(default = "default_reserve_tokens")]
     pub reserve_tokens: u32,
-    /// How many tokens of recent conversation to preserve during compaction.
+    /// Tokens of recent conversation to preserve.
     #[serde(default = "default_keep_recent_tokens")]
     pub keep_recent_tokens: u32,
     /// Strategy to preserve trimmed context.
     #[serde(default)]
     pub strategy: CompactionStrategySetting,
-    /// Backward-compatible toggle; if present it overrides strategy.
+    /// Backward-compat toggle; overrides strategy if set.
     #[serde(default)]
     pub summarize_with_llm: Option<bool>,
-    /// Maximum output tokens for compaction summaries.
+    /// Max output tokens for compaction summaries.
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
 }

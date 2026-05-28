@@ -252,9 +252,8 @@ pub struct App {
     theme: Theme,
     theme_idx: usize,
     streaming: bool,
-    /// Set to true when MessageEnd fires — marks the transition from LLM
-    /// streaming to tool execution phase. ToolStart events arriving after
-    /// this flag is set are shown with a visual transition cue.
+    /// Set to true when MessageEnd fires — transition from LLM streaming
+    /// to tool execution phase. ToolStart events after this flag show a visual cue.
     tool_exec_phase: bool,
     current_tool: Option<String>,
     tool_display_text: HashMap<String, String>,

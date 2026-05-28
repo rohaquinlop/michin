@@ -8,29 +8,22 @@ use theta_ai::{ContentBlock, Message, Model, ThinkingLevel, Tool};
 use crate::types::AgentTool;
 use crate::types::{RunReport, RunReportEvent, TurnEndReason};
 
-/// The mutable state of an agent run.
+/// Mutable state of an agent run.
 #[derive(Clone)]
 pub struct AgentState {
-    /// System prompt content blocks.
     pub system_prompt: Vec<ContentBlock>,
 
-    /// The currently active model.
     pub model: Model,
 
-    /// Available tools.
     pub tools: Vec<Arc<dyn AgentTool>>,
 
-    /// Resource context (skills, extensions).
-    /// Injected at the start of the conversation, not in the system prompt.
+    /// Skills + extensions. Injected at conversation start, not in system prompt.
     pub resource_context: Option<Vec<ContentBlock>>,
 
-    /// The conversation transcript (all messages).
     pub messages: Vec<Message>,
 
-    /// Whether the agent is currently streaming an LLM response.
     pub is_streaming: bool,
 
-    /// Current thinking/reasoning level.
     pub thinking_level: ThinkingLevel,
     /// Available models from catalog for fallback resolution.
     pub available_models: Vec<Model>,
@@ -38,19 +31,16 @@ pub struct AgentState {
     pub last_turn_end_reason: Option<TurnEndReason>,
     /// In-progress report for current run.
     pub current_run_report: Option<RunReport>,
-    /// Last completed run report.
     pub last_run_report: Option<RunReport>,
-    /// Current run lineage ID.
     pub current_run_id: Option<String>,
-    /// Current turn lineage ID.
     pub current_turn_id: Option<String>,
     /// Tool-call IDs already executed in current turn.
     pub executed_tool_call_ids_in_turn: HashSet<String>,
-    /// Cached approximate token count of the system prompt (computed once on set).
+    /// Cached token count of system prompt. Computed once on set.
     pub(crate) system_prompt_tokens: u32,
-    /// Cached approximate token count of the resource context (computed once on set).
+    /// Cached token count of resource context. Computed once on set.
     pub(crate) resource_context_tokens: u32,
-    /// Cached theta_ai::Tool list built from tools Vec (cheap clone per turn).
+    /// Cached theta_ai::Tool list. Cheap clone per turn.
     pub(crate) theta_ai_tools: Vec<Tool>,
 }
 

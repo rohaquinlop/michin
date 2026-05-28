@@ -52,3 +52,4 @@ JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_leve
 - Use `anyhow` for app errors.
 - Config changes require explicit user request.
 - System prompt composition follows nested AGENTS.md discovery (see system_prompt.rs).
+- Comments follow root `AGENTS.md` Comment Style rules.

@@ -22,7 +22,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::components::{Action, Component};
 use crate::theme::Theme;
 
-/// A single chat message to display.
+/// A chat message to display.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: ChatRole,

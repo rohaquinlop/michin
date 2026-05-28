@@ -26,7 +26,6 @@ use crate::tools::builtin_tools;
 /// Shared agent handle — None until auth is resolved.
 type AgentCell = Arc<RwLock<Option<Arc<Agent>>>>;
 
-/// Run the TUI interactive mode.
 pub async fn run_tui(
     config: &ThetaConfig,
     working_dir: &Path,
@@ -34,7 +33,6 @@ pub async fn run_tui(
     thinking: &str,
     initial_prompt: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Build runtime model snapshot (hydrate OpenCode model list if available).
     let catalog = BuiltInCatalog::new();
     let runtime_models_cell: Arc<RwLock<Vec<Model>>> =
         Arc::new(RwLock::new(resolve_runtime_models(&catalog).await));
@@ -44,16 +42,12 @@ pub async fn run_tui(
         .ok_or_else(|| anyhow::anyhow!("model not found: {model_id}"))?
         .clone();
 
-    // Resolve auth. If the default model's provider has no token,
-    // try other providers that DO have auth (e.g., user logged in
-    // via Codex but default model is from OpenAI provider).
     let provider_str = provider_to_string(model.provider);
     let mut auth_config = config.auth.clone();
     let model_entries = available_model_entries(&runtime_models, &mut auth_config).await;
     let api_key = auth_config.get_api_key(&provider_str).await;
 
-    // Fallback: if no auth for the default model's provider, check
-    // other providers and find a matching model.
+    // If no auth for the default model's provider, find a fallback with auth.
     let (model, model_id, api_key) = if api_key.is_none() {
         let alt_providers = [
             ("openai-codex", Provider::OpenAiCodex),
@@ -85,34 +79,26 @@ pub async fn run_tui(
     };
     let has_auth = api_key.is_some();
 
-    // Create channels between TUI and agent bridge.
     let (event_tx_raw, mut event_rx_raw) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (message_tx, mut message_rx) = mpsc::unbounded_channel::<String>();
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
-    // Lazy session: created on first message, None until then.
-    // No session file is written for login-only or no-message runs.
+    // Session created lazily on first message.
     let session_id_cell: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
-    // Shared agent cell — populated immediately if auth is available,
-    // populated by the action handler after login otherwise.
+    // Agent populated immediately if auth available, deferred until after login otherwise.
     let agent_cell: AgentCell = Arc::new(RwLock::new(None));
 
-    // Build the theme.
     let theme = match config.theme.as_deref() {
         Some("monokai") => Theme::monokai(),
         _ => Theme::default(),
     };
 
-    // Shared notification channel: the ScriptHooks after_tool_call callback
-    // signals this whenever tool execution may have changed extension state.
-    // The TUI poller wakes on this instead of polling on a timer.
+    // ScriptHooks notify after each tool execution to wake up the TUI poller.
     let status_notify = Arc::new(tokio::sync::Notify::new());
 
-    // ------------------------------------------------------------------
-    // Always spawn the action handler first (handles login + agent init).
-    // ------------------------------------------------------------------
+    // ── Action handler (login + agent init) ──
     let action_agent_cell = agent_cell.clone();
     let action_event_tx = event_tx_raw.clone();
     let action_session_id_cell = session_id_cell.clone();
@@ -144,9 +130,7 @@ pub async fn run_tui(
         }
     });
 
-    // ------------------------------------------------------------------
-    // If we have auth, create the agent now and spawn event bridge.
-    // ------------------------------------------------------------------
+    // ── Event bridge — if we have auth, create agent now ──
     if let Some(ref key) = api_key {
         let agent = create_agent(
             &model,
@@ -205,9 +189,7 @@ pub async fn run_tui(
 
     let skills = crate::skills::discover_skills(working_dir).await;
 
-    // ------------------------------------------------------------------
-    // Spawn message handler — waits for agent, creates session lazily.
-    // ------------------------------------------------------------------
+    // ── Spawn message handler (waits for agent, creates session lazily) ──
     let msg_agent_cell = agent_cell.clone();
     let msg_event_tx = event_tx_raw.clone();
     let msg_working_dir = working_dir.to_path_buf();
@@ -303,8 +285,7 @@ pub async fn run_tui(
         }
     });
 
-    // ------------------------------------------------------------------
-    // Build available commands + skills for the / picker.
+    // ── Build available commands + skills for / picker ──
     let mut commands = vec![
         CommandEntry {
             name: "help".into(),
@@ -379,9 +360,7 @@ pub async fn run_tui(
             description: skill.description.clone(),
         });
     }
-
-    // Build and run the TUI.
-    // ------------------------------------------------------------------
+    // ── Build and run TUI ──
     let persisted = crate::settings::load_settings().await;
     let mut app = App::new(
         theme.clone(),
@@ -436,9 +415,7 @@ pub async fn run_tui(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ──
 
 /// Create a fully configured agent.
 async fn create_agent(
