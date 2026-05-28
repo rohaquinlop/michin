@@ -35,7 +35,7 @@ pub async fn run_tui(
 ) -> anyhow::Result<()> {
     let catalog = BuiltInCatalog::new();
     let runtime_models_cell: Arc<RwLock<Vec<Model>>> =
-        Arc::new(RwLock::new(resolve_runtime_models(&catalog).await));
+        Arc::new(RwLock::new(resolve_runtime_models(&catalog, None).await));
     let runtime_models = runtime_models_cell.read().await.clone();
 
     let model = find_model_by_id(&runtime_models, model_id)
@@ -881,7 +881,12 @@ async fn handle_tui_action(
                                 }
                             }
 
-                            refresh_runtime_models(catalog, runtime_models_cell).await;
+                            refresh_runtime_models(
+                                catalog,
+                                runtime_models_cell,
+                                auth.get_api_key("opencode").await.as_deref(),
+                            )
+                            .await;
                             let runtime_models = runtime_models_cell.read().await.clone();
                             let refreshed_models =
                                 available_model_entries(&runtime_models, &mut auth).await;
@@ -948,7 +953,12 @@ async fn handle_tui_action(
                         }
                     }
 
-                    refresh_runtime_models(catalog, runtime_models_cell).await;
+                    refresh_runtime_models(
+                        catalog,
+                        runtime_models_cell,
+                        auth.get_api_key("opencode").await.as_deref(),
+                    )
+                    .await;
                     let runtime_models = runtime_models_cell.read().await.clone();
                     let refreshed_models =
                         available_model_entries(&runtime_models, &mut auth).await;
@@ -1005,8 +1015,16 @@ async fn handle_tui_action(
                 // Read thinking level before rebuilding prompt so runtime
                 // context shows the correct level.
                 let state = agent.state().await;
-                let current_thinking = thinking_level_to_string(state.thinking_level);
+                let mut current_thinking = thinking_level_to_string(state.thinking_level);
+                let needs_reset = !levels.contains(&current_thinking);
                 drop(state);
+                // If the current thinking level is not valid for the new model
+                // (e.g. switching from a reasoning model to a non-reasoning one),
+                // reset to "off".
+                if needs_reset {
+                    agent.set_thinking_level(theta_ai::ThinkingLevel::Off).await;
+                    current_thinking = "off".to_string();
+                }
                 let max_ctx = agent.config().max_context_window;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
@@ -1452,9 +1470,19 @@ async fn available_model_entries(
         );
     }
 
+    let settings = crate::settings::load_settings().await;
+    let disabled: std::collections::HashSet<&str> = settings
+        .disabled_models
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
     let mut entries: Vec<ModelEntry> = models
         .iter()
         .filter(|m| {
+            if disabled.contains(m.id.as_str()) {
+                return false;
+            }
             provider_has_auth
                 .get(&provider_to_string(m.provider))
                 .copied()
@@ -1504,14 +1532,18 @@ fn find_model_by_provider_and_id(
 async fn refresh_runtime_models(
     catalog: &BuiltInCatalog,
     runtime_models_cell: &Arc<RwLock<Vec<Model>>>,
+    opencode_api_key: Option<&str>,
 ) {
-    let refreshed = resolve_runtime_models(catalog).await;
+    let refreshed = resolve_runtime_models(catalog, opencode_api_key).await;
     *runtime_models_cell.write().await = refreshed;
 }
 
-async fn resolve_runtime_models(catalog: &BuiltInCatalog) -> Vec<Model> {
+async fn resolve_runtime_models(
+    catalog: &BuiltInCatalog,
+    opencode_api_key: Option<&str>,
+) -> Vec<Model> {
     let mut models: Vec<Model> = catalog.list().into_iter().cloned().collect();
-    let fetched = opencode::fetch_models().await;
+    let fetched = opencode::fetch_models(opencode_api_key).await;
     if !fetched.is_empty() {
         models.retain(|m| m.provider != Provider::OpenCode);
         models.extend(fetched);

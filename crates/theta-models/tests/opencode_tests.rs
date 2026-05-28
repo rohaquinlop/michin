@@ -10,19 +10,38 @@ fn test_all_models_valid() {
 }
 
 #[test]
-fn test_free_models_are_excluded() {
-    for id in opencode::FREE_MODEL_IDS {
+fn test_reasoning_models() {
+    // Build a few models through the same path as fetch_models
+    // and verify reasoning is set correctly.
+    let reasoning_ids = [
+        "gpt-5.5",
+        "gpt-5.4-nano",
+        "claude-sonnet-4",
+        "claude-haiku-4-5",
+        "gemini-3-flash",
+        "deepseek-v4-flash-free",
+        "qwen3.6-plus",
+    ];
+    for id in reasoning_ids {
         assert!(
-            opencode::is_free(id),
-            "free model {id} should be recognized"
+            opencode::supports_reasoning(id),
+            "{id} should support reasoning"
         );
     }
-    assert!(!opencode::is_free("gpt-5.5"));
-}
-
-#[test]
-fn test_paid_models_have_cost() {
-    let cost = opencode::known_cost("gpt-5.5");
-    assert!(cost.input > 0.0);
-    assert!(cost.output > 0.0);
+    let non_reasoning_ids = [
+        "minimax-m2.7",
+        "minimax-m2.5-free",
+        "mimo-v2.5-free",
+        "glm-5.1",
+        "kimi-k2.6",
+        "grok-build-0.1",
+        "big-pickle",
+        "nemotron-3-super-free",
+    ];
+    for id in non_reasoning_ids {
+        assert!(
+            !opencode::supports_reasoning(id),
+            "{id} should NOT support reasoning"
+        );
+    }
 }

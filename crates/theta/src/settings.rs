@@ -47,6 +47,11 @@ pub struct ThetaSettings {
     /// Default is 250,000 — most LLMs perform better below this.
     #[serde(default = "default_max_context_window")]
     pub max_context_window: Option<u32>,
+
+    /// Model IDs to hide from the model selector (e.g. models disabled
+    /// in your Zen workspace). Add model IDs here to filter them out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_models: Vec<String>,
 }
 
 fn default_steering_mode() -> String {
@@ -89,6 +94,7 @@ impl Default for ThetaSettings {
             tool_progress_hz: default_tool_progress_hz(),
             enter_behavior: default_enter_behavior(),
             max_context_window: default_max_context_window(),
+            disabled_models: Vec::new(),
         }
     }
 }

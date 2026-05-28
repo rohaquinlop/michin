@@ -4,7 +4,7 @@
 //! authenticated via session token.
 
 use theta_ai::model::{Model, ModelCompat};
-use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};
+use theta_ai::types::{Api, Modality, Provider, ThinkingLevel};
 
 /// Return all codex-enabled models.
 pub fn models() -> Vec<Model> {
@@ -70,13 +70,6 @@ fn codex_model(
         ]
         .into(),
         input: vec![Modality::Text],
-        // Subscription-backed endpoint; usage billed by plan.
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
         context_window,
         max_tokens,
         compat: {

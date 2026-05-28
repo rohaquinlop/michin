@@ -179,23 +179,6 @@ pub struct Usage {
     /// Cache read tokens (prompt caching hit).
     #[serde(alias = "cacheReadTokens", default)]
     pub cache_read_tokens: u32,
-    /// Total cost in USD (calculated by provider).
-    pub cost: Option<f64>,
-}
-
-/// Pricing information for a model.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ModelCost {
-    /// Cost per 1M input tokens.
-    pub input: f64,
-    /// Cost per 1M output tokens.
-    pub output: f64,
-    /// Cost per 1M cache-read tokens.
-    #[serde(alias = "cacheRead")]
-    pub cache_read: f64,
-    /// Cost per 1M cache-write tokens.
-    #[serde(alias = "cacheWrite")]
-    pub cache_write: f64,
 }
 
 /// A tool definition as sent to the LLM.

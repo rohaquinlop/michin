@@ -1,7 +1,7 @@
 //! DeepSeek model definitions.
 
 use theta_ai::model::{Model, ModelCompat};
-use theta_ai::types::{Api, Modality, ModelCost, Provider, ThinkingLevel};
+use theta_ai::types::{Api, Modality, Provider, ThinkingLevel};
 
 /// Return all DeepSeek models.
 pub fn models() -> Vec<Model> {
@@ -28,12 +28,6 @@ fn deepseek_v4_pro() -> Model {
         ]
         .into(),
         input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.435,
-            output: 0.87,
-            cache_read: 0.003625,
-            cache_write: 0.0,
-        },
         context_window: 1_000_000,
         max_tokens: 384_000,
         compat: ModelCompat::for_deepseek(),
@@ -60,12 +54,6 @@ fn deepseek_v4_flash() -> Model {
         ]
         .into(),
         input: vec![Modality::Text],
-        cost: ModelCost {
-            input: 0.14,
-            output: 0.28,
-            cache_read: 0.0028,
-            cache_write: 0.0,
-        },
         context_window: 1_000_000,
         max_tokens: 384_000,
         compat: ModelCompat::for_deepseek(),

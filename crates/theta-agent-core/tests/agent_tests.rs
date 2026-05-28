@@ -14,7 +14,7 @@ use theta_ai::event::AssistantMessageEvent;
 use theta_ai::model::{Model, ModelCatalog, ModelCompat};
 use theta_ai::providers::ProviderRegistry;
 use theta_ai::types::{
-    Api, ContentBlock, Context, Message, Modality, ModelCost, Provider as ProviderKind,
+    Api, ContentBlock, Context, Message, Modality, Provider as ProviderKind,
     SimpleStreamOptions, StopReason, StreamOptions,
 };
 use theta_ai::{LlmProvider, ThetaError};
@@ -186,7 +186,6 @@ fn test_model() -> Model {
         reasoning: false,
         thinking_level_map: HashMap::new(),
         input: vec![Modality::Text],
-        cost: ModelCost::default(),
         context_window: 128_000,
         max_tokens: 16_384,
         compat: ModelCompat::for_openai(),

@@ -114,9 +114,6 @@ pub struct Model {
     /// Input modalities the model supports.
     #[serde(default)]
     pub input: Vec<Modality>,
-    /// Pricing information.
-    #[serde(default)]
-    pub cost: ModelCost,
     /// Context window size in tokens.
     #[serde(rename = "contextWindow")]
     pub context_window: u32,

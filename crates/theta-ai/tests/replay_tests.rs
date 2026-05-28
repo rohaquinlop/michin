@@ -12,7 +12,6 @@ fn openai_model() -> Model {
         reasoning: false,
         thinking_level_map: Default::default(),
         input: vec![Modality::Text],
-        cost: Default::default(),
         context_window: 128_000,
         max_tokens: 16_384,
         compat: ModelCompat::for_openai(),

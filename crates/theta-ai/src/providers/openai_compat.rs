@@ -257,6 +257,10 @@ pub fn build_request_body(
 
 /// Apply thinking/reasoning parameters based on the model's thinking format.
 pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::types::ThinkingLevel) {
+    // Never send reasoning params to models that don't support reasoning.
+    if !model.reasoning {
+        return;
+    }
     let level_str = model.thinking_param(level);
 
     match model.compat.thinking_format {
@@ -851,6 +855,5 @@ fn parse_usage(usage: &Value) -> Usage {
         output_tokens,
         cache_write_tokens: cache_miss_or_write,
         cache_read_tokens: cache_hit,
-        cost: None,
     }
 }

@@ -627,7 +627,6 @@ fn parse_codex_usage(usage: &Value) -> Usage {
             .and_then(|d| d.get("cached_tokens"))
             .and_then(|t| t.as_u64())
             .unwrap_or(0) as u32,
-        cost: None,
     }
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use theta_ai::model::{Model, ModelCompat};
-use theta_ai::{Api, Modality, ModelCost, Provider, ThinkingLevel};
+use theta_ai::{Api, Modality, Provider, ThinkingLevel};
 
 fn test_model() -> Model {
     Model {
@@ -16,7 +16,6 @@ fn test_model() -> Model {
             (ThinkingLevel::XHigh, Some("max".into())),
         ]),
         input: vec![Modality::Text],
-        cost: ModelCost::default(),
         context_window: 128_000,
         max_tokens: 16_384,
         compat: ModelCompat::for_openai(),

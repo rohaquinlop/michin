@@ -21,7 +21,7 @@ mod integration {
     use theta_ai::model::Model;
     use theta_ai::providers::OpenAiCompatProvider;
     use theta_ai::types::{
-        Api, ContentBlock, Context, Message, Modality, ModelCost, Provider, StopReason,
+        Api, ContentBlock, Context, Message, Modality, Provider, StopReason,
         StreamOptions, ThinkingLevel,
     };
 
@@ -37,7 +37,6 @@ mod integration {
             reasoning: false,
             thinking_level_map: HashMap::new(),
             input: vec![Modality::Text],
-            cost: ModelCost::default(),
             context_window: 128_000,
             max_tokens: 16_384,
             compat: ModelCompat::for_openai(),
@@ -59,7 +58,6 @@ mod integration {
                 (ThinkingLevel::High, Some("high".into())),
             ]),
             input: vec![Modality::Text],
-            cost: ModelCost::default(),
             context_window: 1_000_000,
             max_tokens: 384_000,
             compat: ModelCompat::for_deepseek(),
