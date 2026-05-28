@@ -414,6 +414,9 @@ or write code — IMPLEMENT. Do not stop at a plan.
   when shell operations are needed.
 - If blocked by missing info/permission, ask one precise question and stop.
 - Report what you changed and validation results after completing tool calls.
+- When constructing file paths for tools, copy the working directory path
+  displayed in Runtime Context exactly. Never retype, guess, or modify it —
+  even a single character typo breaks the path.
 
 ## Resources
 
