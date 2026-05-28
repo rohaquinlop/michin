@@ -683,6 +683,18 @@ impl Chat {
                 self.cached_visible_line_texts.push(text);
             }
         }
+        // If the new message is shorter (fewer lines), remove stale
+        // lines left over from the old message that the overwrite
+        // loop didn't consume.
+        if new_count < len {
+            let overflow = len - new_count;
+            let drain_start = insert_pos + new_count;
+            let drain_end = (drain_start + overflow)
+                .min(self.cached_wrapped_lines.len())
+                .min(self.cached_visible_line_texts.len());
+            self.cached_wrapped_lines.drain(drain_start..drain_end);
+            self.cached_visible_line_texts.drain(drain_start..drain_end);
+        }
         // Update the range for this message
         self.cached_msg_ranges[msg_idx] = (insert_pos, insert_pos + new_count);
         // Shift all subsequent message ranges by the delta

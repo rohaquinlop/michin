@@ -756,6 +756,29 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                     tracing::warn!("event bridge lagged by {n} events; continuing");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(AgentEvent::AgentStart) => {
+                    // Agent lifecycle — informational, no TUI event needed.
+                }
+                Ok(AgentEvent::ToolCallDelta { .. }) => {
+                    // Streaming tool-call args — handled by LLM-side processing.
+                }
+                Ok(AgentEvent::ToolCallEnd { .. }) => {
+                    // Streaming tool-call completion — handled by LLM-side processing.
+                }
+                Ok(AgentEvent::ProviderCircuitOpen { key, retry_in_ms }) => {
+                    let _ = event_tx.send(TuiEvent::Info(format!(
+                        "Provider {key} is temporarily unavailable (retry in {retry_in_ms}ms)"
+                    )));
+                }
+                Ok(AgentEvent::ProviderFallback {
+                    from_model,
+                    to_model,
+                    reason,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::Info(format!(
+                        "Falling back from {from_model} to {to_model}: {reason}"
+                    )));
+                }
                 _ => {}
             }
         }

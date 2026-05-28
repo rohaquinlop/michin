@@ -1555,6 +1555,11 @@ impl App {
                 self.streaming = false;
                 self.tool_exec_phase = false;
                 self.current_tool = None;
+                // Clear tool tracking state to prevent stuck spinners if a
+                // ToolEnd event was dropped (e.g. due to broadcast channel lag).
+                self.tool_started_at.clear();
+                self.tool_display_text.clear();
+                self.tool_last_tick_sec.clear();
                 if aborted {
                     self.status.set_agent_state("Cancelled");
                     self.status.set_detail("execution cancelled");
