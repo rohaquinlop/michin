@@ -521,6 +521,7 @@ fn blocks_to_text(blocks: &[ContentBlock]) -> String {
 }
 
 /// Parse one SSE data line into an AssistantMessageEvent (or None for comments/empty).
+// Used by integration tests in `tests/openai_compat_tests.rs`.
 #[allow(dead_code)]
 pub fn parse_sse_line(line: &str) -> Option<AssistantMessageEvent> {
     // SSE format: "data: <json>\n\n"

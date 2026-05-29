@@ -1,3 +1,5 @@
+#![cfg(debug_assertions)]
+
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 

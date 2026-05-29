@@ -275,7 +275,6 @@ pub struct App {
     pub action_tx: mpsc::UnboundedSender<TuiAction>,
     /// Receive TUI events from the agent.
     pub event_rx: mpsc::UnboundedReceiver<TuiEvent>,
-    #[allow(dead_code)]
     theme: Theme,
     theme_idx: usize,
     streaming: bool,

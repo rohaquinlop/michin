@@ -23,7 +23,6 @@ pub enum BeforeHookResult {
 #[derive(Clone)]
 struct ToolHandler {
     /// Keep the AST alive (closure references it).
-    #[allow(dead_code)]
     ast: AST,
     /// Rhai callback for the hook.
     callable: FnPtr,

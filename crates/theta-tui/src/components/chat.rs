@@ -69,6 +69,7 @@ struct VisibleLine {
 }
 
 impl Chat {
+    #[cfg(debug_assertions)]
     /// Benchmark helper: simulate old no-cache path by formatting and wrapping
     /// the whole transcript every call. Returns wrapped line count.
     pub fn benchmark_full_rebuild_no_cache(&self, inner_width: usize) -> usize {
@@ -79,18 +80,11 @@ impl Chat {
         wrap_styled_lines(&lines, inner_width).len()
     }
 
+    #[cfg(debug_assertions)]
     /// Benchmark helper: rebuild internal cache if needed and return wrapped line count.
     pub fn benchmark_cached_rebuild(&mut self, inner_width: usize) -> usize {
         self.rebuild_render_cache(inner_width);
         self.cached_wrapped_lines.len()
-    }
-
-    pub fn invalidate_render_cache(&mut self) {
-        self.cache_dirty = true;
-    }
-
-    pub fn cache_dirty(&self) -> bool {
-        self.cache_dirty
     }
 
     pub fn clear_messages(&mut self) {
