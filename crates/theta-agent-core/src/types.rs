@@ -179,15 +179,12 @@ pub enum RuntimeProfile {
 pub struct ToolWatchdogConfig {
     /// Warn when a tool has no progress for this many milliseconds.
     pub stall_warning_ms: u64,
-    /// Hard timeout for an individual tool call.
-    pub hard_timeout_ms: u64,
 }
 
 impl Default for ToolWatchdogConfig {
     fn default() -> Self {
         Self {
             stall_warning_ms: 8_000,
-            hard_timeout_ms: 60_000,
         }
     }
 }

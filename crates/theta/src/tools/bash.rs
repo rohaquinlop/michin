@@ -1,7 +1,6 @@
-//! bash tool: executes shell commands with optional timeout.
+//! bash tool: executes shell commands.
 
 use std::process::Stdio;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use theta_agent_core::error::AgentError;
@@ -34,7 +33,7 @@ impl AgentTool for BashTool {
         "Execute a bash command. The working directory is already set — do NOT prefix \
          commands with `cd`. Returns stdout and stderr. Output is truncated to last 2000 \
          lines or 50KB (whichever is hit first). If truncated, full output is saved to a \
-         temp file. Optionally provide a timeout in seconds."
+         temp file."
     }
 
     fn label(&self) -> &str {
@@ -49,10 +48,6 @@ impl AgentTool for BashTool {
                 "command": {
                     "type": "string",
                     "description": "Bash command to execute"
-                },
-                "timeout": {
-                    "type": "number",
-                    "description": "Timeout in seconds (optional, no default timeout)"
                 }
             }
         })
@@ -75,8 +70,6 @@ impl AgentTool for BashTool {
                 tool_name: "bash".into(),
                 message: "missing required 'command' parameter".into(),
             })?;
-        let timeout_secs = args["timeout"].as_f64().map(|t| t as u64);
-
         let raw_command = command.to_string();
 
         // Strip redundant leading `cd <working_dir> &&/;` — the tool already sets cwd.
@@ -105,6 +98,7 @@ impl AgentTool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| AgentError::ToolExecution {
                 tool_name: "bash".into(),
@@ -113,11 +107,11 @@ impl AgentTool for BashTool {
 
         let pid = child.id();
 
-        // Spawn an abort watcher that kills the process by PID if the
-        // cancel token fires. We use PID-based kill because `child` is
-        // moved into `wait_with_output()` and cannot be accessed after.
+        // Spawn an abort watcher that kills the entire process group when the
+        // cancel token fires. process_group(0) above sets the child as its
+        // own process group leader, so -pid targets the whole tree.
         let abort_handle = if let (Some(token), Some(pid)) = (signal.clone(), pid) {
-            let kill_cmd = format!("kill -9 {pid} 2>/dev/null || true");
+            let kill_cmd = format!("kill -9 -{pid} 2>/dev/null || true");
             Some(tokio::spawn(async move {
                 token.cancelled().await;
                 let _ = Command::new("sh").arg("-c").arg(&kill_cmd).output().await;
@@ -126,31 +120,7 @@ impl AgentTool for BashTool {
             None
         };
 
-        let output = if let Some(secs) = timeout_secs {
-            match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    // Kill any remaining abort watcher.
-                    if let Some(handle) = abort_handle {
-                        handle.abort();
-                    }
-                    return Ok(ToolResult {
-                        tool_call_id: tool_call_id.into(),
-                        tool_name: "bash".into(),
-                        content: vec![ContentBlock::Text {
-                            text: format!("command timed out after {secs}s"),
-                        }],
-                        details: Some(serde_json::json!({
-                            "exit_code": null,
-                            "timed_out": true
-                        })),
-                        is_error: true,
-                    });
-                }
-            }
-        } else {
-            child.wait_with_output().await
-        };
+        let output = child.wait_with_output().await;
 
         // Abort watcher is no longer needed (child completed).
         if let Some(handle) = abort_handle {
@@ -186,8 +156,7 @@ impl AgentTool for BashTool {
             tool_name: "bash".into(),
             content: vec![ContentBlock::Text { text: combined }],
             details: Some(serde_json::json!({
-                "exit_code": exit_code,
-                "timed_out": false
+                "exit_code": exit_code
             })),
             is_error: exit_code.is_some_and(|c| c != 0),
         };

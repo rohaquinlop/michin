@@ -285,20 +285,14 @@ async fn run_tool(
         }
     });
 
-    let result = tokio::time::timeout(
-        Duration::from_millis(watchdog.hard_timeout_ms),
-        tool.execute(
+    let result = tool
+        .execute(
             &tool_call.id,
             tool_call.arguments.clone(),
             abort_token,
             Some(on_update),
-        ),
-    )
-    .await
-    .map_err(|_| AgentError::ToolExecution {
-        tool_name: tool_call.name.clone(),
-        message: format!("tool timed out after {}ms", watchdog.hard_timeout_ms),
-    })?;
+        )
+        .await;
     watchdog_finished.store(true, Ordering::Relaxed);
     watchdog_handle.abort();
 

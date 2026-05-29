@@ -6,7 +6,7 @@ use std::sync::Arc;
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
 use theta_ai::ModelCatalog;
-use theta_ai::providers::default_registry;
+use theta_ai_net::default_registry;
 use theta_models::BuiltInCatalog;
 use tokio::sync::broadcast;
 
@@ -500,19 +500,11 @@ fn format_tool_log_summary(result: &theta_agent_core::types::ToolResult) -> Stri
             }
         }
         "bash" => {
-            let timed_out = details
-                .get("timed_out")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if timed_out {
-                "  timeout".to_string()
-            } else {
-                let exit = details
-                    .get("exit_code")
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-                format!("  exit={exit}")
-            }
+            let exit = details
+                .get("exit_code")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            format!("  exit={exit}")
         }
         "write" => {
             let bytes = details

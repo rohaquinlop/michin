@@ -171,60 +171,6 @@ async fn scenario_provider_timeout_or_transient_failure_retries() {
 }
 
 #[tokio::test]
-async fn scenario_tool_timeout_emits_tool_error() {
-    let model = test_model();
-    let provider = MockProvider::new(vec![
-        Ok(vec![
-            AssistantMessageEvent::ToolCallStart {
-                id: "slow_1".into(),
-                name: "slow".into(),
-            },
-            AssistantMessageEvent::tool_call_delta("slow_1", r#"{"command":"sleep"}"#),
-            AssistantMessageEvent::ToolCallEnd {
-                id: "slow_1".into(),
-            },
-            AssistantMessageEvent::Done {
-                stop_reason: StopReason::ToolUse,
-                usage: None,
-            },
-        ]),
-        Ok(vec![
-            AssistantMessageEvent::text_delta("post"),
-            AssistantMessageEvent::Done {
-                stop_reason: StopReason::Stop,
-                usage: None,
-            },
-        ]),
-    ]);
-    let mut agent = Agent::new(model.clone(), make_registry(provider), vec![model.clone()]);
-    agent
-        .add_tool(Arc::new(MatrixTool {
-            name: "slow".into(),
-            sleep_ms: 100,
-        }))
-        .await;
-    let mut cfg = AgentLoopConfig::default();
-    cfg.tool_watchdog.hard_timeout_ms = 10;
-    agent.set_config(cfg);
-
-    agent
-        .prompt(vec![ContentBlock::text("implement something")])
-        .await
-        .expect("turn should continue with tool error result");
-    let state = agent.state().await;
-    assert!(state.messages.iter().any(|m| {
-        matches!(
-            m,
-            Message::ToolResult {
-                tool_name,
-                is_error: true,
-                ..
-            } if tool_name == "slow"
-        )
-    }));
-}
-
-#[tokio::test]
 async fn scenario_repeated_tool_signature_stops_loop() {
     let model = test_model();
     let mut responses = Vec::new();

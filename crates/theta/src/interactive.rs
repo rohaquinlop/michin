@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
-use theta_ai::providers::default_registry;
 use theta_ai::{Model, ModelCatalog, Provider};
+use theta_ai_net::default_registry;
 use theta_models::BuiltInCatalog;
 use theta_models::opencode;
 use theta_models::xiaomi;
@@ -1796,15 +1796,7 @@ pub fn format_tool_summary(
                     .get("exit_code")
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "null".to_string());
-                let timed_out = d
-                    .get("timed_out")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if timed_out {
-                    "bash timeout".to_string()
-                } else {
-                    format!("bash done (exit={exit})")
-                }
+                format!("bash done (exit={exit})")
             } else {
                 "bash done".to_string()
             }
