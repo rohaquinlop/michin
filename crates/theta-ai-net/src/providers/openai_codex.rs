@@ -17,11 +17,11 @@ use std::sync::RwLock;
 
 use serde_json::Value;
 
-use crate::error::ThetaError;
-use crate::event::AssistantMessageEvent;
-use crate::model::Model;
-use crate::provider::{EventStream, Provider};
-use crate::types::{
+use theta_ai::error::ThetaError;
+use theta_ai::event::AssistantMessageEvent;
+use theta_ai::model::Model;
+use theta_ai::provider::{EventStream, Provider};
+use theta_ai::types::{
     ContentBlock, Context, SimpleStreamOptions, StopReason, StreamOptions, ThinkingLevel, Tool,
     Usage,
 };
@@ -73,7 +73,7 @@ impl Provider for OpenAiCodexProvider {
             .ok()
             .and_then(|stored_token| stored_token.clone())
             .ok_or_else(|| ThetaError::MissingApiKey {
-                provider: crate::types::Provider::OpenAiCodex,
+                provider: theta_ai::types::Provider::OpenAiCodex,
             })?;
 
         let http_url = codex_url(&model.base_url);
@@ -391,7 +391,7 @@ fn byte_stream_to_events(
 
 pub fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
     let (sanitized_messages, _stats) =
-        crate::sanitize_messages_for_replay(&context.messages, model);
+        theta_ai::sanitize_messages_for_replay(&context.messages, model);
     let sanitized_context = Context {
         system: context.system.clone(),
         messages: sanitized_messages,
@@ -491,14 +491,14 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
 
     for msg in &context.messages {
         match msg {
-            crate::types::Message::User { content, .. } => {
+            theta_ai::types::Message::User { content, .. } => {
                 let text = blocks_to_text(content);
                 items.push(serde_json::json!({
                     "role": "user",
                     "content": [{ "type": "input_text", "text": text }],
                 }));
             }
-            crate::types::Message::Assistant { content, .. } => {
+            theta_ai::types::Message::Assistant { content, .. } => {
                 for block in content {
                     match block {
                         ContentBlock::Text { text } => {
@@ -539,7 +539,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     }
                 }
             }
-            crate::types::Message::ToolResult {
+            theta_ai::types::Message::ToolResult {
                 tool_call_id,
                 content,
                 ..

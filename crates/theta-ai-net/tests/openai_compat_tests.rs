@@ -1,14 +1,14 @@
 use serde_json::json;
 use theta_ai::event::AssistantMessageEvent;
 use theta_ai::event::EventAccumulator;
-use theta_ai::providers::openai_compat::{
-    self, apply_thinking_params, build_request_body, convert_message, convert_messages,
-    parse_sse_line,
-};
 use theta_ai::replay::sanitize_messages_for_replay;
 use theta_ai::{
     Api, ContentBlock, Context, Message, Modality, Model, ModelCompat, Provider, StopReason,
     ThinkingLevel,
+};
+use theta_ai_net::providers::openai_compat::{
+    self, apply_thinking_params, build_request_body, convert_message, convert_messages,
+    parse_sse_line,
 };
 
 fn openai_model() -> Model {

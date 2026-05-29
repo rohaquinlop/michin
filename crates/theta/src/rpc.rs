@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use theta_agent_core::agent::Agent;
 use theta_agent_core::events::AgentEvent;
 use theta_ai::ModelCatalog;
-use theta_ai::providers::default_registry;
+use theta_ai_net::default_registry;
 use theta_models::BuiltInCatalog;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;

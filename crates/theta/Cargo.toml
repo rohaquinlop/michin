@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 theta-ai = { workspace = true }
+theta-ai-net = { workspace = true }
 theta-agent-core = { workspace = true }
 theta-tui = { workspace = true }
 theta-models = { workspace = true }

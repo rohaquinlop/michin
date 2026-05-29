@@ -4,7 +4,7 @@
 //! with per-model compatibility flags. All three speak OpenAI's
 //! `/v1/chat/completions` API with SSE streaming.
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -13,11 +13,11 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use tracing;
 
-use crate::error::ThetaError;
-use crate::event::AssistantMessageEvent;
-use crate::model::Model;
-use crate::provider::{EventStream, Provider};
-use crate::types::{
+use theta_ai::error::ThetaError;
+use theta_ai::event::AssistantMessageEvent;
+use theta_ai::model::Model;
+use theta_ai::provider::{EventStream, Provider};
+use theta_ai::types::{
     ContentBlock, Context, Message, SimpleStreamOptions, StopReason, StreamOptions, Usage,
 };
 
@@ -26,7 +26,7 @@ pub struct OpenAiCompatProvider {
     client: Client,
     api_key: RwLock<Option<String>>,
     /// User-selected MiMo cluster URL override (from latency test).
-    mimo_base_url: RwLock<Option<String>>,
+    mimo_base_url: Arc<RwLock<Option<String>>>,
 }
 
 impl OpenAiCompatProvider {
@@ -34,7 +34,18 @@ impl OpenAiCompatProvider {
         Self {
             client: Client::new(),
             api_key: RwLock::new(None),
-            mimo_base_url: RwLock::new(None),
+            mimo_base_url: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Return a closure that sets the MiMo URL without borrowing `self`.
+    /// Used by `default_registry()` to register the callback on ProviderRegistry.
+    pub fn mimo_url_sink(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let slot = Arc::clone(&self.mimo_base_url);
+        move |url: &str| {
+            if let Ok(mut u) = slot.write() {
+                *u = Some(url.to_string());
+            }
         }
     }
 }
@@ -68,7 +79,7 @@ impl Provider for OpenAiCompatProvider {
         // Detect base URL from API key prefix for MiMo:
         //   sk-* → pay-as-you-go → model.base_url (api.xiaomimimo.com)
         //   tp-* → token plan    → MIMO_BASE_URL or token-plan-sgp.xiaomimimo.com
-        let base_url = if model.provider == crate::types::Provider::XiaomiMiMo {
+        let base_url = if model.provider == theta_ai::types::Provider::XiaomiMiMo {
             resolve_mimo_base_url(&api_key, &self.mimo_base_url)
         } else {
             model.base_url.to_string()
@@ -178,6 +189,7 @@ impl Provider for OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     /// Set the user-selected MiMo cluster URL (from latency test).
     /// Overrides auto-detection and env vars.
+    /// Set the MiMo cluster base URL.
     pub fn set_mimo_base_url(&self, url: &str) {
         if let Ok(mut u) = self.mimo_base_url.write() {
             *u = Some(url.to_string());
@@ -186,14 +198,14 @@ impl OpenAiCompatProvider {
 }
 
 /// Get the environment variable name for a provider's API key.
-pub fn api_key_env(provider: crate::types::Provider) -> &'static str {
+pub fn api_key_env(provider: theta_ai::types::Provider) -> &'static str {
     match provider {
-        crate::types::Provider::OpenAI => "OPENAI_API_KEY",
-        crate::types::Provider::OpenAiCodex => "OPENAI_CODEX_TOKEN",
-        crate::types::Provider::DeepSeek => "DEEPSEEK_API_KEY",
-        crate::types::Provider::OpenCode => "OPENCODE_API_KEY",
-        crate::types::Provider::OpenCodeGo => "OPENCODE_API_KEY",
-        crate::types::Provider::XiaomiMiMo => "MIMO_API_KEY",
+        theta_ai::types::Provider::OpenAI => "OPENAI_API_KEY",
+        theta_ai::types::Provider::OpenAiCodex => "OPENAI_CODEX_TOKEN",
+        theta_ai::types::Provider::DeepSeek => "DEEPSEEK_API_KEY",
+        theta_ai::types::Provider::OpenCode => "OPENCODE_API_KEY",
+        theta_ai::types::Provider::OpenCodeGo => "OPENCODE_API_KEY",
+        theta_ai::types::Provider::XiaomiMiMo => "MIMO_API_KEY",
     }
 }
 
@@ -320,7 +332,11 @@ pub fn build_request_body(
 }
 
 /// Apply thinking/reasoning parameters based on the model's thinking format.
-pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::types::ThinkingLevel) {
+pub fn apply_thinking_params(
+    body: &mut Value,
+    model: &Model,
+    level: theta_ai::types::ThinkingLevel,
+) {
     // Never send reasoning params to models that don't support reasoning.
     if !model.reasoning {
         return;
@@ -328,23 +344,23 @@ pub fn apply_thinking_params(body: &mut Value, model: &Model, level: crate::type
     let level_str = model.thinking_param(level);
 
     match model.compat.thinking_format {
-        Some(crate::model::ThinkingFormat::DeepSeek) => {
+        Some(theta_ai::model::ThinkingFormat::DeepSeek) => {
             if let Some(s) = level_str {
                 // DeepSeek: thinking { type: "enabled" } block
                 body["thinking"] = json!({
                     "type": "enabled",
                     "reasoning_effort": s,
                 });
-            } else if level == crate::types::ThinkingLevel::Off {
+            } else if level == theta_ai::types::ThinkingLevel::Off {
                 // Explicitly disable thinking
                 body["thinking"] = json!({"type": "disabled"});
             }
             // Unmapped non-Off levels (minimal/low/medium on DeepSeek):
             // do nothing — let model use its default behavior.
         }
-        Some(crate::model::ThinkingFormat::XiaomiMiMo) => {
+        Some(theta_ai::model::ThinkingFormat::XiaomiMiMo) => {
             // MiMo: binary on/off only, no reasoning_effort field.
-            if level == crate::types::ThinkingLevel::Off {
+            if level == theta_ai::types::ThinkingLevel::Off {
                 body["thinking"] = json!({"type": "disabled"});
             } else if level_str.is_some() {
                 body["thinking"] = json!({"type": "enabled"});

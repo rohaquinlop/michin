@@ -1,10 +1,10 @@
 use theta_ai::event::AssistantMessageEvent;
 use theta_ai::event::EventAccumulator;
-use theta_ai::providers::openai_codex::{
+use theta_ai::{Api, ContentBlock, Context, Modality, Model, ModelCompat, Provider, StopReason};
+use theta_ai_net::providers::openai_codex::{
     self, build_request_body, codex_url, codex_ws_url, convert_messages, split_tool_call_id,
     stable_tool_call_id,
 };
-use theta_ai::{Api, ContentBlock, Context, Modality, Model, ModelCompat, Provider, StopReason};
 
 #[test]
 fn test_codex_url_resolution() {

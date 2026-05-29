@@ -1,8 +1,8 @@
 //! Unified multi-provider LLM API for Theta.
 //!
-//! Provides types, traits, and a provider registry for
-//! streaming LLM requests. Supports OpenAI, DeepSeek, and
-//! OpenCode through a single OpenAI-compatible provider.
+//! Provides types, traits, events, and models for
+//! streaming LLM requests. Provider implementations live in
+//! `theta-ai-net` to keep this crate free of heavy networking deps.
 
 pub mod error;
 pub mod event;

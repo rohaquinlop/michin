@@ -7,11 +7,11 @@ use thiserror::Error;
 pub enum ThetaError {
     /// HTTP transport error.
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     /// SSE stream parsing error.
     #[error("Stream error: {0}")]
-    Stream(#[from] eventsource_stream::EventStreamError<reqwest::Error>),
+    Stream(String),
 
     /// JSON deserialization error.
     #[error("JSON error: {0}")]
@@ -61,8 +61,13 @@ impl ThetaError {
     /// Classify provider errors for retry/circuit-breaker handling.
     pub fn class(&self) -> ErrorClass {
         match self {
-            Self::Http(e) => {
-                if e.is_timeout() || e.is_connect() || e.is_request() {
+            Self::Http(msg) => {
+                let lower = msg.to_lowercase();
+                if lower.contains("timeout")
+                    || lower.contains("connect")
+                    || lower.contains("connection")
+                    || lower.contains("dns")
+                {
                     ErrorClass::Transient
                 } else {
                     ErrorClass::Permanent
@@ -90,5 +95,19 @@ impl ThetaError {
             Self::ApiError { retry_after_ms, .. } => *retry_after_ms,
             _ => None,
         }
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl From<reqwest::Error> for ThetaError {
+    fn from(e: reqwest::Error) -> Self {
+        ThetaError::Http(e.to_string())
+    }
+}
+
+#[cfg(feature = "eventsource-stream")]
+impl From<eventsource_stream::EventStreamError<reqwest::Error>> for ThetaError {
+    fn from(e: eventsource_stream::EventStreamError<reqwest::Error>) -> Self {
+        ThetaError::Stream(e.to_string())
     }
 }

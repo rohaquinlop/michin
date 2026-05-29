@@ -19,11 +19,11 @@ mod integration {
     use theta_ai::LlmProvider;
     use theta_ai::event::EventAccumulator;
     use theta_ai::model::Model;
-    use theta_ai::providers::OpenAiCompatProvider;
     use theta_ai::types::{
         Api, ContentBlock, Context, Message, Modality, Provider, StopReason, StreamOptions,
         ThinkingLevel,
     };
+    use theta_ai_net::OpenAiCompatProvider;
 
     /// Helper: create a simple OpenAI model for testing.
     fn test_model_openai() -> Model {

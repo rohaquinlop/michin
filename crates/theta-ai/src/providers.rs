@@ -1,27 +1,27 @@
-//! Provider registry and built-in provider registration.
+//! Provider registry — generic container for LLM providers.
+//!
+//! Concrete provider implementations (OpenAI-compat, Codex) live in
+//! `theta-ai-net`. This module provides the registry that the agent
+//! loop uses to dispatch requests by API type.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use super::error::ThetaError;
 use super::model::Model;
 use super::provider::{EventStream, Provider};
 use super::types::{Api, Context, Provider as ProviderKind, StreamOptions};
 
-pub mod openai_compat;
-pub use openai_compat::OpenAiCompatProvider;
-
-pub mod openai_codex;
-pub use openai_codex::OpenAiCodexProvider;
-
-/// A provider factory function — used for lazy provider creation.
-pub type ProviderFactory = Arc<dyn Fn() -> Box<dyn Provider> + Send + Sync>;
+/// Callback type for provider-specific configuration.
+type ConfigCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Central registry for all LLM providers.
 pub struct ProviderRegistry {
     providers: HashMap<Api, Box<dyn Provider>>,
     /// Per-provider API keys.
     api_keys: RwLock<HashMap<ProviderKind, Option<String>>>,
+    /// Provider-specific callbacks set by theta-ai-net during registry creation.
+    mimo_url_setter: Option<ConfigCallback>,
 }
 
 impl ProviderRegistry {
@@ -30,12 +30,26 @@ impl ProviderRegistry {
         Self {
             providers: HashMap::new(),
             api_keys: RwLock::new(HashMap::new()),
+            mimo_url_setter: None,
         }
     }
 
     /// Register a provider for a specific API.
     pub fn register(&mut self, api: Api, provider: Box<dyn Provider>) {
         self.providers.insert(api, provider);
+    }
+
+    /// Register a callback for setting the MiMo cluster URL.
+    /// Called by theta-ai-net's `default_registry()`.
+    pub fn set_mimo_url_callback(&mut self, cb: impl Fn(&str) + Send + Sync + 'static) {
+        self.mimo_url_setter = Some(Box::new(cb));
+    }
+
+    /// Set the MiMo cluster base URL (from latency test modal).
+    pub fn set_mimo_base_url(&self, url: &str) {
+        if let Some(ref setter) = self.mimo_url_setter {
+            setter(url);
+        }
     }
 
     /// Set an API key for a provider.
@@ -84,11 +98,11 @@ impl ProviderRegistry {
         // the token from env directly. Don't enforce registry-level key check.
         let is_codex = matches!(model.api, Api::OpenAiCodexResponses);
         if !is_codex {
-            let _api_key =
-                self.get_api_key(model.provider)
-                    .ok_or_else(|| ThetaError::MissingApiKey {
-                        provider: model.provider,
-                    })?;
+            let _api_key = self
+                .get_api_key(model.provider)
+                .ok_or(ThetaError::MissingApiKey {
+                    provider: model.provider,
+                })?;
         }
 
         provider.stream(model, context, options).await
@@ -98,40 +112,12 @@ impl ProviderRegistry {
     pub fn get(&self, api: &Api) -> Option<&dyn Provider> {
         self.providers.get(api).map(|p| p.as_ref())
     }
-
-    /// Set the MiMo cluster base URL on the OpenAI-compatible provider.
-    /// Used after the user runs the latency test and selects a cluster.
-    pub fn set_mimo_base_url(&self, url: &str) {
-        if let Some(provider) = self
-            .providers
-            .get(&Api::OpenAiCompletions)
-            .and_then(|p| p.as_any().downcast_ref::<OpenAiCompatProvider>())
-        {
-            provider.set_mimo_base_url(url);
-        }
-    }
 }
 
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Build a default registry with the OpenAI-compatible provider
-/// registered for `OpenAiCompletions` and the Codex provider for
-/// `OpenAiCodexResponses`.
-pub fn default_registry() -> ProviderRegistry {
-    let mut registry = ProviderRegistry::new();
-    registry.register(
-        Api::OpenAiCompletions,
-        Box::new(OpenAiCompatProvider::new()),
-    );
-    registry.register(
-        Api::OpenAiCodexResponses,
-        Box::new(OpenAiCodexProvider::new()),
-    );
-    registry
 }
 
 /// Map a provider kind to the API it uses.

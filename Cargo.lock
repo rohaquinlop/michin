@@ -2070,6 +2070,7 @@ dependencies = [
  "tempfile",
  "theta-agent-core",
  "theta-ai",
+ "theta-ai-net",
  "theta-models",
  "theta-script",
  "theta-tui",
@@ -2103,6 +2104,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "theta-ai-net"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
  "bytes",
  "eventsource-stream",
  "futures",
@@ -2111,6 +2128,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "theta-ai",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
