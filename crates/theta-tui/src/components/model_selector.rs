@@ -97,6 +97,14 @@ impl ModelSelector {
 
     pub fn set_models(&mut self, models: Vec<ModelEntry>) {
         self.all_models = models;
+        // Re-resolve favorites against the new model list — indices from the
+        // old list may be out of bounds if the new list is shorter.
+        let favorites: Vec<String> = self
+            .favorite_indices
+            .iter()
+            .filter_map(|&i| self.all_models.get(i).map(|m| m.id.clone()))
+            .collect();
+        self.favorite_indices = Self::resolve_favorites(&self.all_models, &favorites);
         self.other_indices = (0..self.all_models.len())
             .filter(|i| !self.favorite_indices.contains(i))
             .collect();
