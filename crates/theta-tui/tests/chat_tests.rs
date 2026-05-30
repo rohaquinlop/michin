@@ -254,7 +254,10 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
         is_streaming: false,
     });
     assert_eq!(chat.messages.len(), 1);
-    assert!(!chat.cache_dirty, "cache should be up to date after add_message");
+    assert!(
+        !chat.cache_dirty,
+        "cache should be up to date after add_message"
+    );
 
     // 2. ToolCallPrepared → upsert_tool_message creates streaming tool message
     let idx = chat.upsert_tool_message("read", "read: (preparing...)", true);
@@ -276,7 +279,10 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
     //    This is the exact scenario: replace_msg_in_cache on interior message (idx 1)
     //    with a gap (Tool→Skill) between it and the next message (idx 2).
     let updated_idx = chat.upsert_tool_message("read", "read: SKILL.md (done)", false);
-    assert_eq!(updated_idx, idx, "should update existing tool message, not create new");
+    assert_eq!(
+        updated_idx, idx,
+        "should update existing tool message, not create new"
+    );
     assert_eq!(chat.messages.len(), 3, "should still have 3 messages");
 
     // After fix: cache is dirty (fell back to full rebuild path).
