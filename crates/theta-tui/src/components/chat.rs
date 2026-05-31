@@ -29,6 +29,7 @@ pub struct ChatMessage {
     pub text: String,
     pub tool_call_id: Option<String>,
     pub is_streaming: bool,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,7 +140,13 @@ impl Chat {
     /// Add or update a tool message, keyed by tool_call_id.
     /// If a message with this call_id already exists, update it in-place.
     /// Otherwise push a new message. Returns the message index.
-    pub fn upsert_tool_message(&mut self, call_id: &str, text: &str, is_streaming: bool) -> usize {
+    pub fn upsert_tool_message(
+        &mut self,
+        call_id: &str,
+        text: &str,
+        is_streaming: bool,
+        is_error: bool,
+    ) -> usize {
         if let Some(&idx) = self.active_tool_message_idx.get(call_id)
             && let Some(msg) = self.messages.get_mut(idx)
             && msg.role == ChatRole::Tool
@@ -147,6 +154,7 @@ impl Chat {
         {
             msg.text = text.to_string();
             msg.is_streaming = is_streaming;
+            msg.is_error = is_error;
             self.update_msg_in_cache(idx);
             return idx;
         }
@@ -156,6 +164,7 @@ impl Chat {
             text: text.to_string(),
             tool_call_id: Some(call_id.to_string()),
             is_streaming,
+            is_error,
         });
         if is_streaming {
             self.active_tool_message_idx
@@ -185,13 +194,14 @@ impl Chat {
             text: text.to_string(),
             tool_call_id: None,
             is_streaming,
+            is_error: false,
         });
         // Append to render cache immediately so subsequent
         // TextDelta events hit the fast incremental path.
         self.append_last_to_cache();
     }
 
-    pub fn complete_tool_compact(&mut self, call_id: &str, text: &str) {
+    pub fn complete_tool_compact(&mut self, call_id: &str, text: &str, is_error: bool) {
         if let Some(&idx) = self.active_tool_message_idx.get(call_id)
             && let Some(msg) = self.messages.get_mut(idx)
             && msg.role == ChatRole::Tool
@@ -199,6 +209,7 @@ impl Chat {
         {
             msg.text = text.to_string();
             msg.is_streaming = false;
+            msg.is_error = is_error;
             self.active_tool_message_idx.remove(call_id);
             self.update_msg_in_cache(idx);
             return;
@@ -213,6 +224,7 @@ impl Chat {
         {
             self.messages[idx].text = text.to_string();
             self.messages[idx].is_streaming = false;
+            self.messages[idx].is_error = is_error;
             self.active_tool_message_idx.remove(call_id);
             self.update_msg_in_cache(idx);
             return;
@@ -223,6 +235,7 @@ impl Chat {
             text: text.to_string(),
             tool_call_id: Some(call_id.to_string()),
             is_streaming: false,
+            is_error,
         });
         self.append_last_to_cache();
     }
@@ -266,8 +279,7 @@ impl Chat {
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Thinking => ("[thinking] ", Style::default().fg(self.theme.dim)),
             ChatRole::Tool => {
-                let is_error = msg.text.contains("(failed)");
-                let style = if is_error {
+                let style = if msg.is_error {
                     Style::default().fg(self.theme.error)
                 } else {
                     Style::default().fg(self.theme.warning)

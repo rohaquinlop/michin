@@ -107,6 +107,8 @@ pub enum TuiEvent {
         name: String,
         is_error: bool,
         summary: String,
+        /// Tool execution details (path, changes, diff, etc.).
+        details: Option<serde_json::Value>,
     },
     TurnStart,
     TurnEnd {
@@ -240,6 +242,7 @@ pub struct SettingsPayload {
     pub follow_up_mode: String,
     pub transport_preference: String,
     pub show_thinking: bool,
+    pub show_tool_diffs: bool,
     pub tool_progress_hz: u64,
     pub enter_behavior: String,
     pub max_context_window: Option<u32>,
@@ -323,6 +326,7 @@ pub struct App {
     /// Arrow keys navigate the queue; Enter pops to editor; Delete discards.
     queue_focused: bool,
     show_thinking: bool,
+    show_tool_diffs: bool,
     steering_mode: String,
     follow_up_mode: String,
     tool_progress_hz: u64,
@@ -395,7 +399,7 @@ impl App {
             } else {
                 format!("{display} {spinner} {elapsed}s")
             };
-            self.chat.upsert_tool_message(&call_id, &text, true);
+            self.chat.upsert_tool_message(&call_id, &text, true, false);
             self.tool_last_tick_sec.insert(call_id.clone(), elapsed);
         }
     }
@@ -499,6 +503,7 @@ impl App {
             deferred_flush: false,
             queue_focused: false,
             show_thinking: settings.show_thinking,
+            show_tool_diffs: settings.show_tool_diffs,
             steering_mode: settings.steering_mode,
             follow_up_mode: settings.follow_up_mode,
             tool_progress_hz: settings.tool_progress_hz.max(1),
@@ -812,6 +817,7 @@ impl App {
                                 text: format!("Switching model to {model_id}..."),
                                 tool_call_id: None,
                                 is_streaming: false,
+                                is_error: false,
                             });
                             // For MiMo models without a selected cluster, show
                             // the cluster selector so the user can pick an endpoint.
@@ -879,6 +885,7 @@ impl App {
                                 text: format!("Setting thinking level to {level}..."),
                                 tool_call_id: None,
                                 is_streaming: false,
+                                is_error: false,
                             });
                         }
                         self.thinking_selector.hide();
@@ -1011,6 +1018,7 @@ impl App {
                             text: "Token saved successfully.".into(),
                             tool_call_id: None,
                             is_streaming: false,
+                            is_error: false,
                         });
                     }
                 }
@@ -1108,6 +1116,7 @@ impl App {
             text: format!("Failed to dispatch {kind} update. Please retry."),
             tool_call_id: None,
             is_streaming: false,
+            is_error: false,
         });
         false
     }
@@ -1157,6 +1166,7 @@ impl App {
             text: entry.text.clone(),
             tool_call_id: None,
             is_streaming: false,
+            is_error: false,
         });
         self.status.set_agent_state("streaming");
         self.streaming = true;
@@ -1172,6 +1182,7 @@ impl App {
             text: text.clone(),
             tool_call_id: None,
             is_streaming: false,
+            is_error: false,
         });
         self.status.set_agent_state("streaming");
         self.streaming = true;
@@ -1242,6 +1253,7 @@ impl App {
                         text: "Cancelling current agent execution...".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 } else {
                     // Idle: quit confirmation (Esc twice, or Ctrl+C twice).
@@ -1349,6 +1361,7 @@ impl App {
             text: format!("Theme: {name}"),
             tool_call_id: None,
             is_streaming: false,
+            is_error: false,
         });
     }
 
@@ -1391,6 +1404,7 @@ impl App {
                     text: help_text,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             "keys" | "bindings" => {
@@ -1437,6 +1451,7 @@ impl App {
                     text: keys_text,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             "model" => {
@@ -1460,6 +1475,7 @@ impl App {
                         text: format!("Switching model to {arg}..."),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -1476,6 +1492,7 @@ impl App {
                             text: "Loading thinking levels...".into(),
                             tool_call_id: None,
                             is_streaming: false,
+                            is_error: false,
                         });
                     }
                 } else {
@@ -1495,6 +1512,7 @@ impl App {
                         text: format!("Setting thinking level to {arg}..."),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -1544,6 +1562,7 @@ impl App {
                     text: snapshot,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             "timeline" => {
@@ -1555,6 +1574,7 @@ impl App {
                     text: "Compacting context...".into(),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
                 let _ = self.action_tx.send(TuiAction::CompactContext);
             }
@@ -1582,7 +1602,8 @@ impl App {
                         text: "No skills found in ~/.agents/skills, ~/.theta/skills, ./.agents/skills, or ./.theta/skills".into(),
                         tool_call_id: None,
                         is_streaming: false,
-                    });
+                    is_error: false,
+                });
                 } else {
                     let mut rows = vec!["Available skills:".to_string()];
                     for command_name in &self.skill_commands {
@@ -1601,6 +1622,7 @@ impl App {
                         text: rows.join("\n"),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -1613,6 +1635,7 @@ impl App {
                         text: "Diagnostics stream enabled.".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
                 "off" => {
@@ -1623,6 +1646,7 @@ impl App {
                         text: "Diagnostics stream hidden (critical failures still shown).".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
                 _ => {
@@ -1631,6 +1655,7 @@ impl App {
                         text: "Usage: /diag <on|off>".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             },
@@ -1642,6 +1667,7 @@ impl App {
                         text: "Usage: /tools-rate <1-60>".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                     return;
                 };
@@ -1651,6 +1677,7 @@ impl App {
                         text: "Usage: /tools-rate <1-60>".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                     return;
                 }
@@ -1660,6 +1687,7 @@ impl App {
                     text: format!("Tool progress rate set to {hz} Hz."),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             "fork" => {
@@ -1669,6 +1697,7 @@ impl App {
                     text: "Forking session...".into(),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             "exit" => {
@@ -1685,6 +1714,7 @@ impl App {
                         text: "Cancelling current agent execution...".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 } else {
                     self.chat.add_message(ChatMessage {
@@ -1692,6 +1722,7 @@ impl App {
                         text: "No agent execution to cancel.".into(),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -1717,6 +1748,7 @@ impl App {
                         ),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -1728,6 +1760,7 @@ impl App {
                     ),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
         }
@@ -1769,7 +1802,7 @@ impl App {
                 // tool message immediately so the user sees the transition
                 // from text streaming to tool preparation.
                 self.chat
-                    .upsert_tool_message(&id, &format!("{name} preparing..."), true);
+                    .upsert_tool_message(&id, &format!("{name} preparing..."), true, false);
             }
             TuiEvent::ToolStart { name, id, args, .. } => {
                 self.current_tool = Some(name.clone());
@@ -1784,7 +1817,8 @@ impl App {
                 self.tool_started_at
                     .insert(id.clone(), std::time::Instant::now());
                 self.tool_id_to_name.insert(id.clone(), name.clone());
-                self.chat.upsert_tool_message(&id, &display_text, true);
+                self.chat
+                    .upsert_tool_message(&id, &display_text, true, false);
             }
             TuiEvent::ToolProgress {
                 name: _,
@@ -1793,23 +1827,35 @@ impl App {
                 // Rate-limited progress — do not show tool output in chat.
             }
             TuiEvent::ToolEnd {
-                id, name, is_error, ..
+                id,
+                name,
+                is_error,
+                summary,
+                details,
             } => {
                 if self.current_tool.as_deref() == Some(name.as_str()) {
                     self.current_tool = None;
                 }
-                let display_text = self.tool_display_text.remove(&id).unwrap_or_default();
+                self.tool_display_text.remove(&id);
                 self.tool_started_at.remove(&id);
                 self.tool_last_tick_sec.remove(&id);
                 self.tool_id_to_name.remove(&id);
-                // Build status suffix for the command line.
-                let status = if is_error { " (failed)" } else { " (done)" };
-                let final_text = if display_text.is_empty() {
-                    format!("{name}{status}")
+                let mut final_text = if summary.is_empty() {
+                    name.to_string()
                 } else {
-                    format!("{display_text}{status}")
+                    summary
                 };
-                self.chat.complete_tool_compact(&id, &final_text);
+                // Conditionally append diff when enabled.
+                if self.show_tool_diffs
+                    && name == "edit"
+                    && let Some(ref d) = details
+                    && let Some(diff) = d.get("diff").and_then(|v| v.as_str())
+                    && !diff.is_empty()
+                {
+                    use std::fmt::Write;
+                    let _ = write!(final_text, "\n```diff\n{diff}```");
+                }
+                self.chat.complete_tool_compact(&id, &final_text, is_error);
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
                 }
@@ -1850,6 +1896,7 @@ impl App {
                         ),
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
                 self.status.last_end_reason = stop_reason.clone();
@@ -1901,6 +1948,7 @@ impl App {
                     ),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             TuiEvent::SessionPicker(sessions) => {
@@ -1969,6 +2017,7 @@ impl App {
                         text: msg,
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -2009,6 +2058,7 @@ impl App {
                     text: info,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             TuiEvent::Error(msg) => {
@@ -2024,6 +2074,7 @@ impl App {
                     text: format!("Error: {msg}"),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
                 self.status.set_agent_state("error");
                 self.status.set_detail(&truncate_status_text(&msg, 80));
@@ -2046,6 +2097,7 @@ impl App {
                         text: entry.text,
                         tool_call_id: None,
                         is_streaming: false,
+                        is_error: false,
                     });
                 }
             }
@@ -2123,6 +2175,7 @@ impl App {
                     text: format!("Thinking level set to {level}"),
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             TuiEvent::SkillActivated { name } => {
@@ -2131,6 +2184,7 @@ impl App {
                     text: name,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             TuiEvent::ModelFavoritesUpdated {
@@ -2149,6 +2203,7 @@ impl App {
                     text: msg,
                     tool_call_id: None,
                     is_streaming: false,
+                    is_error: false,
                 });
             }
             TuiEvent::MimoClusterResults {

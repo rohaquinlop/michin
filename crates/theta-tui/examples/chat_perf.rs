@@ -28,6 +28,8 @@ fn main() {
             text: "incremental assistant delta line for cache append benchmark".into(),
             tool_call_id: None,
             is_streaming: false,
+
+            is_error: false,
         });
         let _ = chat.benchmark_cached_rebuild(width);
     });
@@ -59,6 +61,8 @@ fn seed_history(chat: &mut Chat, count: usize) {
             ),
             tool_call_id: None,
             is_streaming: false,
+
+            is_error: false,
         });
     }
 }

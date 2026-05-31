@@ -107,7 +107,9 @@ impl AgentTool for ReadTool {
                     data: base64::engine::general_purpose::STANDARD.encode(&data),
                     media_type: mime.into(),
                 }],
-                details: None,
+                details: Some(serde_json::json!({
+                    "path": file_path.to_string_lossy().to_string(),
+                })),
                 is_error: false,
             });
         }

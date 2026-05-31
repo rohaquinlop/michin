@@ -56,6 +56,10 @@ pub struct ThetaSettings {
     #[serde(default = "default_show_thinking")]
     pub show_thinking: bool,
 
+    /// Show diffs in tool output (edit/read). Default off — diffs are noisy.
+    #[serde(default = "default_show_tool_diffs")]
+    pub show_tool_diffs: bool,
+
     /// Tool progress update frequency in Hz.
     #[serde(default = "default_tool_progress_hz")]
     pub tool_progress_hz: u64,
@@ -100,6 +104,10 @@ fn default_transport_preference() -> String {
 
 const fn default_show_thinking() -> bool {
     true
+}
+
+const fn default_show_tool_diffs() -> bool {
+    false
 }
 
 const fn default_tool_progress_hz() -> u64 {
@@ -215,6 +223,7 @@ impl Default for ThetaSettings {
             follow_up_mode: default_follow_up_mode(),
             transport_preference: default_transport_preference(),
             show_thinking: default_show_thinking(),
+            show_tool_diffs: default_show_tool_diffs(),
             tool_progress_hz: default_tool_progress_hz(),
             enter_behavior: default_enter_behavior(),
             max_context_window: default_max_context_window(),

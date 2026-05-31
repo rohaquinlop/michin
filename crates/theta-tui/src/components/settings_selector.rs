@@ -15,6 +15,7 @@ pub struct SettingsView {
     pub follow_up_mode: String,
     pub transport_preference: String,
     pub show_thinking: bool,
+    pub show_tool_diffs: bool,
     pub max_context_window: Option<u32>,
 }
 
@@ -75,6 +76,13 @@ impl SettingsSelector {
             ]),
             ListItem::new(vec![
                 Line::from(format!(
+                    "showToolDiffs: {}",
+                    if self.view.show_tool_diffs { "on" } else { "off" }
+                )),
+                Line::from("  Show edit diffs in tool output (off by default)"),
+            ]),
+            ListItem::new(vec![
+                Line::from(format!(
                     "maxContextWindow: {}",
                     match self.view.max_context_window {
                         Some(n) => format_number(n),
@@ -109,7 +117,7 @@ impl SettingsSelector {
                 self.state.select(Some(self.selected));
             }
             KeyCode::Down => {
-                self.selected = (self.selected + 1).min(4);
+                self.selected = (self.selected + 1).min(5);
                 self.state.select(Some(self.selected));
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected(),
@@ -142,7 +150,8 @@ impl SettingsSelector {
                 }
             }
             3 => self.view.show_thinking = !self.view.show_thinking,
-            4 => {
+            4 => self.view.show_tool_diffs = !self.view.show_tool_diffs,
+            5 => {
                 self.view.max_context_window = match self.view.max_context_window {
                     None => Some(50_000),
                     Some(50_000) => Some(100_000),

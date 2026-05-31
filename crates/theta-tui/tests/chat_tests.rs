@@ -90,6 +90,8 @@ fn test_skill_invocation_prefix_rendered() {
             text: "/skill:git-commit".into(),
             tool_call_id: None,
             is_streaming: false,
+
+            is_error: false,
         },
         80,
     );
@@ -113,6 +115,8 @@ fn test_user_message_uses_bubble_background() {
             text: "hello".into(),
             tool_call_id: None,
             is_streaming: false,
+
+            is_error: false,
         },
         80,
     );
@@ -133,6 +137,8 @@ fn test_add_message_does_not_force_scroll_to_bottom() {
         text: "new content".into(),
         tool_call_id: None,
         is_streaming: false,
+
+        is_error: false,
     });
     assert_eq!(chat.scroll_top, 5);
     assert!(!chat.auto_follow_tail);
@@ -171,8 +177,10 @@ fn compact_tool_completion_updates_started_row() {
         text: "running".to_string(),
         tool_call_id: Some("call_read1".to_string()),
         is_streaming: true,
+
+        is_error: false,
     });
-    chat.complete_tool_compact("call_read1", "done: src/main.rs");
+    chat.complete_tool_compact("call_read1", "done: src/main.rs", false);
     assert_eq!(chat.messages.len(), 1);
     assert_eq!(chat.messages[0].text, "done: src/main.rs");
     assert!(!chat.messages[0].is_streaming);
@@ -199,6 +207,8 @@ fn perf_large_history_render_cache() {
             text: format!("message {i} {}", "x".repeat(120)),
             tool_call_id: None,
             is_streaming: false,
+
+            is_error: false,
         });
     }
     let start = std::time::Instant::now();
@@ -215,12 +225,16 @@ fn test_clear_messages() {
         text: "hello".into(),
         tool_call_id: None,
         is_streaming: false,
+
+        is_error: false,
     });
     chat.add_message(ChatMessage {
         role: ChatRole::Assistant,
         text: "hi".into(),
         tool_call_id: None,
         is_streaming: false,
+
+        is_error: false,
     });
     assert_eq!(chat.messages.len(), 2);
 
@@ -252,6 +266,8 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
         text: "Let me read the skill file.".to_string(),
         tool_call_id: None,
         is_streaming: false,
+
+        is_error: false,
     });
     assert_eq!(chat.messages.len(), 1);
     assert!(
@@ -260,7 +276,7 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
     );
 
     // 2. ToolCallPrepared → upsert_tool_message creates streaming tool message
-    let idx = chat.upsert_tool_message("call_read1", "read: (preparing...)", true);
+    let idx = chat.upsert_tool_message("call_read1", "read: (preparing...)", true, false);
     assert_eq!(chat.messages.len(), 2);
     assert_eq!(chat.cached_msg_ranges.len(), 2);
 
@@ -270,6 +286,8 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
         text: "git-commit".to_string(),
         tool_call_id: None,
         is_streaming: false,
+
+        is_error: false,
     });
     assert_eq!(chat.messages.len(), 3);
     assert_eq!(chat.cached_msg_ranges.len(), 3);
@@ -278,7 +296,7 @@ fn tool_start_after_skill_message_preserves_skill_in_cache() {
     // 4. ToolStart → upsert_tool_message updates the existing tool message in-place
     //    This is the exact scenario: replace_msg_in_cache on interior message (idx 1)
     //    with a gap (Tool→Skill) between it and the next message (idx 2).
-    let updated_idx = chat.upsert_tool_message("call_read1", "read: SKILL.md (done)", false);
+    let updated_idx = chat.upsert_tool_message("call_read1", "read: SKILL.md (done)", false, false);
     assert_eq!(
         updated_idx, idx,
         "should update existing tool message, not create new"
@@ -307,16 +325,16 @@ fn parallel_same_name_tools_produce_distinct_messages() {
     let mut chat = Chat::new(Theme::default());
 
     // Tool A starts.
-    chat.upsert_tool_message("call_a", "read: file_a.rs", true);
+    chat.upsert_tool_message("call_a", "read: file_a.rs", true, false);
     // Tool B starts (same tool name, different call ID).
-    chat.upsert_tool_message("call_b", "read: file_b.rs", true);
+    chat.upsert_tool_message("call_b", "read: file_b.rs", true, false);
 
     assert_eq!(chat.messages.len(), 2, "two separate tool messages");
     assert!(chat.messages[0].is_streaming);
     assert!(chat.messages[1].is_streaming);
 
     // Tool A completes — should update its own message, not Tool B's.
-    chat.complete_tool_compact("call_a", "read: file_a.rs (done)");
+    chat.complete_tool_compact("call_a", "read: file_a.rs (done)", false);
     assert_eq!(
         chat.messages.len(),
         2,
@@ -327,7 +345,7 @@ fn parallel_same_name_tools_produce_distinct_messages() {
     assert_eq!(chat.messages[0].text, "read: file_a.rs (done)");
 
     // Tool B completes — should find its own message, not push a duplicate.
-    chat.complete_tool_compact("call_b", "read: file_b.rs (done)");
+    chat.complete_tool_compact("call_b", "read: file_b.rs (done)", false);
     assert_eq!(
         chat.messages.len(),
         2,

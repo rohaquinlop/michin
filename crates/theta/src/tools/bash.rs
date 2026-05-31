@@ -33,7 +33,8 @@ impl AgentTool for BashTool {
         "Execute a bash command. The working directory is already set — do NOT prefix \
          commands with `cd`. Returns stdout and stderr. Output is truncated to last 2000 \
          lines or 50KB (whichever is hit first). If truncated, full output is saved to a \
-         temp file."
+         temp file. Do NOT use this for reading, writing, or editing files — use the \
+         `read`, `write`, and `edit` tools for all file operations."
     }
 
     fn label(&self) -> &str {
@@ -156,7 +157,8 @@ impl AgentTool for BashTool {
             tool_name: "bash".into(),
             content: vec![ContentBlock::Text { text: combined }],
             details: Some(serde_json::json!({
-                "exit_code": exit_code
+                "exit_code": exit_code,
+                "command": clean_command
             })),
             is_error: exit_code.is_some_and(|c| c != 0),
         };

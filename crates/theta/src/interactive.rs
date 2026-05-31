@@ -380,6 +380,7 @@ pub async fn run_tui(
             follow_up_mode: persisted.follow_up_mode,
             transport_preference: persisted.transport_preference,
             show_thinking: persisted.show_thinking,
+            show_tool_diffs: persisted.show_tool_diffs,
             tool_progress_hz: persisted.tool_progress_hz,
             enter_behavior: persisted.enter_behavior,
             max_context_window: persisted.max_context_window,
@@ -646,6 +647,7 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         name: result.tool_name,
                         is_error: result.is_error,
                         summary,
+                        details: result.details.clone(),
                     });
                 }
                 Ok(AgentEvent::MessageEnd { message }) => {
@@ -1778,14 +1780,18 @@ pub fn format_tool_summary(
                     .and_then(|v| v.as_str())
                     .unwrap_or("(unknown)");
                 let total_lines = d.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
-                let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
-                let lines_read = d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
-                format!(
-                    "read {path}\nlines {offset}-{end} of {total_lines}",
-                    end = offset.saturating_add(lines_read.saturating_sub(1))
-                )
+                if total_lines == 0 {
+                    format!("read {path}")
+                } else {
+                    let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let lines_read = d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!(
+                        "read {path}  l:{offset}-{end}/{total_lines}",
+                        end = offset.saturating_add(lines_read.saturating_sub(1))
+                    )
+                }
             } else {
-                "read done".to_string()
+                "read".to_string()
             }
         }
         "edit" => {
@@ -1797,12 +1803,13 @@ pub fn format_tool_summary(
                 let changes = d.get("changes").and_then(|v| v.as_u64()).unwrap_or(0);
                 let diff = d.get("diff").and_then(|v| v.as_str()).unwrap_or("");
                 if diff.is_empty() {
-                    format!("edit {path}\n{changes} change(s)")
+                    format!("edit {path}  {changes} change(s)")
                 } else {
-                    format!("edit {path}\n{changes} change(s)\n{diff}")
+                    let (added, removed) = count_diff_lines(diff);
+                    format!("edit {path}  [+{added}/-{removed}]")
                 }
             } else {
-                "edit done".to_string()
+                "edit".to_string()
             }
         }
         "bash" => {
@@ -1811,9 +1818,18 @@ pub fn format_tool_summary(
                     .get("exit_code")
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "null".to_string());
-                format!("bash done (exit={exit})")
+                let base = if let Some(cmd) = d.get("command").and_then(|v| v.as_str()) {
+                    format!("bash: {cmd}")
+                } else {
+                    "bash".to_string()
+                };
+                if result.is_error {
+                    format!("{base} (exit={exit})")
+                } else {
+                    base
+                }
             } else {
-                "bash done".to_string()
+                "bash".to_string()
             }
         }
         "write" => {
@@ -1825,7 +1841,7 @@ pub fn format_tool_summary(
                 let bytes = d.get("bytes_written").and_then(|v| v.as_u64()).unwrap_or(0);
                 format!("write {path}\n{bytes} bytes")
             } else {
-                "write done".to_string()
+                "write".to_string()
             }
         }
         _ => content_blocks_to_text(&result.content, max_chars),
@@ -1844,6 +1860,21 @@ fn content_blocks_to_text(content: &[theta_ai::ContentBlock], max_chars: usize) 
         .collect::<Vec<_>>()
         .join("\n");
     truncate_chars(&text, max_chars)
+}
+
+/// Count added (+) and removed (-) lines in a unified diff.
+/// Excludes the header lines (---, +++, @@).
+fn count_diff_lines(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    (added, removed)
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -1984,10 +2015,92 @@ fn message_to_history_entries(msg: &theta_ai::Message) -> Vec<HistoryEntry> {
             }
             out
         }
-        theta_ai::Message::ToolResult { tool_name, .. } => vec![HistoryEntry {
-            role: "tool".into(),
-            text: format!("[{tool_name}] done"),
-        }],
+        theta_ai::Message::ToolResult {
+            tool_name,
+            details,
+            is_error,
+            ..
+        } => {
+            let status = if *is_error { " (failed)" } else { "" };
+            let summary = match tool_name.as_str() {
+                "read" => {
+                    if let Some(d) = details {
+                        let path = d
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        let total_lines =
+                            d.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if total_lines == 0 {
+                            format!("read {path}{status}")
+                        } else {
+                            let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+                            let lines_read =
+                                d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let end = offset.saturating_add(lines_read.saturating_sub(1));
+                            format!("read {path}  l:{offset}-{end}/{total_lines}{status}")
+                        }
+                    } else {
+                        format!("read{status}")
+                    }
+                }
+                "edit" => {
+                    if let Some(d) = details {
+                        let path = d
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        let changes = d.get("changes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let diff = d.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+                        if diff.is_empty() {
+                            format!("edit {path}  {changes} change(s){status}")
+                        } else {
+                            let (added, removed) = count_diff_lines(diff);
+                            format!("edit {path}  [+{added}/-{removed}]{status}")
+                        }
+                    } else {
+                        format!("edit{status}")
+                    }
+                }
+                "bash" => {
+                    if let Some(d) = details {
+                        let exit = d
+                            .get("exit_code")
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "null".to_string());
+                        let base = if let Some(cmd) = d.get("command").and_then(|v| v.as_str()) {
+                            format!("bash: {cmd}")
+                        } else {
+                            "bash".to_string()
+                        };
+                        if *is_error {
+                            format!("{base} (exit={exit})")
+                        } else {
+                            base
+                        }
+                    } else {
+                        format!("bash{status}")
+                    }
+                }
+                "write" => {
+                    if let Some(d) = details {
+                        let path = d
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(unknown)");
+                        let bytes = d.get("bytes_written").and_then(|v| v.as_u64()).unwrap_or(0);
+                        format!("write {path}\n{bytes} bytes{status}")
+                    } else {
+                        format!("write{status}")
+                    }
+                }
+                _ => format!("{tool_name}{status}"),
+            };
+            vec![HistoryEntry {
+                role: "tool".into(),
+                text: summary,
+            }]
+        }
         _ => Vec::new(),
     }
 }

@@ -20,27 +20,27 @@ fn read_summary_is_compact() {
     };
     let s = format_tool_summary(&result, 200);
     assert!(s.contains("read /tmp/a.rs"));
-    assert!(s.contains("lines 11-30 of 100"));
+    assert!(s.contains("l:11-30/100"));
     assert!(!s.contains("fn "));
 }
 
 #[test]
-fn edit_summary_includes_diff() {
+fn edit_summary_is_compact() {
     let result = ToolResult {
         tool_call_id: "id".into(),
         tool_name: "edit".into(),
         content: vec![],
         details: Some(serde_json::json!({
             "path": "/tmp/a.rs",
-            "changes": 1,
-            "diff": "@@ -1 +1 @@\n-a\n+b"
+            "changes": 3,
+            "diff": "--- a/tmp/a.rs\n+++ b/tmp/a.rs\n@@ -1 +1 @@\n-old\n+new\n+added"
         })),
         is_error: false,
     };
     let s = format_tool_summary(&result, 200);
     assert!(s.contains("edit /tmp/a.rs"));
-    assert!(s.contains("1 change(s)"));
-    assert!(s.contains("@@ -1 +1 @@"));
+    assert!(s.contains("[+2/-1]"));
+    assert!(!s.contains("@@"));
 }
 
 #[test]
