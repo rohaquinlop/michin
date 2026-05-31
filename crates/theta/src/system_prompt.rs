@@ -263,6 +263,9 @@ pub fn build_tools_prompt(working_dir: &Path) -> String {
     p.push_str(
         "You have access to these tools via native function-calling. Invoke tools directly, not by writing XML or pseudo-calls in text.\n\n",
     );
+    p.push_str(
+        "Use `read`, `write`, and `edit` for all file operations. Use `bash` only for shell commands that these tools cannot handle.\n\n",
+    );
 
     for tool in &tools {
         p.push_str(&format!(
@@ -387,6 +390,7 @@ Each reply must be one of:
 
 ## Tool Discipline
 
+- Use `read`, `write`, and `edit` for all file operations. Use `bash` only for shell commands these tools cannot handle.
 - Read files before editing them.
 - When a tool call fails, attempt to fix the issue and retry once before reporting FAILED.
 - Do not repeat identical tool calls in a loop.

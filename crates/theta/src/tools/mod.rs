@@ -99,7 +99,6 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
     result.content = new_content;
 
     if truncated {
-        result.is_error = true;
         result.content.push(ContentBlock::Text {
             text: format!(
                 "\n\n[output truncated: exceeded {} lines or {} bytes]",
