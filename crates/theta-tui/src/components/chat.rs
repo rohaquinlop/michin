@@ -27,7 +27,7 @@ use crate::theme::Theme;
 pub struct ChatMessage {
     pub role: ChatRole,
     pub text: String,
-    pub tool_name: Option<String>,
+    pub tool_call_id: Option<String>,
     pub is_streaming: bool,
 }
 
@@ -122,28 +122,28 @@ impl Chat {
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
-        if let Some(tool_name) = self.messages.last().and_then(|m| {
+        if let Some(call_id) = self.messages.last().and_then(|m| {
             if m.role == ChatRole::Tool && m.is_streaming {
-                m.tool_name.clone()
+                m.tool_call_id.clone()
             } else {
                 None
             }
         }) {
             self.active_tool_message_idx
-                .insert(tool_name, self.messages.len() - 1);
+                .insert(call_id, self.messages.len() - 1);
         }
         // Append to render cache immediately so the cache stays in sync.
         self.append_last_to_cache();
     }
 
-    /// Add or update a "preparing" tool message. If a preparing message for
-    /// this tool already exists (from ToolCallPrepared), update it in-place.
+    /// Add or update a tool message, keyed by tool_call_id.
+    /// If a message with this call_id already exists, update it in-place.
     /// Otherwise push a new message. Returns the message index.
-    pub fn upsert_tool_message(&mut self, name: &str, text: &str, is_streaming: bool) -> usize {
-        if let Some(&idx) = self.active_tool_message_idx.get(name)
+    pub fn upsert_tool_message(&mut self, call_id: &str, text: &str, is_streaming: bool) -> usize {
+        if let Some(&idx) = self.active_tool_message_idx.get(call_id)
             && let Some(msg) = self.messages.get_mut(idx)
             && msg.role == ChatRole::Tool
-            && msg.tool_name.as_deref() == Some(name)
+            && msg.tool_call_id.as_deref() == Some(call_id)
         {
             msg.text = text.to_string();
             msg.is_streaming = is_streaming;
@@ -154,11 +154,12 @@ impl Chat {
         self.messages.push(ChatMessage {
             role: ChatRole::Tool,
             text: text.to_string(),
-            tool_name: Some(name.to_string()),
+            tool_call_id: Some(call_id.to_string()),
             is_streaming,
         });
         if is_streaming {
-            self.active_tool_message_idx.insert(name.to_string(), idx);
+            self.active_tool_message_idx
+                .insert(call_id.to_string(), idx);
         }
         self.append_last_to_cache();
         idx
@@ -182,7 +183,7 @@ impl Chat {
         self.messages.push(ChatMessage {
             role,
             text: text.to_string(),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming,
         });
         // Append to render cache immediately so subsequent
@@ -190,45 +191,29 @@ impl Chat {
         self.append_last_to_cache();
     }
 
-    pub fn update_tool(&mut self, name: &str, text: &str, is_streaming: bool) {
-        if let Some(&idx) = self.active_tool_message_idx.get(name)
+    pub fn complete_tool_compact(&mut self, call_id: &str, text: &str) {
+        if let Some(&idx) = self.active_tool_message_idx.get(call_id)
             && let Some(msg) = self.messages.get_mut(idx)
             && msg.role == ChatRole::Tool
-            && msg.tool_name.as_deref() == Some(name)
-            && msg.is_streaming
+            && msg.tool_call_id.as_deref() == Some(call_id)
         {
-            msg.text.push_str(text);
-            msg.is_streaming = is_streaming;
-            if !is_streaming {
-                self.active_tool_message_idx.remove(name);
-            }
-            // Incremental: re-format this message in-place in the cache.
+            msg.text = text.to_string();
+            msg.is_streaming = false;
+            self.active_tool_message_idx.remove(call_id);
             self.update_msg_in_cache(idx);
             return;
         }
 
-        let idx = self.messages.len();
-        self.messages.push(ChatMessage {
-            role: ChatRole::Tool,
-            text: text.trim_start_matches('\n').to_string(),
-            tool_name: Some(name.to_string()),
-            is_streaming,
-        });
-        if is_streaming {
-            self.active_tool_message_idx.insert(name.to_string(), idx);
-        }
-        self.append_last_to_cache();
-    }
-
-    pub fn complete_tool_compact(&mut self, name: &str, text: &str) {
-        if let Some(&idx) = self.active_tool_message_idx.get(name)
-            && let Some(msg) = self.messages.get_mut(idx)
-            && msg.role == ChatRole::Tool
-            && msg.tool_name.as_deref() == Some(name)
+        // Fallback: search all tool messages by call_id in case the index
+        // entry was lost (e.g. broadcast channel lag dropped ToolCallPrepared).
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == ChatRole::Tool && m.tool_call_id.as_deref() == Some(call_id))
         {
-            msg.text = text.to_string();
-            msg.is_streaming = false;
-            self.active_tool_message_idx.remove(name);
+            self.messages[idx].text = text.to_string();
+            self.messages[idx].is_streaming = false;
+            self.active_tool_message_idx.remove(call_id);
             self.update_msg_in_cache(idx);
             return;
         }
@@ -236,7 +221,7 @@ impl Chat {
         self.messages.push(ChatMessage {
             role: ChatRole::Tool,
             text: text.to_string(),
-            tool_name: Some(name.to_string()),
+            tool_call_id: Some(call_id.to_string()),
             is_streaming: false,
         });
         self.append_last_to_cache();
@@ -248,9 +233,9 @@ impl Chat {
         if let Some(msg) = self.messages.iter_mut().rev().find(|m| m.role == role) {
             msg.is_streaming = false;
             if role == ChatRole::Tool
-                && let Some(name) = msg.tool_name.as_deref()
+                && let Some(call_id) = msg.tool_call_id.as_deref()
             {
-                self.active_tool_message_idx.remove(name);
+                self.active_tool_message_idx.remove(call_id);
             }
             // Find the index for cache update.
             if let Some(idx) = self.messages.iter().rposition(|m| m.role == role) {

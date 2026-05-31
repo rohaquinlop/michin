@@ -296,9 +296,12 @@ pub struct App {
     /// to tool execution phase. ToolStart events after this flag show a visual cue.
     tool_exec_phase: bool,
     current_tool: Option<String>,
+    /// Tool tracking maps keyed by tool_call_id (not tool_name).
     tool_display_text: HashMap<String, String>,
     tool_started_at: HashMap<String, std::time::Instant>,
     tool_last_tick_sec: HashMap<String, u64>,
+    /// Maps tool_call_id → tool_name for display in update_tool_elapsed.
+    tool_id_to_name: HashMap<String, String>,
     tools_in_turn: usize,
     retries_in_turn: u32,
     turn_index: u32,
@@ -358,9 +361,9 @@ impl App {
         if self.tool_started_at.is_empty() {
             return;
         }
-        let names: Vec<String> = self.tool_started_at.keys().cloned().collect();
-        for name in names {
-            let Some(start) = self.tool_started_at.get(&name) else {
+        let ids: Vec<String> = self.tool_started_at.keys().cloned().collect();
+        for call_id in ids {
+            let Some(start) = self.tool_started_at.get(&call_id) else {
                 continue;
             };
             let elapsed = start.elapsed().as_secs();
@@ -369,7 +372,7 @@ impl App {
             }
             let last = self
                 .tool_last_tick_sec
-                .get(&name)
+                .get(&call_id)
                 .copied()
                 .unwrap_or(u64::MAX);
             if elapsed == last {
@@ -377,18 +380,23 @@ impl App {
             }
             let display = self
                 .tool_display_text
-                .get(&name)
+                .get(&call_id)
                 .cloned()
                 .unwrap_or_default();
+            let tool_name = self
+                .tool_id_to_name
+                .get(&call_id)
+                .cloned()
+                .unwrap_or_else(|| call_id.clone());
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let spinner = SPINNER[(elapsed as usize) % 10];
             let text = if display.is_empty() {
-                format!("{name} {spinner} {elapsed}s")
+                format!("{tool_name} {spinner} {elapsed}s")
             } else {
                 format!("{display} {spinner} {elapsed}s")
             };
-            self.chat.upsert_tool_message(&name, &text, true);
-            self.tool_last_tick_sec.insert(name.clone(), elapsed);
+            self.chat.upsert_tool_message(&call_id, &text, true);
+            self.tool_last_tick_sec.insert(call_id.clone(), elapsed);
         }
     }
 
@@ -479,6 +487,7 @@ impl App {
             tool_display_text: HashMap::new(),
             tool_started_at: HashMap::new(),
             tool_last_tick_sec: HashMap::new(),
+            tool_id_to_name: HashMap::new(),
             tools_in_turn: 0,
             retries_in_turn: 0,
             turn_index: 0,
@@ -801,7 +810,7 @@ impl App {
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
                                 text: format!("Switching model to {model_id}..."),
-                                tool_name: None,
+                                tool_call_id: None,
                                 is_streaming: false,
                             });
                             // For MiMo models without a selected cluster, show
@@ -868,7 +877,7 @@ impl App {
                             self.chat.add_message(ChatMessage {
                                 role: ChatRole::System,
                                 text: format!("Setting thinking level to {level}..."),
-                                tool_name: None,
+                                tool_call_id: None,
                                 is_streaming: false,
                             });
                         }
@@ -1000,7 +1009,7 @@ impl App {
                         self.chat.add_message(ChatMessage {
                             role: ChatRole::System,
                             text: "Token saved successfully.".into(),
-                            tool_name: None,
+                            tool_call_id: None,
                             is_streaming: false,
                         });
                     }
@@ -1097,7 +1106,7 @@ impl App {
         self.chat.add_message(ChatMessage {
             role: ChatRole::System,
             text: format!("Failed to dispatch {kind} update. Please retry."),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming: false,
         });
         false
@@ -1146,7 +1155,7 @@ impl App {
         self.chat.add_message(ChatMessage {
             role: ChatRole::User,
             text: entry.text.clone(),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming: false,
         });
         self.status.set_agent_state("streaming");
@@ -1161,7 +1170,7 @@ impl App {
         self.chat.add_message(ChatMessage {
             role: ChatRole::User,
             text: text.clone(),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming: false,
         });
         self.status.set_agent_state("streaming");
@@ -1231,7 +1240,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Cancelling current agent execution...".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 } else {
@@ -1338,7 +1347,7 @@ impl App {
         self.chat.add_message(ChatMessage {
             role: ChatRole::System,
             text: format!("Theme: {name}"),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming: false,
         });
     }
@@ -1380,7 +1389,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: help_text,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1426,7 +1435,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: keys_text,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1449,7 +1458,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: format!("Switching model to {arg}..."),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1465,7 +1474,7 @@ impl App {
                         self.chat.add_message(ChatMessage {
                             role: ChatRole::System,
                             text: "Loading thinking levels...".into(),
-                            tool_name: None,
+                            tool_call_id: None,
                             is_streaming: false,
                         });
                     }
@@ -1484,7 +1493,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: format!("Setting thinking level to {arg}..."),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1533,7 +1542,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: snapshot,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1544,7 +1553,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: "Compacting context...".into(),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
                 let _ = self.action_tx.send(TuiAction::CompactContext);
@@ -1571,7 +1580,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "No skills found in ~/.agents/skills, ~/.theta/skills, ./.agents/skills, or ./.theta/skills".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 } else {
@@ -1590,7 +1599,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: rows.join("\n"),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1602,7 +1611,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Diagnostics stream enabled.".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1612,7 +1621,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Diagnostics stream hidden (critical failures still shown).".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1620,7 +1629,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Usage: /diag <on|off>".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1631,7 +1640,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Usage: /tools-rate <1-60>".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                     return;
@@ -1640,7 +1649,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Usage: /tools-rate <1-60>".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                     return;
@@ -1649,7 +1658,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!("Tool progress rate set to {hz} Hz."),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1658,7 +1667,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: "Forking session...".into(),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1674,14 +1683,14 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "Cancelling current agent execution...".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 } else {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: "No agent execution to cancel.".into(),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1706,7 +1715,7 @@ impl App {
                         text: format!(
                             "Unknown skill: {skill_name}. Type /skills to list available skills."
                         ),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1717,7 +1726,7 @@ impl App {
                     text: format!(
                         "Unknown command: /{command}. Type /help for available commands."
                     ),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1754,15 +1763,15 @@ impl App {
                     self.chat.finish_last(ChatRole::Thinking);
                 }
             }
-            TuiEvent::ToolCallPrepared { name, .. } => {
+            TuiEvent::ToolCallPrepared { name, id } => {
                 // Show a visual cue that a tool call is being prepared
                 // during LLM streaming (before execution). This creates a
                 // tool message immediately so the user sees the transition
                 // from text streaming to tool preparation.
                 self.chat
-                    .upsert_tool_message(&name, &format!("{name} preparing..."), true);
+                    .upsert_tool_message(&id, &format!("{name} preparing..."), true);
             }
-            TuiEvent::ToolStart { name, args, .. } => {
+            TuiEvent::ToolStart { name, id, args, .. } => {
                 self.current_tool = Some(name.clone());
                 self.status.set_agent_state("ToolExec");
                 self.tools_in_turn += 1;
@@ -1771,10 +1780,11 @@ impl App {
                 let display_text =
                     tool_display_text(&name, &args, &self.working_dir.to_string_lossy());
                 self.tool_display_text
-                    .insert(name.clone(), display_text.clone());
+                    .insert(id.clone(), display_text.clone());
                 self.tool_started_at
-                    .insert(name.clone(), std::time::Instant::now());
-                self.chat.upsert_tool_message(&name, &display_text, true);
+                    .insert(id.clone(), std::time::Instant::now());
+                self.tool_id_to_name.insert(id.clone(), name.clone());
+                self.chat.upsert_tool_message(&id, &display_text, true);
             }
             TuiEvent::ToolProgress {
                 name: _,
@@ -1782,13 +1792,16 @@ impl App {
             } => {
                 // Rate-limited progress — do not show tool output in chat.
             }
-            TuiEvent::ToolEnd { name, is_error, .. } => {
+            TuiEvent::ToolEnd {
+                id, name, is_error, ..
+            } => {
                 if self.current_tool.as_deref() == Some(name.as_str()) {
                     self.current_tool = None;
                 }
-                let display_text = self.tool_display_text.remove(&name).unwrap_or_default();
-                self.tool_started_at.remove(&name);
-                self.tool_last_tick_sec.remove(&name);
+                let display_text = self.tool_display_text.remove(&id).unwrap_or_default();
+                self.tool_started_at.remove(&id);
+                self.tool_last_tick_sec.remove(&id);
+                self.tool_id_to_name.remove(&id);
                 // Build status suffix for the command line.
                 let status = if is_error { " (failed)" } else { " (done)" };
                 let final_text = if display_text.is_empty() {
@@ -1796,7 +1809,7 @@ impl App {
                 } else {
                     format!("{display_text}{status}")
                 };
-                self.chat.complete_tool_compact(&name, &final_text);
+                self.chat.complete_tool_compact(&id, &final_text);
                 if is_error {
                     self.status.set_agent_state(&format!("tool error: {name}"));
                 }
@@ -1835,7 +1848,7 @@ impl App {
                             self.retries_in_turn,
                             turn_result
                         ),
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1886,7 +1899,7 @@ impl App {
                     text: format!(
                         "Retrying provider request (attempt {attempt}, waiting {delay_ms}ms)"
                     ),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -1931,6 +1944,7 @@ impl App {
                 self.tool_started_at.clear();
                 self.tool_display_text.clear();
                 self.tool_last_tick_sec.clear();
+                self.tool_id_to_name.clear();
                 if aborted {
                     self.status.set_agent_state("Cancelled");
                     self.status.set_detail("execution cancelled");
@@ -1953,7 +1967,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
                         text: msg,
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -1993,7 +2007,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: info,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -2008,7 +2022,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!("Error: {msg}"),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
                 self.status.set_agent_state("error");
@@ -2030,7 +2044,7 @@ impl App {
                     self.chat.add_message(ChatMessage {
                         role,
                         text: entry.text,
-                        tool_name: None,
+                        tool_call_id: None,
                         is_streaming: false,
                     });
                 }
@@ -2107,7 +2121,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: format!("Thinking level set to {level}"),
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -2115,7 +2129,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::Skill,
                     text: name,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }
@@ -2133,7 +2147,7 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: msg,
-                    tool_name: None,
+                    tool_call_id: None,
                     is_streaming: false,
                 });
             }

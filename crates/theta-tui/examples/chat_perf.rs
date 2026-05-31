@@ -26,7 +26,7 @@ fn main() {
         chat.add_message(ChatMessage {
             role: ChatRole::Assistant,
             text: "incremental assistant delta line for cache append benchmark".into(),
-            tool_name: None,
+            tool_call_id: None,
             is_streaming: false,
         });
         let _ = chat.benchmark_cached_rebuild(width);
@@ -50,11 +50,6 @@ fn seed_history(chat: &mut Chat, count: usize) {
         } else {
             ChatRole::Assistant
         };
-        let tool_name = if role == ChatRole::Tool {
-            Some("read".to_string())
-        } else {
-            None
-        };
         chat.add_message(ChatMessage {
             role,
             text: format!(
@@ -62,7 +57,7 @@ fn seed_history(chat: &mut Chat, count: usize) {
                 "lorem ipsum dolor sit amet".repeat(2),
                 "x".repeat(80)
             ),
-            tool_name,
+            tool_call_id: None,
             is_streaming: false,
         });
     }
