@@ -129,7 +129,8 @@ pub struct AgentLoopConfig {
     /// Hard cap on context window tokens.
     /// `None` means use the model's full context window.
     /// `Some(n)` caps at `min(model.context_window, n)`.
-    /// Defaults to 250,000 — most models perform better below this.
+    /// Defaults to None (model's full context window). Set to e.g.
+    /// `Some(250_000)` to cap — most LLMs perform better below ~250K tokens.
     pub max_context_window: Option<u32>,
 }
 
@@ -159,7 +160,7 @@ impl Default for AgentLoopConfig {
             provider_fallback_chain: Vec::new(),
             provider_circuit_breaker: CircuitBreakerConfig::default(),
             command_policy_strict: true,
-            max_context_window: Some(250_000),
+            max_context_window: None,
         }
     }
 }

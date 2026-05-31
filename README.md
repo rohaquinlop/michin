@@ -162,7 +162,7 @@ Fields currently persisted there:
 - `show_thinking` (bool, default: `true`): show thinking text in UI.
 - `tool_progress_hz` (u64, default: `20`): tool progress update frequency in Hz.
 - `enter_behavior` (string, default: `"send"`): editor Enter behavior (`"send"` or `"newline"`).
-- `max_context_window` (u32 or null, default: `250000`): hard cap on context window tokens. `null` disables the cap, using the model's full context window. Any number is clamped to `min(model.context_window, value)`. Most LLMs perform better below ~250K tokens, and this cap helps prevent hallucinations on long conversations. Change this or set to `null` to rely on the model's native context limit.
+- `max_context_window` (u32 or null, default: `null`): hard cap on context window tokens. `null` disables the cap, using the model's full context window. Any number is clamped to `min(model.context_window, value)`. Most LLMs perform better below ~250K tokens, and this cap helps prevent hallucinations on long conversations. Change this or set to `null` to rely on the model's native context limit.
 
 RPC examples:
 

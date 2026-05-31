@@ -66,7 +66,7 @@ pub struct ThetaSettings {
 
     /// Max context window in tokens. `None` disables the cap
     /// (uses the model's full context window). `Some(n)` caps at n tokens.
-    /// Default is 250,000 — most LLMs perform better below this.
+    /// Default is None — a recommended value is 250_000; most LLMs perform better below this.
     #[serde(default = "default_max_context_window")]
     pub max_context_window: Option<u32>,
 
@@ -111,7 +111,7 @@ fn default_enter_behavior() -> String {
 }
 
 const fn default_max_context_window() -> Option<u32> {
-    Some(250_000)
+    None
 }
 
 impl ThetaSettings {
