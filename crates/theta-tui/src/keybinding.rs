@@ -97,5 +97,10 @@ pub fn default_bindings() -> Vec<Keybinding> {
             action: Action::CycleTheme,
             description: "Cycle theme",
         },
+        Keybinding {
+            key: KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            action: Action::EditQueuedMessage,
+            description: "Focus queued messages (navigate with arrows, Enter to edit)",
+        },
     ]
 }

@@ -296,6 +296,10 @@ pub async fn run_tui(
             description: "Show available commands".into(),
         },
         CommandEntry {
+            name: "keys".into(),
+            description: "Show keyboard shortcuts".into(),
+        },
+        CommandEntry {
             name: "model".into(),
             description: "Pick model from available authenticated models".into(),
         },

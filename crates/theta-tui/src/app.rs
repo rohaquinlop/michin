@@ -253,6 +253,20 @@ enum AppMode {
     TreePicker,
 }
 
+/// A queued steer or follow-up message shown in the floating queue box above
+/// the editor during agent streaming.
+#[derive(Debug, Clone)]
+struct SteerEntry {
+    text: String,
+    kind: SteerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerKind {
+    Steer,
+    FollowUp,
+}
+
 /// The main TUI application.
 pub struct App {
     chat: Chat,
@@ -290,8 +304,21 @@ pub struct App {
     turn_index: u32,
     turn_intent: String,
     diag_enabled: bool,
-    steer_queue_count: usize,
-    follow_up_queue_count: usize,
+    /// Steer/follow-up messages queued during streaming, rendered as a
+    /// floating box above the editor. Flushed into chat on AgentEnd.
+    queued_messages: VecDeque<SteerEntry>,
+    /// Selection index into queued_messages for Ctrl+Up/Ctrl+Down navigation.
+    /// Clamped on access; defaults to last entry when queue is non-empty.
+    queued_selection: usize,
+    /// True while the user has popped a queued message into the editor and is
+    /// editing it. Suppresses queue flush on AgentEnd.
+    editing_queued: bool,
+    /// Set when AgentEnd fires while editing_queued was true. When the user
+    /// finishes editing and re-queues, the queue is flushed immediately.
+    deferred_flush: bool,
+    /// True when the queue box has keyboard focus (Ctrl+U toggles).
+    /// Arrow keys navigate the queue; Enter pops to editor; Delete discards.
+    queue_focused: bool,
     show_thinking: bool,
     steering_mode: String,
     follow_up_mode: String,
@@ -457,8 +484,11 @@ impl App {
             turn_index: 0,
             turn_intent: "chat".to_string(),
             diag_enabled: false,
-            steer_queue_count: 0,
-            follow_up_queue_count: 0,
+            queued_messages: VecDeque::new(),
+            queued_selection: 0,
+            editing_queued: false,
+            deferred_flush: false,
+            queue_focused: false,
             show_thinking: settings.show_thinking,
             steering_mode: settings.steering_mode,
             follow_up_mode: settings.follow_up_mode,
@@ -584,23 +614,108 @@ impl App {
         let max_editor = (area.height / 3).clamp(6, 15);
         let editor_height = self.editor.desired_height(area.width as usize, max_editor);
         let status_height = self.status.desired_height();
-        let main = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(editor_height),
-                Constraint::Length(status_height),
-            ])
-            .split(area);
+
+        // Queued steer/follow-up messages get a floating box between chat and editor.
+        let queue_height = if self.queued_messages.is_empty() {
+            0
+        } else {
+            // 1 row border-top + N entries + 1 row border-bottom.
+            // Cap at 6 entries to avoid stealing too much space from chat.
+            (self.queued_messages.len() as u16 + 2).min(8)
+        };
+
+        let main = if queue_height > 0 {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(queue_height),
+                    Constraint::Length(editor_height),
+                    Constraint::Length(status_height),
+                ])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(editor_height),
+                    Constraint::Length(status_height),
+                ])
+                .split(area)
+        };
 
         self.chat.render(main[0], frame);
-        self.editor.render(main[1], frame);
-        self.status.render(main[2], frame);
+        if queue_height > 0 {
+            self.render_queue_box(main[1], frame);
+            self.editor.render(main[2], frame);
+            self.status.render(main[3], frame);
+        } else {
+            self.editor.render(main[1], frame);
+            self.status.render(main[2], frame);
+        }
 
         // Render autocomplete popup on top (after editor so it overlays).
+        let editor_idx = if queue_height > 0 { 2 } else { 1 };
         if self.editor.autocomplete_active() {
-            self.render_autocomplete(main[1], frame);
+            self.render_autocomplete(main[editor_idx], frame);
         }
+    }
+
+    /// Render the floating queue box above the editor showing queued steer/follow-up messages.
+    fn render_queue_box(&mut self, area: ratatui::layout::Rect, frame: &mut Frame) {
+        self.clamp_queue_selection();
+        let (title, border_style) = if self.queue_focused {
+            (
+                " Queued ◄► (Enter to edit, Del to discard, Esc) ",
+                Style::default().fg(self.theme.accent),
+            )
+        } else if self.editing_queued {
+            (
+                " Queued (editing…) ",
+                Style::default().fg(self.theme.warning),
+            )
+        } else {
+            (
+                " Queued (Ctrl+U to focus) ",
+                Style::default().fg(self.theme.warning),
+            )
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        if inner.height == 0 || self.queued_messages.is_empty() {
+            return;
+        }
+
+        let visible_count = (inner.height as usize).min(self.queued_messages.len());
+        let sel = self.queued_selection;
+        let items: Vec<ListItem> = self
+            .queued_messages
+            .iter()
+            .take(visible_count)
+            .enumerate()
+            .map(|(i, entry)| {
+                let kind_label = match entry.kind {
+                    SteerKind::Steer => "steer",
+                    SteerKind::FollowUp => "follow-up",
+                };
+                let text = format!("{} [{}] {}", i + 1, kind_label, entry.text);
+                let style = if i == sel {
+                    Style::default().fg(self.theme.bg).bg(self.theme.warning)
+                } else {
+                    Style::default().fg(self.theme.warning)
+                };
+                ListItem::new(Line::from(Span::styled(text, style)))
+            })
+            .collect();
+
+        let list = List::new(items);
+        frame.render_widget(list, inner);
     }
 
     fn render_autocomplete(&mut self, editor_area: ratatui::layout::Rect, frame: &mut Frame) {
@@ -895,6 +1010,57 @@ impl App {
             return;
         }
 
+        // ── Queue navigation mode (Ctrl+U toggles) ──
+        if self.queue_focused {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.queue_focused = false;
+                        self.status.set_detail("");
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        if self.queued_selection > 0 {
+                            self.queued_selection -= 1;
+                        } else {
+                            self.queued_selection = self.queued_messages.len() - 1;
+                        }
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        if self.queued_selection + 1 < self.queued_messages.len() {
+                            self.queued_selection += 1;
+                        } else {
+                            self.queued_selection = 0;
+                        }
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        // Pop selected entry to editor.
+                        if let Some(entry) = self.queued_messages.remove(self.queued_selection) {
+                            self.editor.set_text(&entry.text);
+                            self.editing_queued = true;
+                            self.status.set_detail("popped queued message to editor");
+                        }
+                        self.queue_focused = false;
+                        if !self.queued_messages.is_empty() {
+                            self.clamp_queue_selection();
+                        }
+                    }
+                    crossterm::event::KeyCode::Delete | crossterm::event::KeyCode::Backspace => {
+                        // Discard the selected queued message.
+                        self.queued_messages.remove(self.queued_selection);
+                        self.status.set_detail("discarded queued message");
+                        if self.queued_messages.is_empty() {
+                            self.queue_focused = false;
+                            self.status.set_detail("");
+                        } else {
+                            self.clamp_queue_selection();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         if let Some(action) = resolve_event(event, &self.keybindings) {
             self.handle_action(action);
             return;
@@ -953,6 +1119,42 @@ impl App {
         true
     }
 
+    /// Clamp queued_selection to a valid index for the current queue.
+    fn clamp_queue_selection(&mut self) {
+        if self.queued_messages.is_empty() {
+            self.queued_selection = 0;
+        } else if self.queued_selection >= self.queued_messages.len() {
+            self.queued_selection = self.queued_messages.len() - 1;
+        }
+    }
+
+    /// Pop the next queued message from the FIFO queue, add it to chat as a
+    /// User message, and send it to the agent as a new prompt. Returns true
+    /// if a message was processed.
+    fn process_next_queued(&mut self) -> bool {
+        if self.editing_queued {
+            self.deferred_flush = true;
+            return false;
+        }
+        self.deferred_flush = false;
+        let Some(entry) = self.queued_messages.pop_front() else {
+            return false;
+        };
+        if !self.queued_messages.is_empty() {
+            self.clamp_queue_selection();
+        }
+        self.chat.add_message(ChatMessage {
+            role: ChatRole::User,
+            text: entry.text.clone(),
+            tool_name: None,
+            is_streaming: false,
+        });
+        self.status.set_agent_state("streaming");
+        self.streaming = true;
+        let _ = self.message_tx.send(entry.text);
+        true
+    }
+
     fn send_user_message_now(&mut self, text: String) {
         self.quit_confirmation = false;
         self.quit_confirm_at = None;
@@ -986,26 +1188,28 @@ impl App {
                     return;
                 }
                 if self.streaming {
+                    // Queue the message for processing after the current turn
+                    // completes. It does NOT steer the current turn — instead it
+                    // will be sent as a new prompt when AgentEnd fires.
+                    let was_editing = self.editing_queued;
+                    self.editing_queued = false;
                     if self.steering_mode == "follow-up" {
-                        let _ = self.action_tx.send(TuiAction::FollowUp(text.clone()));
-                        self.follow_up_queue_count += 1;
-                        self.chat.add_message(ChatMessage {
-                            role: ChatRole::User,
-                            text: format!("[queued follow-up] {text}"),
-                            tool_name: None,
-                            is_streaming: false,
+                        self.queued_messages.push_back(SteerEntry {
+                            text: text.clone(),
+                            kind: SteerKind::FollowUp,
                         });
-                        self.status.set_detail("queued follow-up");
                     } else {
-                        let _ = self.action_tx.send(TuiAction::Steer(text.clone()));
-                        self.steer_queue_count += 1;
-                        self.chat.add_message(ChatMessage {
-                            role: ChatRole::User,
-                            text: format!("[steer] {text}"),
-                            tool_name: None,
-                            is_streaming: false,
+                        self.queued_messages.push_back(SteerEntry {
+                            text: text.clone(),
+                            kind: SteerKind::Steer,
                         });
-                        self.status.set_detail("queued steer message");
+                    }
+                    self.queued_selection = self.queued_messages.len() - 1;
+                    self.status.set_detail("queued message");
+                    // If AgentEnd fired while we were editing, process the next
+                    // queued message now that the edited text was re-queued.
+                    if was_editing && self.deferred_flush {
+                        self.process_next_queued();
                     }
                 } else {
                     if self.queue_message_while_config_pending(Some(text.clone())) {
@@ -1021,6 +1225,8 @@ impl App {
                 if self.streaming {
                     // Cancel the current agent turn.
                     let _ = self.action_tx.send(TuiAction::AbortAgent);
+                    self.queued_messages.clear();
+                    self.editing_queued = false;
                     self.status.set_detail("cancelling...");
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
@@ -1050,12 +1256,46 @@ impl App {
                 self.model_selector.show();
             }
             Action::FollowUpMessage(text) => {
-                if self.follow_up_mode == "steer" {
+                if self.streaming {
+                    let was_editing = self.editing_queued;
+                    self.editing_queued = false;
+                    if self.follow_up_mode == "steer" {
+                        self.queued_messages.push_back(SteerEntry {
+                            text: text.clone(),
+                            kind: SteerKind::Steer,
+                        });
+                    } else {
+                        self.queued_messages.push_back(SteerEntry {
+                            text: text.clone(),
+                            kind: SteerKind::FollowUp,
+                        });
+                    }
+                    self.queued_selection = self.queued_messages.len() - 1;
+                    self.status.set_detail("queued message");
+                    if was_editing && self.deferred_flush {
+                        self.process_next_queued();
+                    }
+                } else if self.follow_up_mode == "steer" {
                     let _ = self.action_tx.send(TuiAction::Steer(text));
-                    self.steer_queue_count += 1;
                 } else {
                     let _ = self.action_tx.send(TuiAction::FollowUp(text));
-                    self.follow_up_queue_count += 1;
+                }
+            }
+            Action::EditQueuedMessage => {
+                // Toggle queue focus mode. When focused, arrow keys navigate
+                // the queue, Enter pops the selected entry to the editor,
+                // and Delete/Backspace discards the selected entry.
+                if self.queued_messages.is_empty() {
+                    return;
+                }
+                self.queue_focused = !self.queue_focused;
+                if self.queue_focused {
+                    self.clamp_queue_selection();
+                    self.queued_selection = self.queued_messages.len() - 1;
+                    self.status
+                        .set_detail("queue: arrows navigate, Enter to edit, Del to discard");
+                } else {
+                    self.status.set_detail("");
                 }
             }
             Action::CycleTheme => {
@@ -1132,6 +1372,7 @@ impl App {
                     "  /tools-rate <hz> Set tool progress update rate (1-60)",
                     "  /skill:<name>   Invoke a skill",
                     "  /cancel         Cancel current agent execution",
+                    "  /keys           Show keyboard shortcuts",
                     "  /exit           Exit Theta",
                     "  /help           Show this help",
                 ]
@@ -1139,6 +1380,52 @@ impl App {
                 self.chat.add_message(ChatMessage {
                     role: ChatRole::System,
                     text: help_text,
+                    tool_name: None,
+                    is_streaming: false,
+                });
+            }
+            "keys" | "bindings" => {
+                let keys_text = [
+                    "Global shortcuts:",
+                    "  Ctrl+P         Open model picker",
+                    "  Ctrl+T         Cycle theme (default / monokai)",
+                    "  Ctrl+C         Cancel agent execution / quit confirm (press twice)",
+                    "  Esc            Same as Ctrl+C",
+                    "  Ctrl+U         Focus queued messages (arrows, Enter, Del)",
+                    "  Tab            Switch focus between editor and chat",
+                    "",
+                    "Editor:",
+                    "  Enter          Send message",
+                    "  Alt+Enter      Queue follow-up (or insert newline in newline mode)",
+                    "  Ctrl+Enter     Send as follow-up message",
+                    "  Shift+Enter    Insert newline",
+                    "  Ctrl+J         Insert newline",
+                    "  Up/Down        Move cursor (history at first/last line)",
+                    "  Alt+Up/Down    Browse send history",
+                    "  Left/Right     Move cursor one char",
+                    "  Alt+Left/Right Move cursor one word",
+                    "  Super+Left     Jump to start of text",
+                    "  Super+Right    Jump to end of text",
+                    "  Super+Up       Jump to start of text",
+                    "  Super+Down     Jump to end of text",
+                    "  Home/End       Jump to start/end of visual line",
+                    "  PageUp/Down    Move cursor one page (history at boundary)",
+                    "  Tab            Insert 2 spaces",
+                    "  Backspace/Del  Delete character",
+                    "  @              Trigger file autocomplete (fuzzy)",
+                    "  /              Trigger command autocomplete",
+                    "",
+                    "Overlays (model picker, tree, etc.):",
+                    "  Up/Down        Navigate list",
+                    "  Enter          Select",
+                    "  Esc            Close",
+                    "  Backspace      Pop query char (model picker)",
+                    "  Ctrl+F         Toggle favorite (model picker)",
+                ]
+                .join("\n");
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: keys_text,
                     tool_name: None,
                     is_streaming: false,
                 });
@@ -1215,6 +1502,16 @@ impl App {
                     self.status.detail.clone()
                 };
                 let current_tool = self.current_tool.as_deref().unwrap_or("(none)");
+                let steer_count = self
+                    .queued_messages
+                    .iter()
+                    .filter(|e| e.kind == SteerKind::Steer)
+                    .count();
+                let follow_up_count = self
+                    .queued_messages
+                    .iter()
+                    .filter(|e| e.kind == SteerKind::FollowUp)
+                    .count();
                 let snapshot = format!(
                     "Runtime status:\nState: {}\nDetail: {}\nTurn: {}\nStreaming: {}\nCurrent tool: {}\nTools in turn: {}\nRetries in turn: {}\nSteer queue: {}\nFollow-up queue: {}\nLast turn decision: {}\nLast end reason: {}",
                     self.status.agent_state,
@@ -1224,8 +1521,8 @@ impl App {
                     current_tool,
                     self.tools_in_turn,
                     self.retries_in_turn,
-                    self.steer_queue_count,
-                    self.follow_up_queue_count,
+                    steer_count,
+                    follow_up_count,
                     if self.status.last_turn_decision.is_empty() {
                         "(none)".to_string()
                     } else {
@@ -1371,6 +1668,8 @@ impl App {
             "cancel" => {
                 if self.streaming {
                     let _ = self.action_tx.send(TuiAction::AbortAgent);
+                    self.queued_messages.clear();
+                    self.editing_queued = false;
                     self.status.set_detail("cancelling...");
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
@@ -1611,6 +1910,15 @@ impl App {
                         msg.is_streaming = false;
                     }
                 }
+                // Flush queued steer/follow-up messages into chat now that
+                // the model has finished. They appear after the assistant
+                // response, where they logically belong.
+                if !aborted {
+                    self.process_next_queued();
+                } else {
+                    self.queued_messages.clear();
+                    self.editing_queued = false;
+                }
                 // Don't invalidate render cache! The incremental cache is
                 // already up-to-date after processing all tool events. Invalidating
                 // here forces a full rebuild on the next render, wasting the
@@ -1746,9 +2054,10 @@ impl App {
                     self.flush_queued_message_if_ready();
                 }
             }
-            TuiEvent::QueueStatus { steer, follow_up } => {
-                self.steer_queue_count = steer;
-                self.follow_up_queue_count = follow_up;
+            TuiEvent::QueueStatus { .. } => {
+                // TUI queue is now independent of the agent's steer/follow-up
+                // queue. Messages queued during streaming are processed locally
+                // as new prompts via process_next_queued on AgentEnd.
             }
             TuiEvent::TreeSessions { sessions, filter } => {
                 self.tree_selector

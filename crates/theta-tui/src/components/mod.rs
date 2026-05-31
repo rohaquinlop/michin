@@ -50,6 +50,8 @@ pub enum Action {
     ShowTree,
     CopySelection(String),
     OpenUrl(String),
+    /// Focus the floating queue box for navigation (Ctrl+U toggles).
+    EditQueuedMessage,
     None,
 }
 
