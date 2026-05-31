@@ -124,7 +124,10 @@ impl ThetaSettings {
     /// Returns `None` if there is no last session or no entry in the map.
     pub fn last_thinking(&self) -> Option<&str> {
         let session = self.last_session.as_ref()?;
-        self.thinking_for_model(&session.provider, &session.model)
+        self.model_thinking_map
+            .get(&session.provider)
+            .and_then(|map| map.get(&session.model))
+            .map(|s| s.as_str())
     }
 
     /// Get the thinking level for a specific provider+model, falling back to
