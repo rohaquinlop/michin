@@ -487,7 +487,7 @@ fn parse_thinking_level(level: &str) -> theta_ai::ThinkingLevel {
         "low" => theta_ai::ThinkingLevel::Low,
         "medium" => theta_ai::ThinkingLevel::Medium,
         "high" => theta_ai::ThinkingLevel::High,
-        "xhigh" => theta_ai::ThinkingLevel::XHigh,
+        "xhigh" | "max" => theta_ai::ThinkingLevel::XHigh,
         _ => theta_ai::ThinkingLevel::Off,
     }
 }
@@ -1157,8 +1157,7 @@ async fn handle_tui_action(
                 "low" => theta_ai::ThinkingLevel::Low,
                 "medium" => theta_ai::ThinkingLevel::Medium,
                 "high" => theta_ai::ThinkingLevel::High,
-                "xhigh" => theta_ai::ThinkingLevel::XHigh,
-                "max" => theta_ai::ThinkingLevel::Max,
+                "xhigh" | "max" => theta_ai::ThinkingLevel::XHigh,
                 _ => {
                     let _ = event_tx.send(TuiEvent::Error(format!(
                         "Invalid thinking level: {level}. Use off/enabled/minimal/low/medium/high/xhigh"
@@ -1169,18 +1168,20 @@ async fn handle_tui_action(
             };
             agent.set_thinking_level(tl).await;
             // Persist thinking preference to the per-model map.
+            // Store the canonical enum string so parse_thinking_level
+            // can roundtrip correctly on restart.
+            let canonical = thinking_level_to_string(tl);
             let mut s = crate::settings::load_settings().await;
-            // Read current model ID from agent state.
             {
                 let state = agent.state().await;
                 s.set_model_thinking(
                     &provider_to_string(state.model.provider),
                     &state.model.id,
-                    &normalized,
+                    &canonical,
                 );
             }
             crate::settings::save_settings(&s).await.ok();
-            let _ = event_tx.send(TuiEvent::ThinkingSet { level: normalized });
+            let _ = event_tx.send(TuiEvent::ThinkingSet { level: canonical });
             acknowledge(event_tx);
         }
         TuiAction::ShowThinkingSelector => {
