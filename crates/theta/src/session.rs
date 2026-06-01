@@ -390,7 +390,7 @@ impl SessionManager {
         session: &mut Session,
         state_messages: &[Message],
     ) -> SessionResult<usize> {
-        let mut persisted: HashSet<String> = session
+        let mut persisted: HashSet<(u64, u8, u64)> = session
             .messages
             .iter()
             .map(message_fingerprint)
@@ -478,9 +478,98 @@ impl SessionManager {
     }
 }
 
-pub fn message_fingerprint(message: &Message) -> String {
-    serde_json::to_string(message)
-        .unwrap_or_else(|e| format!("__fingerprint_error:{}:{}", message_timestamp(message), e))
+pub fn message_fingerprint(message: &Message) -> (u64, u8, u64) {
+    let tag: u8 = match message {
+        Message::User { .. } => 1,
+        Message::Assistant { .. } => 2,
+        Message::ToolResult { .. } => 3,
+        Message::ModelChange { .. } => 4,
+        Message::ThinkingLevelChange { .. } => 5,
+    };
+    let content_hash = hash_message_content(message);
+    (message_timestamp(message), tag, content_hash)
+}
+
+fn hash_message_content(message: &Message) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Hash key semantically-distinguishing fields only, avoiding full
+    // serde_json serialization of the message (which includes timestamps,
+    // usage, stop_reason, etc. that don't affect content identity).
+    match message {
+        Message::User { content, .. } => {
+            for block in content {
+                hash_content_block(block, &mut h);
+            }
+        }
+        Message::Assistant { content, .. } => {
+            for block in content {
+                hash_content_block(block, &mut h);
+            }
+        }
+        Message::ToolResult {
+            tool_call_id,
+            content,
+            ..
+        } => {
+            tool_call_id.hash(&mut h);
+            for block in content {
+                hash_content_block(block, &mut h);
+            }
+        }
+        Message::ModelChange {
+            model_id, provider, ..
+        } => {
+            model_id.hash(&mut h);
+            provider.hash(&mut h);
+        }
+        Message::ThinkingLevelChange { .. } => {
+            // No semantically distinguishing fields; rely on timestamp+tag
+            // alone. If you have two consecutive thinking-level changes at
+            // the same ms, the second is a duplicate by definition.
+        }
+    }
+    h.finish()
+}
+
+/// Hash the semantically-distinguishing fields of a ContentBlock.
+/// More efficient than full serde serialization.
+fn hash_content_block(block: &ContentBlock, h: &mut std::collections::hash_map::DefaultHasher) {
+    use std::hash::Hash;
+    match block {
+        ContentBlock::Text { text } => {
+            text.hash(h);
+        }
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+        } => {
+            id.hash(h);
+            name.hash(h);
+            // serde_json::Value doesn't impl Hash — hash its string form.
+            arguments.to_string().hash(h);
+        }
+        ContentBlock::Image { media_type, data } => {
+            media_type.hash(h);
+            data.hash(h);
+        }
+        ContentBlock::Thinking { thinking, .. } => {
+            thinking.hash(h);
+        }
+        ContentBlock::ToolResult {
+            tool_call_id,
+            tool_name,
+            content,
+            ..
+        } => {
+            tool_call_id.hash(h);
+            tool_name.hash(h);
+            for block in content {
+                hash_content_block(block, h);
+            }
+        }
+    }
 }
 
 fn message_timestamp(message: &Message) -> u64 {
