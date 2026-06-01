@@ -36,17 +36,27 @@ pub struct CommandSegment {
 pub fn evaluate_tool_call(tc: &ToolCall, strict: bool) -> SafetyDecision {
     match tc.name.as_str() {
         "bash" => evaluate_bash(tc, strict),
-        _ => SafetyDecision {
-            decision: SafetyDecisionKind::Allowed,
-            details: format!("tool '{}' allowed", tc.name),
-        },
+        _ => {
+            // In strict mode, reject write/edit and other mutation tools.
+            if strict && let Some(class) = required_user_authorization(tc) {
+                SafetyDecision {
+                    decision: SafetyDecisionKind::Rejected,
+                    details: format!(
+                        "tool '{}' rejected in strict mode ({:?} operation requires user authorization)",
+                        tc.name, class
+                    ),
+                }
+            } else {
+                SafetyDecision {
+                    decision: SafetyDecisionKind::Allowed,
+                    details: format!("tool '{}' allowed", tc.name),
+                }
+            }
+        }
     }
 }
 
 /// Classifies a tool call for user-facing authorization prompts.
-///
-/// Wired into the tool execution path by issue 1.3 (not yet implemented).
-#[allow(dead_code)]
 pub fn required_user_authorization(tc: &ToolCall) -> Option<AuthorizationClass> {
     match tc.name.as_str() {
         "write" | "edit" => Some(AuthorizationClass::FileMutation),
