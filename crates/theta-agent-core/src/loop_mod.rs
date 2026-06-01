@@ -364,7 +364,7 @@ async fn run_single_turn(
         )
         .await
         {
-            Ok((assistant_msg, stop_reason, unresolved_tool_calls)) => {
+            Ok((assistant_msg, stop_reason, unresolved_count, unresolved_calls)) => {
                 state.is_streaming = false;
 
                 let assistant_has_text = match &assistant_msg {
@@ -418,19 +418,19 @@ async fn run_single_turn(
                 empty_assistant_retries = 0;
 
                 // Unresolved tool-call state: replay request.
-                let unresolved_tool_use = unresolved_tool_calls > 0
+                let unresolved_tool_use = unresolved_count > 0
                     && !has_tool_calls
                     && stop_reason == Some(StopReason::ToolUse);
                 if unresolved_tool_use {
                     if assistant_has_text {
                         tracing::warn!(
-                            unresolved_tool_calls,
+                            unresolved_count,
                             "ignoring unresolved tool-call state because assistant returned text"
                         );
                     } else {
                         let _ = event_tx.send(AgentEvent::Error {
                             message: format!(
-                                "tool-call parsing incomplete: {unresolved_tool_calls} unresolved tool call(s)"
+                                "tool-call parsing incomplete: {unresolved_count} unresolved tool call(s)"
                             ),
                         });
                         state.messages.push(Message::User {
@@ -573,6 +573,30 @@ async fn run_single_turn(
                     ],
                 );
 
+                // If some tool calls completed but others were cut off mid-stream,
+                // synthesize error results so the model sees the failures and can retry.
+                if !unresolved_calls.is_empty() && has_tool_calls {
+                    let now = now_ms();
+                    for uc in &unresolved_calls {
+                        state.messages.push(Message::ToolResult {
+                            tool_call_id: uc.id.clone(),
+                            tool_name: uc.name.clone(),
+                            content: vec![ContentBlock::text(
+                                "Tool call incomplete — stream was cut off before full arguments were received. Re-emit this tool call.",
+                            )],
+                            is_error: true,
+                            details: None,
+                            timestamp: now,
+                        });
+                    }
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: format!(
+                            "{} tool call(s) incomplete; injected error results",
+                            unresolved_calls.len()
+                        ),
+                    });
+                }
+
                 tool_round += 1;
             }
             Err(AgentError::Aborted) => {
@@ -656,7 +680,7 @@ async fn run_llm_stream(
     abort_token: Option<CancellationToken>,
     steering_abort: Arc<AtomicBool>,
     emit_events: bool,
-) -> Result<(Message, Option<StopReason>, usize), AgentError> {
+) -> Result<(Message, Option<StopReason>, usize, Vec<theta_ai::UnresolvedToolCall>), AgentError> {
     let retry = &config.retry;
     let fallback_models = resolve_fallback_models(state, config);
     let mut stream = None;
@@ -793,6 +817,7 @@ async fn run_llm_stream(
     }
 
     // Build the assistant message from accumulated events.
+    let unresolved = accumulator.unresolved_tool_calls();
     let assistant_msg = Message::Assistant {
         content: accumulator.content_blocks(),
         api: Some(selected_model.api),
@@ -808,6 +833,7 @@ async fn run_llm_stream(
         assistant_msg,
         accumulator.stop_reason(),
         accumulator.unresolved_tool_call_count(),
+        unresolved,
     ))
 }
 
@@ -997,7 +1023,7 @@ async fn summarize_compacted_messages(
         ..Default::default()
     };
 
-    let (message, _, _) = run_llm_stream(
+    let (message, _, _, _) = run_llm_stream(
         state,
         provider,
         &context,

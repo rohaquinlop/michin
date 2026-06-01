@@ -102,6 +102,13 @@ struct ToolCallAccumulator {
     done: bool,
 }
 
+/// A tool call that was started but never completed (stream cut off mid-arguments).
+#[derive(Debug, Clone)]
+pub struct UnresolvedToolCall {
+    pub id: String,
+    pub name: String,
+}
+
 fn tool_call_id_matches(existing_id: &str, event_id: &str) -> bool {
     if existing_id == event_id {
         return true;
@@ -238,6 +245,19 @@ impl EventAccumulator {
 
     pub fn unresolved_tool_call_count(&self) -> usize {
         self.tool_calls.iter().filter(|tc| !tc.done).count()
+    }
+
+    /// Returns the unresolved tool calls (started but never completed).
+    /// Call before `content_blocks()` — that method drains the buffer.
+    pub fn unresolved_tool_calls(&self) -> Vec<UnresolvedToolCall> {
+        self.tool_calls
+            .iter()
+            .filter(|tc| !tc.done)
+            .map(|tc| UnresolvedToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+            })
+            .collect()
     }
 
     /// Reset for the next stream.
