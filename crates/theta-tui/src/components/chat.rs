@@ -980,7 +980,9 @@ fn split_edit_tool_text(text: &str) -> Option<EditToolParts<'_>> {
     let added_num = &after_bracket[..slash];
     let removed_num = &after_bracket[dash_pos + 1..after_bracket.len() - 1];
     // Validate both are digits
-    if !added_num.chars().all(|c| c.is_ascii_digit()) || !removed_num.chars().all(|c| c.is_ascii_digit()) {
+    if !added_num.chars().all(|c| c.is_ascii_digit())
+        || !removed_num.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     // Include the +/- signs in the colored portions.
