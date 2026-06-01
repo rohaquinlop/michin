@@ -151,7 +151,7 @@ fn test_markdown_golden_nested_lists_and_links() {
     let md = "# Title\n- parent\n  - child with [link](https://example.com)\n> quote";
     let lines = format_markdown(md, style, &theme, "", 80);
     let got = normalized_rendered_text(&lines);
-    let expected = "Title\n• parent\n  • child with link (https://example.com)\nquote";
+    let expected = "Title\n\n• parent\n  • child with link (https://example.com)\n\nquote";
     assert_eq!(got, expected);
 }
 
@@ -162,7 +162,12 @@ fn test_markdown_golden_table_wraps_inside_width() {
     let md = "| Name | Description |\n| --- | --- |\n| A | verylongtoken_without_spaces_that_must_wrap |\n| B | short |";
     let lines = format_markdown(md, style, &theme, "", 34);
     let got = normalized_rendered_text(&lines);
+    // Header row and separator now appear before data rows
+    // because pulldown-cmark 0.13 TableHead cells are correctly pushed.
     let expected = "\
+| Nam | Description              |
+| e   |                          |
+|-----|--------------------------|
 | A   | verylongtoken_without_sp |
 |     | aces_that_must_wrap      |
 | B   | short                    |";

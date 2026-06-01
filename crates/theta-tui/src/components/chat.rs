@@ -1126,8 +1126,9 @@ pub fn format_markdown(
     let mut block_stack: Vec<BlockState> = Vec::new();
     let mut in_item = false;
     let mut current_item_continuation_prefix = String::new();
-    let mut code_block_lang: Option<String> = None;
+    let mut item_content_first = false;
     let mut in_code_block = false;
+    let mut code_highlighter: Option<HighlightLines> = None;
     let mut link_targets: Vec<String> = Vec::new();
     let mut pending_task_marker: Option<bool> = None;
     let mut in_table = false;
@@ -1148,6 +1149,7 @@ pub fn format_markdown(
             MdEvent::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
                     flush_line(&mut out, &mut line);
+                    ensure_block_spacing(&mut out);
                     let heading_style = match level as u8 {
                         1 => Style::default()
                             .fg(theme.md_heading_1)
@@ -1193,11 +1195,25 @@ pub fn format_markdown(
                     );
                     link_targets.push(dest_url.to_string());
                 }
-                Tag::BlockQuote(_) => block_stack.push(BlockState::Quote),
-                Tag::List(start) => block_stack.push(BlockState::List {
-                    ordered: start.is_some(),
-                    next: start.unwrap_or(1),
-                }),
+                Tag::BlockQuote(_) => {
+                    flush_line(&mut out, &mut line);
+                    ensure_block_spacing(&mut out);
+                    block_stack.push(BlockState::Quote);
+                }
+                Tag::List(start) => {
+                    flush_line(&mut out, &mut line);
+                    // Only add spacing for top-level lists, not nested ones.
+                    if !block_stack
+                        .iter()
+                        .any(|b| matches!(b, BlockState::List { .. }))
+                    {
+                        ensure_block_spacing(&mut out);
+                    }
+                    block_stack.push(BlockState::List {
+                        ordered: start.is_some(),
+                        next: start.unwrap_or(1),
+                    });
+                }
                 Tag::Item => {
                     flush_line(&mut out, &mut line);
                     let indent = list_indent(&block_stack);
@@ -1218,20 +1234,35 @@ pub fn format_markdown(
                             .push_str(&" ".repeat(marker.chars().count()));
                     }
                     in_item = true;
+                    item_content_first = false;
                 }
                 Tag::CodeBlock(kind) => {
                     flush_line(&mut out, &mut line);
+                    ensure_block_spacing(&mut out);
                     in_code_block = true;
-                    code_block_lang = match kind {
+                    let lang = match kind {
                         CodeBlockKind::Fenced(lang) => {
                             let l = lang.trim().to_lowercase();
                             if l.is_empty() { None } else { Some(l) }
                         }
                         CodeBlockKind::Indented => None,
                     };
+                    // Create highlighter once per code block so multi-line
+                    // constructs (block comments, strings) carry state across lines.
+                    let ps = syntax_set();
+                    let syntax = lang
+                        .as_deref()
+                        .and_then(map_lang_token)
+                        .and_then(|token| {
+                            ps.find_syntax_by_token(token)
+                                .or_else(|| ps.find_syntax_by_extension(token))
+                        })
+                        .unwrap_or_else(|| ps.find_syntax_plain_text());
+                    code_highlighter = Some(HighlightLines::new(syntax, syntect_theme()));
                 }
                 Tag::Table(_) => {
                     flush_line(&mut out, &mut line);
+                    ensure_block_spacing(&mut out);
                     in_table = true;
                     table_header_rows = 0;
                     table_rows.clear();
@@ -1246,8 +1277,24 @@ pub fn format_markdown(
                     in_table_cell = true;
                     current_table_cell.clear();
                 }
-                Tag::Paragraph if !line.is_empty() && !only_prefix(&line, prefix) => {
+                Tag::Paragraph
+                    if !line.is_empty()
+                        && !only_prefix(&line, prefix)
+                        // Don't flush on Paragraph start when inside a list item
+                        // and the line only has the item marker (no content yet).
+                        // pulldown-cmark wraps list items in Paragraph when there
+                        // are blank lines between items; flushing here would split
+                        // the marker onto its own line.
+                        && (!in_item || item_content_first) =>
+                {
                     flush_line(&mut out, &mut line);
+                }
+                // Paragraphs are block-level: separate from preceding blocks
+                // with a blank line when they start after content.
+                // (Heading, List, CodeBlock, Table, BlockQuote spacing is
+                // handled at their own Start events.)
+                Tag::Paragraph if !in_item => {
+                    ensure_block_spacing(&mut out);
                 }
                 Tag::Paragraph => {}
                 _ => {}
@@ -1291,7 +1338,7 @@ pub fn format_markdown(
                 }
                 TagEnd::CodeBlock => {
                     in_code_block = false;
-                    code_block_lang = None;
+                    code_highlighter = None;
                     flush_line(&mut out, &mut line);
                 }
                 TagEnd::TableCell => {
@@ -1304,6 +1351,12 @@ pub fn format_markdown(
                 }
                 TagEnd::TableRow => {}
                 TagEnd::TableHead => {
+                    // pulldown-cmark 0.13 emits header cells as direct
+                    // children of TableHead, not wrapped in TableRow.
+                    // Push accumulated cells before recording header count.
+                    if !current_table_row.is_empty() {
+                        table_rows.push(std::mem::take(&mut current_table_row));
+                    }
                     table_header_rows = table_rows.len();
                 }
                 TagEnd::Table => {
@@ -1330,12 +1383,29 @@ pub fn format_markdown(
                     continue;
                 }
                 if in_code_block {
+                    let ps = syntax_set();
+                    let base = Style::default().fg(theme.code_fg.unwrap_or(Color::Cyan));
                     for raw in t.lines() {
                         let mut spans = vec![Span::styled(
                             format!("{prefix}\u{2503} "),
                             Style::default().fg(theme.md_rule_border),
                         )];
-                        spans.extend(highlight_code_line(raw, code_block_lang.as_deref(), theme));
+                        if let Some(ref mut highlighter) = code_highlighter {
+                            for snippet in LinesWithEndings::from(raw) {
+                                if let Ok(ranges) = highlighter.highlight_line(snippet, ps) {
+                                    spans.extend(ranges.into_iter().map(|(style, segment)| {
+                                        Span::styled(
+                                            segment.to_string(),
+                                            ratatui_style_from_syntect(style, base),
+                                        )
+                                    }));
+                                } else {
+                                    spans.push(Span::styled(snippet.to_string(), base));
+                                }
+                            }
+                        } else {
+                            spans.push(Span::styled(raw.to_string(), base));
+                        }
                         out.push(Line::from(spans));
                     }
                     if t.ends_with('\n') {
@@ -1349,6 +1419,7 @@ pub fn format_markdown(
                         if idx > 0 {
                             flush_line(&mut out, &mut line);
                             if in_item {
+                                item_content_first = false;
                                 line.push(Span::styled(
                                     current_item_continuation_prefix.clone(),
                                     Style::default(),
@@ -1363,6 +1434,9 @@ pub fn format_markdown(
                             style = style.fg(theme.md_quote).add_modifier(Modifier::ITALIC);
                         }
                         line.push(Span::styled(chunk.to_string(), style));
+                        if in_item {
+                            item_content_first = true;
+                        }
                     }
                 }
             }
@@ -1375,10 +1449,18 @@ pub fn format_markdown(
                     .fg(theme.md_inline_code)
                     .add_modifier(Modifier::ITALIC);
                 line.push(Span::styled(t.to_string(), code_style));
+                if in_item {
+                    item_content_first = true;
+                }
             }
             MdEvent::SoftBreak | MdEvent::HardBreak => {
+                if in_table && in_table_cell {
+                    current_table_cell.push(' ');
+                    continue;
+                }
                 flush_line(&mut out, &mut line);
                 if in_item {
+                    item_content_first = false;
                     line.push(Span::styled(
                         current_item_continuation_prefix.clone(),
                         Style::default(),
@@ -1416,31 +1498,6 @@ pub fn format_markdown(
     out
 }
 
-fn highlight_code_line(line: &str, lang: Option<&str>, theme: &Theme) -> Vec<Span<'static>> {
-    let ps = syntax_set();
-    let syntax = lang
-        .and_then(map_lang_token)
-        .and_then(|token| {
-            ps.find_syntax_by_token(token)
-                .or_else(|| ps.find_syntax_by_extension(token))
-        })
-        .unwrap_or_else(|| ps.find_syntax_plain_text());
-
-    let mut highlighter = HighlightLines::new(syntax, syntect_theme());
-    let base = Style::default().fg(theme.code_fg.unwrap_or(Color::Cyan));
-    let mut spans = Vec::new();
-    for snippet in LinesWithEndings::from(line) {
-        if let Ok(ranges) = highlighter.highlight_line(snippet, ps) {
-            spans.extend(ranges.into_iter().map(|(style, segment)| {
-                Span::styled(segment.to_string(), ratatui_style_from_syntect(style, base))
-            }));
-        } else {
-            spans.push(Span::styled(snippet.to_string(), base));
-        }
-    }
-    spans
-}
-
 #[derive(Clone, Copy)]
 enum BlockState {
     Quote,
@@ -1452,6 +1509,25 @@ fn flush_line(out: &mut Vec<Line<'static>>, line: &mut Vec<Span<'static>>) {
         return;
     }
     out.push(Line::from(std::mem::take(line)));
+}
+
+/// Push a blank line to `out` if the last line is not already blank and
+/// the output is not empty. Used to separate block-level elements.
+fn ensure_block_spacing(out: &mut Vec<Line<'static>>) {
+    if out.is_empty() {
+        return;
+    }
+    let last_is_blank = out.last().is_some_and(|l| {
+        l.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .trim()
+            .is_empty()
+    });
+    if !last_is_blank {
+        out.push(Line::raw(""));
+    }
 }
 
 fn only_prefix(line: &[Span<'static>], prefix: &str) -> bool {
@@ -1710,12 +1786,262 @@ fn map_lang_token(lang: &str) -> Option<&str> {
     match lang {
         "rs" => Some("rust"),
         "js" => Some("javascript"),
+        "jsx" => Some("jsx"),
         "ts" => Some("typescript"),
+        "tsx" => Some("tsx"),
         "py" => Some("python"),
-        "sh" => Some("bash"),
+        "rb" => Some("ruby"),
+        "sh" | "shell" | "bash" | "zsh" => Some("bash"),
         "yml" => Some("yaml"),
-        "shell" => Some("bash"),
+        "md" | "markdown" => Some("markdown"),
+        "toml" => Some("toml"),
+        "json" | "jsonc" => Some("json"),
+        "css" | "scss" | "sass" => Some("css"),
+        "html" | "htm" => Some("html"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        "csharp" | "cs" => Some("csharp"),
+        "swift" => Some("swift"),
+        "kt" | "kotlin" => Some("kotlin"),
+        "zig" => Some("zig"),
+        "nix" => Some("nix"),
+        "lua" => Some("lua"),
+        "php" => Some("php"),
+        "perl" | "pl" => Some("perl"),
+        "r" => Some("r"),
+        "sql" => Some("sql"),
+        "elixir" | "ex" => Some("elixir"),
+        "scala" => Some("scala"),
+        "clojure" | "clj" => Some("clojure"),
+        "haskell" | "hs" => Some("haskell"),
+        "protobuf" | "proto" => Some("protobuf"),
+        "graphql" | "gql" => Some("graphql"),
+        "dockerfile" => Some("dockerfile"),
+        "makefile" | "make" => Some("makefile"),
+        "cmake" => Some("cmake"),
+        "vim" => Some("vim"),
+        "latex" | "tex" => Some("tex"),
+        "terraform" | "tf" => Some("terraform"),
         "" => None,
         other => Some(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: collect styled lines into plain strings.
+    fn lines_text(lines: &[Line]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn table_with_headers_renders_header_row() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "| Name | Value |\n|------|-------|\n| foo  | 42    |\n| bar  | 99    |\n";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        // First line should contain the header "Name" (not empty).
+        assert!(
+            texts.iter().any(|t| t.contains("Name")),
+            "table header 'Name' should appear: {:?}",
+            texts
+        );
+        // Both header cells should be present.
+        assert!(
+            texts.iter().any(|t| t.contains("Value")),
+            "table header 'Value' should appear: {:?}",
+            texts
+        );
+        // Data cells should also be present.
+        assert!(
+            texts.iter().any(|t| t.contains("foo")),
+            "data cell 'foo' should appear: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn list_items_with_blank_lines_keep_marker_and_text_together() {
+        let theme = Theme::default();
+        let style = Style::default();
+        // Blank lines between items trigger Paragraph wrapping.
+        let md = "1. First item\n\n2. Second item\n";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        // The first non-empty line should contain both "1." and "First item".
+        let first = texts.iter().find(|t| !t.trim().is_empty()).unwrap();
+        assert!(
+            first.contains("1.") && first.contains("First"),
+            "marker and text should be on same line, got: '{}'",
+            first
+        );
+    }
+
+    #[test]
+    fn simple_list_no_blank_lines_works() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "1. First\n2. Second\n3. Third\n";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        let first = texts.iter().find(|t| t.contains("1.")).unwrap();
+        assert!(
+            first.contains("First"),
+            "simple list: marker and text on same line, got: '{}'",
+            first
+        );
+    }
+
+    #[test]
+    fn sublist_rendering() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "1. Parent\n   * Child\n   * Child 2\n2. Parent 2\n";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Parent") && t.contains("1.")),
+            "parent item: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Child") && t.contains("•")),
+            "child item: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn multi_paragraph_list_item() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "1. First paragraph\n\n   Second paragraph\n2. Next\n";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        // First paragraph should be on same line as marker.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("1.") && t.contains("First paragraph")),
+            "first paragraph on marker line: {:?}",
+            texts
+        );
+        // Second paragraph on continuation line.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Second paragraph") && !t.contains("1.")),
+            "second paragraph on continuation line: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn code_block_has_syntax_highlighting() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "```rust\nfn main() {}\n```";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        // The code line should contain multiple spans (syntax-highlighted),
+        // not just a single plain-text span.
+        let code_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref().contains("fn")))
+            .expect("should have a line with 'fn'");
+        assert!(
+            code_line.spans.len() > 2,
+            "syntax highlighting should produce multiple spans, got {}: {:?}",
+            code_line.spans.len(),
+            code_line.spans
+        );
+    }
+
+    #[test]
+    fn code_block_plain_text_for_unknown_lang() {
+        let theme = Theme::default();
+        let style = Style::default();
+        // Unknown language should still render content, just without highlighting.
+        let md = "```notalang\nsome text\n```";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        assert!(
+            texts.iter().any(|t| t.contains("some text")),
+            "code block content should render: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn map_lang_token_handles_common_aliases() {
+        assert_eq!(map_lang_token("rs"), Some("rust"));
+        assert_eq!(map_lang_token("js"), Some("javascript"));
+        assert_eq!(map_lang_token("ts"), Some("typescript"));
+        assert_eq!(map_lang_token("py"), Some("python"));
+        assert_eq!(map_lang_token("rb"), Some("ruby"));
+        assert_eq!(map_lang_token("go"), Some("go"));
+        assert_eq!(map_lang_token("java"), Some("java"));
+        assert_eq!(map_lang_token("c"), Some("c"));
+        assert_eq!(map_lang_token("cpp"), Some("cpp"));
+        assert_eq!(map_lang_token("sql"), Some("sql"));
+        assert_eq!(map_lang_token("toml"), Some("toml"));
+        assert_eq!(map_lang_token("json"), Some("json"));
+        assert_eq!(map_lang_token("css"), Some("css"));
+        assert_eq!(map_lang_token("html"), Some("html"));
+        assert_eq!(map_lang_token("shell"), Some("bash"));
+        assert_eq!(map_lang_token("sh"), Some("bash"));
+        assert_eq!(map_lang_token("zsh"), Some("bash"));
+        assert_eq!(map_lang_token(""), None);
+        // Unknown tokens pass through for syntect lookup.
+        assert_eq!(map_lang_token("notalang"), Some("notalang"));
+    }
+
+    #[test]
+    fn blockquote_rendering() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "> quoted text\n\nnormal text";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        assert!(
+            texts.iter().any(|t| t.contains("quoted text")),
+            "blockquote content should render: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("normal text")),
+            "text after blockquote should render: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn table_then_paragraph_has_spacing() {
+        let theme = Theme::default();
+        let style = Style::default();
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n\nafter";
+        let lines = format_markdown(md, style, &theme, "", 80);
+        let texts = lines_text(&lines);
+        let last_data_idx = texts
+            .iter()
+            .rposition(|t| t.contains('1') && t.contains('2'))
+            .unwrap();
+        // There should be a blank line between the table and "after".
+        assert!(
+            texts
+                .get(last_data_idx + 1)
+                .is_some_and(|l| l.trim().is_empty()),
+            "blank line expected between table and paragraph: {:?}",
+            texts
+        );
     }
 }
