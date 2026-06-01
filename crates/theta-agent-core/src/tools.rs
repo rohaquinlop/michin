@@ -65,11 +65,12 @@ pub async fn execute_tool_calls(
         let event_tx = event_tx.clone();
         let abort = abort_token.clone();
         let hooks: Arc<dyn Hooks> = Arc::clone(hooks);
+        let state_arc = Arc::new(state.clone());
 
         let handles: Vec<_> = parallel
             .iter()
             .map(|tc| {
-                let state = state.clone();
+                let state = Arc::clone(&state_arc);
                 let event_tx = event_tx.clone();
                 let abort = abort.clone();
                 let hooks = Arc::clone(&hooks);
