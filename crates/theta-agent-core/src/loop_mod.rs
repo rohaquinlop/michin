@@ -247,7 +247,11 @@ async fn run_single_turn(
     // Sanitized transcript cache: recomputed on first round or when non-tool-result
     // messages appear (model changes, steering). Subsequent rounds only add tool
     // results, which don't need ID normalization — just push to cache.
+    // sanitized_through tracks the index in state.messages we've processed;
+    // meta-messages (ModelChange, ThinkingLevelChange) are skipped since
+    // sanitize_messages_for_replay filters them out.
     let mut sanitized_cache: Vec<Message> = Vec::new();
+    let mut sanitized_through: usize = 0;
 
     // Consecutive identical round guard: only triggers when the model produces
     // the same set of tool calls round after round with no variation. A round
@@ -293,9 +297,9 @@ async fn run_single_turn(
 
         // Build context (with compaction). Use cached sanitized transcript —
         // only recompute on first round or when non-tool-result messages appear.
-        if sanitized_cache.len() < state.messages.len() {
-            let new_start = sanitized_cache.len();
-            let new_msgs = &state.messages[new_start..];
+        if sanitized_through < state.messages.len() {
+            let new_msgs = &state.messages[sanitized_through..];
+            sanitized_through = state.messages.len();
             let needs_full = sanitized_cache.is_empty()
                 || new_msgs
                     .iter()
@@ -305,7 +309,16 @@ async fn run_single_turn(
                     theta_ai::sanitize_messages_for_replay(&state.messages, &state.model);
                 sanitized_cache = full;
             } else {
-                sanitized_cache.extend(new_msgs.iter().cloned());
+                // Only push non-meta messages; sanitize_messages_for_replay
+                // filters out ModelChange / ThinkingLevelChange.
+                for m in new_msgs {
+                    if !matches!(
+                        m,
+                        Message::ModelChange { .. } | Message::ThinkingLevelChange { .. }
+                    ) {
+                        sanitized_cache.push(m.clone());
+                    }
+                }
             }
         }
         let (context, compaction_stats) =

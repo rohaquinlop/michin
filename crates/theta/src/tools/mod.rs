@@ -151,6 +151,8 @@ pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
             }
             *text = remaining;
         }
+        // Remove text blocks that became empty after trimming.
+        truncated.retain(|b| !matches!(b, ContentBlock::Text { text } if text.is_empty()));
     }
 
     result.content = truncated;
