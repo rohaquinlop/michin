@@ -743,7 +743,12 @@ async fn run_llm_stream(
             AssistantMessageEvent::ToolCallEnd { id } if emit_events => {
                 let _ = event_tx.send(AgentEvent::ToolCallEnd { id: id.clone() });
             }
-            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {}
+            AssistantMessageEvent::Error { code, message } if emit_events => {
+                let _ = event_tx.send(AgentEvent::Error {
+                    message: format!("provider stream error: code={code}, {message}"),
+                });
+            }
+            AssistantMessageEvent::Done { .. } => {}
             _ => {}
         }
     }
