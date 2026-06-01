@@ -342,17 +342,23 @@ impl SessionManager {
             return Ok(());
         }
 
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&session.file_path)
-            .map_err(SessionError::Write)?;
-
+        let path = session.file_path.clone();
         let line = serde_json::to_string(message).map_err(|e| SessionError::Parse {
             line: 0,
             error: e.to_string(),
         })?;
-        writeln!(file, "{line}").map_err(SessionError::Write)?;
+
+        tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+                .map_err(SessionError::Write)?;
+            writeln!(file, "{line}").map_err(SessionError::Write)?;
+            Ok::<_, SessionError>(())
+        })
+        .await
+        .expect("spawn_blocking panicked")?;
 
         session.messages.push(message.clone());
 
@@ -584,8 +590,10 @@ fn message_timestamp(message: &Message) -> u64 {
 
 /// Parse a JSONL session file into a vector of Messages.
 async fn parse_session_file(path: &Path) -> SessionResult<Vec<Message>> {
-    let file = std::fs::File::open(path).map_err(SessionError::Read)?;
-    let reader = BufReader::new(file);
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path).map_err(SessionError::Read)?;
+        let reader = BufReader::new(file);
     let mut messages = Vec::new();
     let mut corrupted_lines = 0usize;
 
@@ -624,6 +632,9 @@ async fn parse_session_file(path: &Path) -> SessionResult<Vec<Message>> {
     }
 
     Ok(messages)
+    })
+    .await
+    .expect("spawn_blocking panicked")
 }
 
 /// Generate a unique session ID based on timestamp + random suffix.
