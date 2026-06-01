@@ -25,6 +25,9 @@ Agent runtime: `Agent` struct, nested loop, tool execution, compaction, command 
 | `src/types.rs`                       | All config types, traits, enums                 |
 | `src/events.rs`                      | AgentEvent enum                                 |
 | `src/hooks.rs`                       | Hooks trait                                     |
+| `src/state.rs`                       | Agent mutable state (RwLock-protected)          |
+| `src/tools.rs`                       | AgentTool trait definition                      |
+| `src/error.rs`                       | AgentError enum                                 |
 
 ## Agent Loop Design
 

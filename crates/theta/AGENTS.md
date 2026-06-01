@@ -4,7 +4,7 @@
 
 ## Crate Purpose
 
-The main binary crate. Clap CLI, TUI mode, built-in tools, session management, config/settings, login flows, RPC, system prompt construction.
+The main binary crate. Clap CLI, TUI mode, built-in tools, session management, config/settings, login flows, RPC, system prompt construction, MiMo cluster routing.
 
 ## Key Files
 
@@ -25,13 +25,14 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 | `src/prompts.rs`                      | Print-mode prompt execution                                 |
 | `src/print_mode.rs`                   | Non-TUI streaming output formatter                          |
 | `src/mentions.rs`                     | @-mention file content resolution                           |
+| `src/mimo_cluster.rs`                 | MiMo token-plan cluster selection                           |
 | `src/tools/mod.rs`                    | Tool registry, `ToolContext`, truncation                    |
 | `src/tools/{bash,edit,read,write}.rs` | Built-in tool implementations                               |
 | `src/extensions/mod.rs`               | TUI extension row rendering                                 |
 
 ## Tool System
 
-Seven built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
+Four built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
 
 - All implement `theta_agent_core::AgentTool`.
 - `ToolContext` holds working directory — relative paths resolve against it.

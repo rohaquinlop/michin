@@ -8,13 +8,14 @@ Provides the unified LLM abstraction layer: types, provider trait, streaming, re
 
 ## Public API
 
-- `theta_ai::types` — `ContentBlock`, `Message`, `Tool`, `Provider`, `Model`, `Context`, `StopReason`.
+- `theta_ai::types` — `ContentBlock`, `Message`, `Tool`, `Provider`, `Context`, `StopReason`, `ThinkingLevel`, `Modality`, `Usage`.
+- `theta_ai::model` — `Model` definition struct.
 - `theta_ai::event` — `EventAccumulator`, `AssistantMessageEvent` for streaming.
 - `theta_ai::Provider` trait — the extension point for new LLM backends.
 
 ## Provider Implementations
 
-Two providers in `crates/theta-ai/src/providers/`:
+Two providers in `crates/theta-ai/src/providers.rs` (single file, not a directory):
 
 1. **`OpenAiCompatProvider`** — handles OpenAI, DeepSeek, OpenCode, Xiaomi MiMo via `/v1/chat/completions`. Models fetched dynamically at runtime.
 2. **`OpenAiCodexProvider`** — ChatGPT Plus session-token auth targeting `chatgpt.com/backend-api`, WebSocket + SSE fallback.

@@ -20,7 +20,7 @@ Compile-time model definitions plus runtime OpenCode model fetch. Implements the
 ## Current Models
 
 - **OpenAI**: `gpt-5.5`, `gpt-5.5-instant`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5-chat-latest`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini`, `o4`, `o4-mini`, `o3`, `o3-mini`, `o1`, `o1-mini`
-- **OpenAI Codex**: same model IDs as OpenAI
+- **OpenAI Codex**: `gpt-5.5`, `gpt-5.3-codex`, `gpt-5.5-instant`, `gpt-5`, `gpt-5-mini`, `gpt-5-chat-latest`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`, `o4`, `o4-mini`, `o3`, `o3-mini`, `o1`, `o1-mini`
 - **DeepSeek**: `deepseek-v4-pro` (1M ctx), `deepseek-v4-flash` (1M ctx)
 - **OpenCode Zen**: fetched from `opencode.ai/zen/v1/models` at runtime
 - **Xiaomi MiMo**: fetched from `api.xiaomimimo.com/v1/models` at runtime (fallback: `mimo-v2.5-pro`, `mimo-v2-pro`, `mimo-v2.5`, `mimo-v2-omni`, `mimo-v2-flash`)

@@ -17,6 +17,7 @@ cargo run -- rpc
 - `theta` or `theta tui` starts a fresh TUI chat.
 - `theta sessions` lists saved sessions.
 - `theta resume <id>` resumes a session.
+- `theta fork <id>` forks an existing session.
 - `theta login <provider>` stores auth.
 - `theta rpc` reads JSON requests from stdin and writes JSON responses to stdout.
 
@@ -28,10 +29,12 @@ cargo run -- rpc
 - `/tree [default|no-tools|user-only|labeled-only|all]` opens branch/session tree picker.
 - `Enter` behavior is configurable via `settings.json` (`enter_behavior: "send" | "newline"`).
 - With `enter_behavior = "send"` (default), `Enter` sends normally when idle; while streaming it queues a steering message.
-- `Alt+Enter` inserts newline in the editor.
+- `Shift+Enter` inserts a newline in the editor.
+- `Alt+Enter` inserts a newline (or queues follow-up depending on mode config).
 - `Ctrl+Enter` queues a follow-up message.
 - `Ctrl+P` opens model selector.
 - `Ctrl+T` cycles themes.
+- `Ctrl+U` edits the queued (steering/follow-up) message.
 - `Tab` switches focus between input and chat.
 
 ## Extensions (Rhai Scripts)
@@ -102,6 +105,7 @@ Config lives at `~/.theta/config.toml`.
 ```toml
 theme = "default"
 working_dir = "/path/to/project"
+profile = "safe"
 
 [model]
 default = "gpt-5.5"
@@ -113,7 +117,8 @@ default = "medium"
 [compaction]
 enabled = true
 reserve_tokens = 4096
-summarize_with_llm = true
+keep_recent_tokens = 20000
+strategy = "llm"
 summary_max_tokens = 512
 
 [retry]
@@ -125,27 +130,43 @@ timeout_ms = 120000
 
 [agent]
 max_same_tool_call_repeats = 6
+tool_stall_warning_ms = 8000
+provider_fallback_chain = []
+provider_failure_threshold = 3
+provider_open_cooldown_ms = 30000
+
+[profile_overrides]
+# Override profile-specific defaults. All fields optional.
+# max_retries = 3
+# command_policy_strict = false
 ```
 
 Available fields:
 
-- `theme` (string, optional, default: unset): TUI theme name. Supported built-ins are `default` and `monokai`.
-- `working_dir` (string/path, optional, default: unset): Working directory override in config. Note: current CLI behavior uses `--working-dir` (or current shell dir) and does not currently read this field.
-- `[model].default` (string, optional, default: unset): default model ID when `--model` is not provided.
-- `[model].providers` (map<string,string>, optional, default: `{}`): per-provider model defaults map (for example `openai`, `openai-codex`, `deepseek`, `opencode`).
-- `[thinking].default` (string, optional, default: unset): default thinking level (commonly `off`, `low`, `medium`, `high`).
+- `theme` (string, optional): TUI theme name. Supported built-ins are `default` and `monokai`.
+- `working_dir` (string/path, optional): Working directory override in config. Note: current CLI behavior uses `--working-dir` (or current shell dir) and does not currently read this field.
+- `profile` (string, default: `"safe"`): Runtime hardening profile. Options: `dev` (lenient, permissive), `safe` (default, balanced), `prod` (strict, aggressive limits).
+- `[model].default` (string, optional): default model ID when `--model` is not provided.
+- `[model].providers` (map<string,string>, default: `{}`): per-provider model defaults map (for example `openai`, `openai-codex`, `deepseek`, `opencode`).
+- `[thinking].default` (string, optional): default thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
 - `[compaction].enabled` (bool, default: `true`): enables automatic context compaction.
 - `[compaction].reserve_tokens` (u32, default: `4096`): token budget reserved for model output.
-- `[compaction].summarize_with_llm` (bool, default: `true`): summarize compacted content with the model.
+- `[compaction].keep_recent_tokens` (u32, default: `20000`): tokens of recent conversation to preserve.
+- `[compaction].strategy` (string, default: `"llm"`): compaction strategy. `"none"`, `"textual"`, or `"llm"`.
 - `[compaction].summary_max_tokens` (u32, default: `512`): max tokens used for compaction summaries.
 - `[retry].max_retries` (u32, default: `2`): retry attempts for retryable provider errors.
 - `[retry].base_delay_ms` (u64, default: `1000`): exponential backoff base delay in milliseconds.
 - `[provider].timeout_ms` (u64, default: `120000`): provider request timeout in milliseconds.
 - `[agent].max_same_tool_call_repeats` (u32, default: `6`): primary loop guard; maximum repeated identical tool-call signatures in one turn before aborting that loop.
+- `[agent].tool_stall_warning_ms` (u64, default: `8000`): warn if a tool execution stalls longer than this.
+- `[agent].provider_fallback_chain` (string[], default: `[]`): optional fallback model IDs in preference order.
+- `[agent].provider_failure_threshold` (u32, default: `3`): circuit breaker failure threshold.
+- `[agent].provider_open_cooldown_ms` (u64, default: `30000`): circuit breaker open cooldown in ms.
+- `[profile_overrides]` (table, optional): override individual profile defaults. All fields optional: `max_retries`, `base_delay_ms`, `provider_timeout_ms`, `tool_stall_warning_ms`, `provider_fallback_chain`, `provider_failure_threshold`, `provider_open_cooldown_ms`, `max_same_tool_call_repeats`, `command_policy_strict`.
 
 Auth note:
 
-- API keys and OAuth tokens are persisted in `~/.theta/auth.json` (and can also come from env vars like `OPENAI_API_KEY`, `OPENAI_CODEX_TOKEN`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`).
+- API keys and OAuth tokens are persisted in `~/.theta/auth.json` (and can also come from env vars like `OPENAI_API_KEY`, `OPENAI_CODEX_TOKEN`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, `MIMO_API_KEY`).
 - The `[auth]` section is part of the internal config struct, but auth is loaded from `auth.json` at runtime.
 
 ## Settings File
@@ -154,15 +175,19 @@ Session-level runtime settings are stored in `~/.theta/settings.json` (not in `c
 
 Fields currently persisted there:
 
-- `last_model` (string, optional): last model used in TUI.
-- `last_thinking` (string, optional): last thinking level used in TUI.
+- `last_session` (object, optional): last used provider+model pair (e.g. `{"provider": "openai", "model": "gpt-5.5"}`). Replaces old flat `last_model`/`last_thinking` fields.
+- `model_thinking_map` (object, default: `{}`): per-provider, per-model thinking level map. Example: `{"openai": {"gpt-5.5": "high"}}`. Enables restoring thinking level when switching models across providers.
 - `steering_mode` (string, default: `"follow-up"`): Enter behavior while streaming.
-- `follow_up_mode` (string, default: `"steer"`): Alt+Enter behavior while streaming.
+- `follow_up_mode` (string, default: `"steer"`): Ctrl+Enter behavior while streaming.
 - `transport_preference` (string, default: `"auto"`): transport hint (`auto`/`http`/`sse`).
 - `show_thinking` (bool, default: `true`): show thinking text in UI.
+- `show_tool_diffs` (bool, default: `false`): show diffs in tool output (edit tool).
 - `tool_progress_hz` (u64, default: `20`): tool progress update frequency in Hz.
 - `enter_behavior` (string, default: `"send"`): editor Enter behavior (`"send"` or `"newline"`).
 - `max_context_window` (u32 or null, default: `null`): hard cap on context window tokens. `null` disables the cap, using the model's full context window. Any number is clamped to `min(model.context_window, value)`. Most LLMs perform better below ~250K tokens, and this cap helps prevent hallucinations on long conversations. Change this or set to `null` to rely on the model's native context limit.
+- `disabled_models` (string[], default: `[]`): model IDs to hide from the model selector.
+- `favorite_models` (string[], default: `[]`): model IDs pinned at the top of the model selector.
+- `mimo_cluster_url` (string or null, default: `null`): MiMo token-plan cluster base URL (region endpoint). Overrides `MIMO_BASE_URL` env var when set.
 
 RPC examples:
 

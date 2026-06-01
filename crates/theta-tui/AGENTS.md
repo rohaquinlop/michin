@@ -20,6 +20,8 @@ Terminal UI built with ratatui + crossterm. Chat view, multi-line editor with @-
 | `src/components/session_picker.rs`           | `/sessions` command                    |
 | `src/components/tree_selector.rs`            | `/tree` branch/session tree            |
 | `src/components/settings_selector.rs`        | Settings overlay                       |
+| `src/components/thinking_selector.rs`        | Thinking level selector                |
+| `src/components/mimo_cluster.rs`             | MiMo cluster region picker             |
 | `src/components/status.rs`                   | Bottom status bar                      |
 | `src/theme.rs`                               | `Theme` — `default` and `monokai`      |
 | `src/keybinding.rs`                          | Keybinding configuration               |
@@ -31,9 +33,12 @@ Terminal UI built with ratatui + crossterm. Chat view, multi-line editor with @-
 | `Ctrl+C` / `Esc`    | Quit (Esc only when input empty)  |
 | `Ctrl+P`            | Open model selector               |
 | `Ctrl+T`            | Cycle themes                      |
+| `Ctrl+U`            | Edit queued message               |
 | `Tab`               | Switch focus input ↔ chat         |
 | `Enter`             | Send / Queue steering             |
-| `Alt+Enter`         | Queue follow-up                   |
+| `Shift+Enter`       | Insert newline                    |
+| `Alt+Enter`         | Insert newline / Queue follow-up  |
+| `Ctrl+Enter`        | Queue follow-up                   |
 | `@` in editor       | File autocomplete (fuzzy)         |
 
 ## Conventions
