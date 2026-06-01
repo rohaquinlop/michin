@@ -594,44 +594,44 @@ async fn parse_session_file(path: &Path) -> SessionResult<Vec<Message>> {
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(&path).map_err(SessionError::Read)?;
         let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-    let mut corrupted_lines = 0usize;
+        let mut messages = Vec::new();
+        let mut corrupted_lines = 0usize;
 
-    for (line_num, line_result) in reader.lines().enumerate() {
-        let line = line_result.map_err(SessionError::Read)?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Message>(&line) {
-            Ok(msg) => messages.push(msg),
-            Err(e) => {
-                corrupted_lines += 1;
-                tracing::warn!(
-                    line = line_num + 1,
-                    error = %e,
-                    "skipping corrupted session line"
-                );
+        for (line_num, line_result) in reader.lines().enumerate() {
+            let line = line_result.map_err(SessionError::Read)?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Message>(&line) {
+                Ok(msg) => messages.push(msg),
+                Err(e) => {
+                    corrupted_lines += 1;
+                    tracing::warn!(
+                        line = line_num + 1,
+                        error = %e,
+                        "skipping corrupted session line"
+                    );
+                }
             }
         }
-    }
 
-    if corrupted_lines > 0 {
-        messages.push(Message::Assistant {
-            content: vec![ContentBlock::text(format!(
-                "Session repair: skipped {corrupted_lines} corrupted JSONL entr{} during load.",
-                if corrupted_lines == 1 { "y" } else { "ies" }
-            ))],
-            api: None,
-            provider: None,
-            model: None,
-            usage: None,
-            stop_reason: None,
-            error_message: None,
-            timestamp: now_ms(),
-        });
-    }
+        if corrupted_lines > 0 {
+            messages.push(Message::Assistant {
+                content: vec![ContentBlock::text(format!(
+                    "Session repair: skipped {corrupted_lines} corrupted JSONL entr{} during load.",
+                    if corrupted_lines == 1 { "y" } else { "ies" }
+                ))],
+                api: None,
+                provider: None,
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: now_ms(),
+            });
+        }
 
-    Ok(messages)
+        Ok(messages)
     })
     .await
     .expect("spawn_blocking panicked")
