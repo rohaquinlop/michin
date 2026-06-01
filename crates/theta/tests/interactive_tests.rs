@@ -20,7 +20,7 @@ fn read_summary_is_compact() {
     };
     let s = format_tool_summary(&result, 200);
     assert!(s.contains("read /tmp/a.rs"));
-    assert!(s.contains("l:11-30/100"));
+    assert!(s.contains("read /tmp/a.rs:11-30"));
     assert!(!s.contains("fn "));
 }
 

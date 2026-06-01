@@ -476,17 +476,13 @@ fn format_tool_log_summary(result: &theta_agent_core::types::ToolResult) -> Stri
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
-            let total_lines = details
-                .get("total_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
             let offset = details.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
             let lines_read = details
                 .get("lines_read")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             format!(
-                "  read {path} lines {offset}-{end}/{total_lines}",
+                "  read {path}:{offset}-{end}",
                 end = offset.saturating_add(lines_read.saturating_sub(1))
             )
         }

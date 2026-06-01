@@ -1786,7 +1786,7 @@ pub fn format_tool_summary(
                     let offset = d.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
                     let lines_read = d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!(
-                        "read {path}  l:{offset}-{end}/{total_lines}",
+                        "read {path}:{offset}-{end}",
                         end = offset.saturating_add(lines_read.saturating_sub(1))
                     )
                 }
@@ -2038,7 +2038,7 @@ fn message_to_history_entries(msg: &theta_ai::Message) -> Vec<HistoryEntry> {
                             let lines_read =
                                 d.get("lines_read").and_then(|v| v.as_u64()).unwrap_or(0);
                             let end = offset.saturating_add(lines_read.saturating_sub(1));
-                            format!("read {path}  l:{offset}-{end}/{total_lines}{status}")
+                            format!("read {path}:{offset}-{end}{status}")
                         }
                     } else {
                         format!("read{status}")

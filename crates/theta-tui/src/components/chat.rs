@@ -303,6 +303,39 @@ impl Chat {
             msg.text.clone()
         };
 
+        // read tool: style range "{offset}-{end}" in dim, rest in warning.
+        if msg.role == ChatRole::Tool
+            && !msg.is_error
+            && let Some((label, range)) = split_read_tool_text(&text)
+        {
+            let label_style = Style::default().fg(self.theme.warning);
+            let range_style = Style::default().fg(self.theme.dim);
+            let tool_style = Style::default().fg(self.theme.warning);
+            return vec![Line::from(vec![
+                Span::styled(prefix, tool_style),
+                Span::styled(label.to_string(), label_style),
+                Span::styled(range.to_string(), range_style),
+            ])];
+        }
+
+        // edit tool: style [+N/-M] with green +N and red -M.
+        if msg.role == ChatRole::Tool
+            && !msg.is_error
+            && let Some(parts) = split_edit_tool_text(&text)
+        {
+            let tool_style = Style::default().fg(self.theme.warning);
+            let added_style = Style::default().fg(self.theme.success);
+            let removed_style = Style::default().fg(self.theme.error);
+            return vec![Line::from(vec![
+                Span::styled(prefix, tool_style),
+                Span::styled(parts.prefix.to_string(), tool_style),
+                Span::styled(parts.added.to_string(), added_style),
+                Span::styled(parts.slash_minus.to_string(), tool_style),
+                Span::styled(parts.removed.to_string(), removed_style),
+                Span::styled(parts.suffix.to_string(), tool_style),
+            ])];
+        }
+
         let markdown_width = if msg.role == ChatRole::User {
             content_width
                 .saturating_sub(USER_BUBBLE_OUTER_MARGIN * 2)
@@ -899,6 +932,65 @@ fn truncate_output(text: &str, max_len: usize) -> String {
         let truncated: String = text.chars().take(max_len).collect();
         format!("{}... ({} chars total)", truncated, text.chars().count())
     }
+}
+
+/// Split a read tool summary like "read /tmp/a.rs:11-30" into ("read /tmp/a.rs:", "11-30").
+/// Returns None if the text doesn't match the expected read format.
+fn split_read_tool_text(text: &str) -> Option<(&str, &str)> {
+    if !text.starts_with("read ") {
+        return None;
+    }
+    let rest = text.strip_prefix("read ")?;
+    let last_colon = rest.rfind(':')?;
+    let range = &rest[last_colon + 1..];
+    // Validate range looks like "N-M"
+    if range.contains('-') && range.chars().all(|c| c.is_ascii_digit() || c == '-') {
+        let split = text.len() - range.len();
+        Some((&text[..split], range))
+    } else {
+        None
+    }
+}
+
+/// Parts of an edit tool summary with diff, e.g. "edit /tmp/a.rs  [+2/-1]".
+struct EditToolParts<'a> {
+    prefix: &'a str,      // "edit /tmp/a.rs  [+\"
+    added: &'a str,       // "2"
+    slash_minus: &'a str, // "/-"
+    removed: &'a str,     // "1"
+    suffix: &'a str,      // "]"
+}
+
+/// Split an edit tool summary like "edit /tmp/a.rs  [+2/-1]" into styled parts.
+fn split_edit_tool_text(text: &str) -> Option<EditToolParts<'_>> {
+    if !text.starts_with("edit ") {
+        return None;
+    }
+    // Look for the diff stats block.
+    let bracket = text.find(" [+")?;
+    let after_bracket = &text[bracket + 3..]; // "N/-M]"
+    let slash = after_bracket.find('/')?;
+    let dash_pos = slash + 1;
+    if dash_pos >= after_bracket.len() || after_bracket.as_bytes()[dash_pos] != b'-' {
+        return None;
+    }
+    if !after_bracket.ends_with(']') {
+        return None;
+    }
+    let added_num = &after_bracket[..slash];
+    let removed_num = &after_bracket[dash_pos + 1..after_bracket.len() - 1];
+    // Validate both are digits
+    if !added_num.chars().all(|c| c.is_ascii_digit()) || !removed_num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // Include the +/- signs in the colored portions.
+    Some(EditToolParts {
+        prefix: &text[..bracket + 2], // up to and including " ["
+        added: &text[bracket + 2..bracket + 3 + slash], // "+N"
+        slash_minus: "/",
+        removed: &text[bracket + 3 + dash_pos..bracket + 3 + after_bracket.len() - 1], // "-M"
+        suffix: "]",
+    })
 }
 
 pub fn should_insert_gap(prev: ChatRole, curr: ChatRole) -> bool {
