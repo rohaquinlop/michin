@@ -50,62 +50,116 @@ impl Default for TruncationLimits {
 pub fn truncate_output(result: &mut ToolResult, limits: &TruncationLimits) {
     use theta_ai::ContentBlock;
 
-    let mut total_bytes: usize = 0;
-    let mut total_lines: usize = 0;
-    let mut truncated = false;
-
+    // Collect all text content into one combined string. Non-text blocks
+    // (images, etc.) are preserved in their original position.
+    let mut combined_text = String::new();
     let mut new_content = Vec::with_capacity(result.content.len());
 
     for block in std::mem::take(&mut result.content) {
         match block {
             ContentBlock::Text { text } => {
-                let lines: Vec<&str> = text.lines().collect();
-                total_lines += lines.len();
-                total_bytes += text.len();
-
-                if total_lines <= limits.max_lines && total_bytes <= limits.max_bytes {
-                    new_content.push(ContentBlock::Text { text });
-                } else {
-                    truncated = true;
-                    let keep_lines = limits
-                        .max_lines
-                        .saturating_sub(total_lines.saturating_sub(lines.len()));
-                    let keep_bytes = limits
-                        .max_bytes
-                        .saturating_sub(total_bytes.saturating_sub(text.len()));
-                    let keep_chars = std::cmp::min(
-                        text.char_indices()
-                            .nth(keep_bytes)
-                            .map(|(i, _)| i)
-                            .unwrap_or(text.len()),
-                        text.len(),
-                    );
-                    let kept: String = text.lines().take(keep_lines).collect::<Vec<_>>().join("\n");
-                    let kept = if kept.len() > keep_chars {
-                        kept.chars().take(keep_chars).collect()
-                    } else {
-                        kept
-                    };
-                    if !kept.is_empty() {
-                        new_content.push(ContentBlock::Text { text: kept });
-                    }
-                    break;
+                if !combined_text.is_empty() {
+                    combined_text.push('\n');
                 }
+                combined_text.push_str(&text);
             }
-            other => new_content.push(other),
+            other => {
+                // Flush accumulated text before the non-text block.
+                if !combined_text.is_empty() {
+                    new_content.push(ContentBlock::Text {
+                        text: std::mem::take(&mut combined_text),
+                    });
+                }
+                new_content.push(other);
+            }
         }
     }
 
-    result.content = new_content;
-
-    if truncated {
-        result.content.push(ContentBlock::Text {
-            text: format!(
-                "\n\n[output truncated: exceeded {} lines or {} bytes]",
-                limits.max_lines, limits.max_bytes
-            ),
+    // Flush any remaining text.
+    if !combined_text.is_empty() {
+        new_content.push(ContentBlock::Text {
+            text: combined_text,
         });
     }
+
+    // Now truncate from the head: keep only the last N lines / last ~50KB.
+    let total_lines = new_content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.lines().count()),
+            _ => None,
+        })
+        .sum::<usize>();
+    let total_bytes: usize = new_content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.len()),
+            _ => None,
+        })
+        .sum();
+
+    if total_lines <= limits.max_lines && total_bytes <= limits.max_bytes {
+        result.content = new_content;
+        return;
+    }
+
+    // Truncate: drop leading text blocks until we fit within limits, then
+    // trim the first remaining text block from the head to hit the exact limit.
+    let mut truncated = new_content;
+    let mut lines_to_drop = total_lines.saturating_sub(limits.max_lines);
+    let mut bytes_to_drop = total_bytes.saturating_sub(limits.max_bytes);
+
+    // Remove leading text blocks that fall entirely within the drop budget.
+    while let Some(first) = truncated.first() {
+        if lines_to_drop == 0 && bytes_to_drop == 0 {
+            break;
+        }
+        match first {
+            ContentBlock::Text { text } => {
+                let block_lines = text.lines().count();
+                let block_bytes = text.len();
+                if block_lines <= lines_to_drop && block_bytes <= bytes_to_drop {
+                    lines_to_drop -= block_lines;
+                    bytes_to_drop -= block_bytes;
+                    truncated.remove(0);
+                } else {
+                    break;
+                }
+            }
+            _ => break, // non-text block — stop, keep it
+        }
+    }
+
+    // Trim the first remaining text block from the head.
+    #[allow(clippy::collapsible_if)]
+    if lines_to_drop > 0 || bytes_to_drop > 0 {
+        if let Some(ContentBlock::Text { text }) = truncated.first_mut() {
+            let mut lines: Vec<&str> = text.lines().collect();
+            let drop_lines = lines_to_drop.min(lines.len());
+            lines.drain(..drop_lines);
+
+            let mut remaining: String = lines.join("\n");
+            // Also trim bytes from the head, finding a valid UTF-8 boundary.
+            if bytes_to_drop > 0 && remaining.len() > bytes_to_drop {
+                let byte_start = bytes_to_drop.min(remaining.len());
+                // Walk forward to next char boundary.
+                let mut start = byte_start;
+                while start < remaining.len() && !remaining.is_char_boundary(start) {
+                    start += 1;
+                }
+                remaining = remaining[start..].to_string();
+            }
+            *text = remaining;
+        }
+    }
+
+    result.content = truncated;
+    result.content.push(ContentBlock::Text {
+        text: format!(
+            "\n\n[output truncated to last {} lines or {} bytes; {} lines / {} bytes dropped from head]",
+            limits.max_lines, limits.max_bytes, total_lines.saturating_sub(limits.max_lines), total_bytes.saturating_sub(limits.max_bytes)
+        ),
+    });
 }
 
 /// Resolve a tool path against the working directory.
