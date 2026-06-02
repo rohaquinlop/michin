@@ -1,8 +1,9 @@
 //! Context compaction: trim old messages to fit within the model's context window.
 //!
-//! Uses approximate token counting (4 chars/token) to decide when truncation
-//! is needed, then drops the oldest user/assistant/tool-result triples first.
-//! The system prompt is never dropped. The most recent user message is always kept.
+//! Prefix-preserving design: keeps the earliest messages (system prompt + prefix)
+//! byte-stable in their original positions, summarizes the middle region, and
+//! keeps the recent tail verbatim. This preserves DeepSeek/MiMo prefix cache
+//! across compaction — the early prefix never shifts.
 
 use theta_ai::Message;
 
@@ -11,18 +12,30 @@ use crate::types::{CompactionConfig, CompactionStrategy};
 /// Result of a compaction pass.
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
-    /// The compacted message list (subset of the input).
+    /// The compacted message list.
     pub messages: Vec<Message>,
-    /// How many messages were trimmed.
+    /// How many messages were trimmed (summarized into the middle).
     pub trimmed_count: u32,
     /// Approximate tokens before compaction.
     pub tokens_before: u32,
     /// Approximate tokens after compaction.
     pub tokens_after: u32,
+    /// Index of the first trimmed message in the ORIGINAL messages slice.
+    /// Only set when trimmed_count > 0. Combined with trimmed_count, this
+    /// identifies the exact region that was summarized: [trim_start..trim_start+trimmed_count].
+    pub trim_start: usize,
 }
 
 /// Compact the given messages to fit within `context_window - reserve_tokens`,
-/// accounting for the system prompt token count. Returns the subset and stats.
+/// accounting for the system prompt token count.
+///
+/// Prefix-preserving layout:
+///   [0..head]     — kept verbatim (system prompt, early messages)
+///   [head]        — summary of trimmed region (replaced in-place)
+///   [head+1..]    — kept verbatim (recent tail)
+///
+/// The early prefix never shifts position, so DeepSeek's automatic prefix
+/// cache stays warm across compaction.
 pub fn compact_messages(
     messages: &[Message],
     system_prompt_tokens: u32,
@@ -36,6 +49,7 @@ pub fn compact_messages(
             trimmed_count: 0,
             tokens_before: tokens,
             tokens_after: tokens,
+            trim_start: 0,
         };
     }
 
@@ -48,53 +62,98 @@ pub fn compact_messages(
             trimmed_count: 0,
             tokens_before,
             tokens_after: tokens_before,
+            trim_start: 0,
         };
     }
 
-    // Walk from the end (newest) backwards, accumulating tokens.
-    // Stop when we're under the budget, but never drop the last user message.
-    // This keeps the most recent context intact.
-    let mut kept: Vec<&Message> = Vec::new();
-    let mut running_tokens: u32 = 0;
-    let mut last_user_seen = false;
-
-    for msg in messages.iter().rev() {
-        let token_cost = msg_token_cost(msg);
-
-        // Always keep the newest user message — it's the prompt we're answering.
-        if !last_user_seen && matches!(msg, Message::User { .. }) {
-            last_user_seen = true;
-            running_tokens += token_cost;
-            kept.push(msg);
-            continue;
-        }
-
-        if running_tokens + token_cost > available {
-            // We'll trim this and everything older.
+    // Keep the most recent messages verbatim (tail), bounded by keep_recent_tokens.
+    // Walk newest-to-oldest until the token budget is exhausted.
+    let mut tail_start = messages.len();
+    let mut tail_tokens: u32 = 0;
+    for i in (0..messages.len()).rev() {
+        let cost = msg_token_cost(&messages[i]);
+        if tail_start < messages.len() && tail_tokens + cost > config.keep_recent_tokens {
             break;
         }
-
-        running_tokens += token_cost;
-        kept.push(msg);
+        tail_tokens += cost;
+        tail_start = i;
     }
 
-    // Reverse back to oldest-first order and clone to owned.
-    kept.reverse();
-    let mut kept_owned: Vec<Message> = kept.into_iter().cloned().collect();
-    let trimmed_count = messages.len().saturating_sub(kept_owned.len()) as u32;
-    if trimmed_count > 0 && config.strategy == CompactionStrategy::Textual {
-        let trimmed_len = messages.len().saturating_sub(kept_owned.len());
-        if let Some(summary) = compacted_summary(&messages[..trimmed_len], trimmed_count) {
-            kept_owned.insert(0, summary);
+    // Align tail_start off any tool result so the tail never begins with an
+    // orphan whose assistant tool_calls were summarized away.
+    while tail_start > 0 && matches!(messages[tail_start], Message::ToolResult { .. }) {
+        tail_start -= 1;
+    }
+
+    // Compute how many messages to keep as prefix (before the summarized region).
+    // The prefix + summary + tail must fit in `available`.
+    let summary_overhead = 50; // approximate tokens for the summary message wrapper
+    let prefix_budget = available.saturating_sub(tail_tokens + summary_overhead);
+
+    let mut head = 0;
+    let mut prefix_tokens: u32 = 0;
+    while head < tail_start {
+        let cost = msg_token_cost(&messages[head]);
+        if prefix_tokens + cost > prefix_budget {
+            break;
         }
+        prefix_tokens += cost;
+        head += 1;
     }
-    let tokens_after = total_tokens(&kept_owned);
+
+    // Ensure head doesn't split a tool-call/result pair.
+    // If head lands on a ToolResult, back up to before the corresponding assistant.
+    while head > 0 && head < tail_start && matches!(messages[head], Message::ToolResult { .. }) {
+        head -= 1;
+    }
+
+    let trimmed_count = tail_start.saturating_sub(head) as u32;
+    if trimmed_count == 0 {
+        // Nothing meaningful to compact — the tail already covers everything.
+        return CompactionResult {
+            messages: messages.to_vec(),
+            trimmed_count: 0,
+            tokens_before,
+            tokens_after: tokens_before,
+            trim_start: 0,
+        };
+    }
+
+    // Build prefix-preserving output: [0..head] + [summary] + [tail_start..]
+    let mut output: Vec<Message> = Vec::with_capacity(head + 1 + (messages.len() - tail_start));
+    output.extend_from_slice(&messages[..head]);
+
+    // Deterministic summary of the trimmed middle region.
+    let summary = if config.strategy == CompactionStrategy::Textual {
+        compacted_summary(&messages[head..tail_start], trimmed_count)
+    } else {
+        // Llm strategy: insert a placeholder that the caller will replace
+        // with an LLM-generated summary.
+        None
+    };
+
+    if let Some(summary_msg) = summary {
+        output.push(summary_msg);
+    } else if config.strategy == CompactionStrategy::Llm {
+        // Placeholder — the caller (build_context) will call summarize_compacted_messages
+        // and replace this with a proper LLM summary.
+        output.push(Message::User {
+            content: vec![theta_ai::ContentBlock::text(
+                "[Compacted context — summarizing...]",
+            )],
+            timestamp: 0,
+        });
+    }
+
+    output.extend_from_slice(&messages[tail_start..]);
+    let tokens_after = total_tokens(&output);
 
     CompactionResult {
-        messages: kept_owned,
+        messages: output,
         trimmed_count,
         tokens_before,
         tokens_after,
+        trim_start: head,
     }
 }
 
@@ -183,12 +242,12 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 /// Count approximate tokens for all messages.
-fn total_tokens(messages: &[Message]) -> u32 {
+pub(crate) fn total_tokens(messages: &[Message]) -> u32 {
     messages.iter().map(msg_token_cost).sum()
 }
 
 /// Approximate token cost for a single message.
-fn msg_token_cost(msg: &Message) -> u32 {
+pub(crate) fn msg_token_cost(msg: &Message) -> u32 {
     match msg {
         Message::User { .. } | Message::Assistant { .. } | Message::ToolResult { .. } => {
             msg.token_count()

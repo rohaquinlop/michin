@@ -1397,3 +1397,238 @@ mod state {
         assert_eq!(fields.get("normal").map(String::as_str), Some("ok"));
     }
 }
+
+#[tokio::test]
+async fn test_compaction_pause_guard() {
+    // Set up an agent with a very small context window (~500 tokens) and
+    // tiny compaction limits so compaction fires on the first turn.
+    let mut model = test_model();
+    model.context_window = 500;
+    let mock = MockProvider::new(vec![
+        vec![
+            AssistantMessageEvent::text_delta("ok"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("ok again"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+        vec![
+            AssistantMessageEvent::text_delta("done"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+
+    let mut agent_base = Agent::new(
+        model.clone(),
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    );
+
+    // Override compaction config: 0 reserve, tiny keep_recent so we trigger
+    // compaction on a small context while still keeping some messages.
+    let mut cfg = AgentLoopConfig::default();
+    cfg.compaction.reserve_tokens = 0;
+    cfg.compaction.keep_recent_tokens = 50;
+    cfg.compaction.strategy = CompactionStrategy::Textual;
+    agent_base.set_config(cfg);
+
+    let agent = Arc::new(agent_base);
+    let mut rx = agent.subscribe();
+
+    // Load enough messages to exceed the context window.
+    {
+        let mut raw: Vec<Message> = Vec::new();
+        let pad = "padding text to fill tokens ".repeat(5);
+        for i in 0..50 {
+            raw.push(Message::User {
+                content: vec![ContentBlock::text(format!("user {i} {pad}"))],
+                timestamp: i as u64,
+            });
+            raw.push(Message::Assistant {
+                content: vec![ContentBlock::text(format!("assistant {i} {pad}"))],
+                api: None,
+                provider: None,
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: (i + 1000) as u64,
+            });
+        }
+        agent.load_messages(raw).await;
+    }
+
+    // Turn 1: should compact.
+    let agent1 = agent.clone();
+    let handle = tokio::spawn(async move {
+        agent1.continue_().await.unwrap();
+    });
+
+    let mut compaction_count = 0u32;
+    let mut compaction_paused = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, AgentEvent::ContextCompacted { .. }) {
+            compaction_count += 1;
+        }
+        if matches!(event, AgentEvent::CompactionPaused { .. }) {
+            compaction_paused = true;
+            break;
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            break;
+        }
+    }
+    handle.await.unwrap();
+
+    assert_eq!(
+        compaction_count, 1,
+        "first turn should compact exactly once"
+    );
+    // Drain any remaining events from the channel (e.g. AgentEnd spawn)
+    while let Ok(_) = rx.try_recv() {}
+
+    // Turn 2: should compact again (consecutive_compacts = 2, hits threshold).
+    let agent2 = agent.clone();
+    let handle = tokio::spawn(async move {
+        agent2.continue_().await.unwrap();
+    });
+
+    let mut compaction_paused_on_turn2 = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, AgentEvent::CompactionPaused { .. }) {
+            compaction_paused_on_turn2 = true;
+            break;
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            break;
+        }
+    }
+    handle.await.unwrap();
+
+    assert!(
+        compaction_paused || compaction_paused_on_turn2,
+        "should pause auto-compaction after 2 consecutive compacts"
+    );
+    // Drain everything through AgentEnd so Turn 3 starts clean.
+    // CompactionPaused arrives before ContextCompacted in build_context,
+    // so if we broke on CompactionPaused, ContextCompacted is still queued.
+    while let Ok(event) = rx.try_recv() {
+        // Drain until empty.
+        let _ = event;
+    }
+
+    // Turn 3: compaction is paused — replace messages with tiny ones that fit.
+    agent
+        .load_messages(vec![
+            Message::User {
+                content: vec![ContentBlock::text("tiny")],
+                timestamp: 1,
+            },
+            Message::Assistant {
+                content: vec![ContentBlock::text("ok")],
+                api: None,
+                provider: None,
+                model: None,
+                usage: None,
+                stop_reason: None,
+                error_message: None,
+                timestamp: 2,
+            },
+        ])
+        .await;
+
+    let agent3 = agent.clone();
+    let handle = tokio::spawn(async move {
+        agent3.continue_().await.unwrap();
+    });
+
+    let mut compacted_while_paused = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, AgentEvent::ContextCompacted { .. }) {
+            compacted_while_paused = true;
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            break;
+        }
+    }
+    handle.await.unwrap();
+
+    assert!(
+        !compacted_while_paused,
+        "no compaction should fire while paused"
+    );
+}
+
+#[tokio::test]
+async fn test_mid_stream_break_retries_same_model() {
+    let model = test_model();
+    // First attempt: get an Error event mid-stream → stream breaks.
+    // Second attempt: succeeds.
+    let mock = MockProvider::new(vec![
+        vec![AssistantMessageEvent::Error {
+            code: "connection_error".into(),
+            message: "connection reset by peer".into(),
+        }],
+        vec![
+            AssistantMessageEvent::text_delta("eventually ok"),
+            AssistantMessageEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let registry = make_registry(mock);
+    let catalog = Arc::new(TestModelCatalog {
+        models: vec![model.clone()],
+    });
+
+    let agent = Arc::new(Agent::new(
+        model,
+        registry,
+        catalog.list().into_iter().cloned().collect(),
+    ));
+    let mut rx = agent.subscribe();
+
+    let agent_clone = agent.clone();
+    let handle = tokio::spawn(async move {
+        agent_clone
+            .prompt(vec![ContentBlock::text("test")])
+            .await
+            .unwrap();
+    });
+
+    let mut retry_count = 0u32;
+    let mut got_response = false;
+    while let Ok(event) = rx.recv().await {
+        if matches!(event, AgentEvent::Retrying { .. }) {
+            retry_count += 1;
+        }
+        if matches!(event, AgentEvent::TextDelta { .. }) {
+            got_response = true;
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            break;
+        }
+    }
+    handle.await.unwrap();
+
+    assert!(
+        retry_count >= 1,
+        "stream break should trigger a retry of the same model, got {retry_count}"
+    );
+    assert!(got_response, "should get text response after retry");
+}

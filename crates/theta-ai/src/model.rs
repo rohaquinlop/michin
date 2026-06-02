@@ -40,10 +40,6 @@ pub struct ModelCompat {
     /// Whether to use `developer` role for system messages (o-series).
     #[serde(default, rename = "supportsDeveloperRole")]
     pub supports_developer_role: bool,
-    /// Whether this provider requires empty `reasoning_content` on
-    /// replayed assistant messages (DeepSeek).
-    #[serde(default, rename = "requiresReasoningContentOnAssistantMessages")]
-    pub requires_reasoning_content_on_assistant: bool,
     /// Which field to use for max_tokens.
     #[serde(default, rename = "maxTokensField")]
     pub max_tokens_field: Option<MaxTokensField>,
@@ -78,7 +74,6 @@ impl ModelCompat {
     pub fn for_deepseek() -> Self {
         Self {
             thinking_format: Some(ThinkingFormat::DeepSeek),
-            requires_reasoning_content_on_assistant: true,
             supports_usage_in_streaming: true,
             requires_assistant_after_tool_result: true,
             max_tokens_field: Some(MaxTokensField::MaxTokens),
@@ -100,7 +95,6 @@ impl ModelCompat {
     pub fn for_xiaomi() -> Self {
         Self {
             thinking_format: Some(ThinkingFormat::XiaomiMiMo),
-            requires_reasoning_content_on_assistant: true,
             // MiMo supports usage in non-streaming responses but the
             // stream_options.include_usage field is OpenAI-specific.
             supports_usage_in_streaming: false,
@@ -164,9 +158,15 @@ impl Model {
         self.thinking_level_map.get(&level).and_then(|v| v.clone())
     }
 
-    /// Whether this model requires reasoning content on replayed assistant messages.
+    /// Whether this model needs empty reasoning_content on replayed
+    /// assistant messages. Derived from `thinking_format` — DeepSeek
+    /// and MiMo strip reasoning to preserve prefix cache stability.
+    /// OpenAI/OpenCode send actual thinking content on replay.
     pub fn requires_reasoning_on_replay(&self) -> bool {
-        self.compat.requires_reasoning_content_on_assistant
+        matches!(
+            self.compat.thinking_format,
+            Some(ThinkingFormat::DeepSeek | ThinkingFormat::XiaomiMiMo)
+        )
     }
 
     /// The actual JSON field name for max_tokens in the API request body.

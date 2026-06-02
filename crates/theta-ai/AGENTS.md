@@ -26,7 +26,6 @@ Two providers in `crates/theta-ai/src/providers.rs` (single file, not a director
 | ----------------------------------------- | ------------------------------------------------------------------ |
 | `thinking_format`                         | `"openai"` (reasoning_effort) vs `"deepseek"` (thinking: { type }) |
 | `supports_developer_role`                 | o-series models need `developer` instead of `system`               |
-| `requires_reasoning_content_on_assistant` | DeepSeek needs empty `reasoning_content` on replayed messages      |
 | `max_tokens_field`                        | `max_completion_tokens` vs `max_tokens`                            |
 
 ### Codex Transport

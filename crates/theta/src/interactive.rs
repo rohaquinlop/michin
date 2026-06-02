@@ -778,6 +778,15 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                         tokens_after,
                     });
                 }
+                Ok(AgentEvent::CompactionPaused {
+                    context_window,
+                    reserve_tokens,
+                }) => {
+                    let _ = event_tx.send(TuiEvent::CompactionPaused {
+                        context_window,
+                        reserve_tokens,
+                    });
+                }
                 Ok(AgentEvent::Retrying { attempt, delay_ms }) => {
                     let _ = event_tx.send(TuiEvent::Retrying { attempt, delay_ms });
                 }

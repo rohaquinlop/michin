@@ -5,6 +5,7 @@
 //! `/v1/chat/completions` API with SSE streaming.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -15,7 +16,7 @@ use tracing;
 
 use theta_ai::error::ThetaError;
 use theta_ai::event::AssistantMessageEvent;
-use theta_ai::model::Model;
+use theta_ai::model::{Model, ThinkingFormat};
 use theta_ai::provider::{EventStream, Provider};
 use theta_ai::types::{
     ContentBlock, Context, Message, SimpleStreamOptions, StopReason, StreamOptions, Usage,
@@ -31,8 +32,23 @@ pub struct OpenAiCompatProvider {
 
 impl OpenAiCompatProvider {
     pub fn new() -> Self {
+        let client = Client::builder()
+            // Force HTTP/1.1 — HTTP/2 frame-level issues with DeepSeek and some
+            // OpenAI-compatible providers cause "error decoding response body".
+            .http1_only()
+            // TCP keepalive prevents intermediate NATs/proxies from dropping
+            // idle connections during long thinking pauses.
+            .tcp_keepalive(Duration::from_secs(60))
+            // Connection pooling: expire idle connections after 90s so we
+            // never reuse a connection the server has already closed.
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            // Fail fast on connection establishment issues.
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest Client builder should not fail with default settings");
         Self {
-            client: Client::new(),
+            client,
             api_key: RwLock::new(None),
             mimo_base_url: Arc::new(RwLock::new(None)),
         }
@@ -109,6 +125,7 @@ impl Provider for OpenAiCompatProvider {
             .client
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
             .json(&request_body);
 
         if model.compat.uses_api_key_header {
@@ -478,7 +495,14 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 has_content = true;
             }
 
-            // Add thinking content
+            // Reasoning content on replay:
+            // - DeepSeek and MiMo: always send empty string. Reasoning is a
+            //   response-only signal — re-uploading it is paid prompt input
+            //   (~500 tokens/turn) and breaks byte-stable prefix cache.
+            //   Matches reasonix: "reasoning_content is deliberately NOT sent
+            //   back: it is a response-only signal."
+            // - OpenAI/OpenCode: send actual thinking blocks (these providers
+            //   don't return reasoning_content, so this path is rarely hit).
             let thinking_blocks: Vec<&str> = content
                 .iter()
                 .filter_map(|b| match b {
@@ -487,12 +511,21 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 })
                 .collect();
 
-            if !thinking_blocks.is_empty() {
+            let strip_reasoning = matches!(
+                model.compat.thinking_format,
+                Some(ThinkingFormat::DeepSeek | ThinkingFormat::XiaomiMiMo)
+            );
+
+            if strip_reasoning {
+                // DeepSeek/MiMo: empty reasoning_content for cache stability.
+                msg_json["reasoning_content"] = json!("");
+                if !thinking_blocks.is_empty() {
+                    has_content = true;
+                }
+            } else if !thinking_blocks.is_empty() {
+                // OpenAI/OpenCode: send actual thinking content.
                 msg_json["reasoning_content"] = json!(thinking_blocks.join("\n\n"));
                 has_content = true;
-            } else if model.requires_reasoning_on_replay() {
-                // DeepSeek requires empty reasoning_content on replayed assistant messages.
-                msg_json["reasoning_content"] = json!("");
             }
 
             // Skip empty assistant replay messages unless provider explicitly

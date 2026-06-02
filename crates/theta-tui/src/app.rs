@@ -132,6 +132,10 @@ pub enum TuiEvent {
         tokens_before: u32,
         tokens_after: u32,
     },
+    CompactionPaused {
+        context_window: u32,
+        reserve_tokens: u32,
+    },
     Retrying {
         attempt: u32,
         delay_ms: u64,
@@ -1935,6 +1939,15 @@ impl App {
                         "trimmed {trimmed_count} old messages (~{tokens_before}→~{tokens_after} tok)"
                     ));
                 }
+            }
+            TuiEvent::CompactionPaused {
+                context_window,
+                reserve_tokens: _,
+            } => {
+                self.status.set_agent_state("compaction paused");
+                self.status.set_detail(&format!(
+                    "context window {context_window} too small; auto-compaction paused"
+                ));
             }
             TuiEvent::Retrying { attempt, delay_ms } => {
                 self.retries_in_turn = self.retries_in_turn.max(attempt);

@@ -604,3 +604,139 @@ fn test_parse_mixed_function_call_and_tool_calls_yields_single_call() {
         .collect();
     assert_eq!(tool_calls.len(), 1);
 }
+
+// ── Reasoning content stripping on replay ──────────────────────
+
+fn mimo_model() -> Model {
+    Model {
+        id: "mimo-v2.5-pro".into(),
+        name: "MiMo".into(),
+        api: Api::OpenAiCompletions,
+        provider: Provider::XiaomiMiMo,
+        base_url: "https://api.xiaomimimo.com".into(),
+        reasoning: true,
+        thinking_level_map: Default::default(),
+        input: vec![Modality::Text],
+        context_window: 1_000_000,
+        max_tokens: 128_000,
+        compat: ModelCompat::for_xiaomi(),
+    }
+}
+
+#[test]
+fn deepseek_reasoning_content_stripped_on_replay() {
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "Let me analyze this...".into(),
+                signature: None,
+            },
+            ContentBlock::text("Here is the answer."),
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+
+    // DeepSeek should send empty reasoning_content, not the actual thinking.
+    assert_eq!(converted["reasoning_content"], json!(""));
+    // The text content should still be present.
+    let content = converted["content"].as_str().unwrap();
+    assert!(content.contains("Here is the answer."));
+}
+
+#[test]
+fn mimo_reasoning_content_stripped_on_replay() {
+    let model = mimo_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "Processing request...".into(),
+                signature: None,
+            },
+            ContentBlock::text("Done."),
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::XiaomiMiMo),
+        model: Some("mimo-v2.5-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg).expect("assistant converts");
+
+    // MiMo should send empty reasoning_content, same as DeepSeek.
+    assert_eq!(converted["reasoning_content"], json!(""));
+    assert!(converted["content"].as_str().unwrap().contains("Done."));
+}
+
+#[test]
+fn openai_reasoning_content_preserved_on_replay() {
+    let model = openai_reasoning_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "Let me think about this.".into(),
+                signature: None,
+            },
+            ContentBlock::text("Answer."),
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::OpenAI),
+        model: Some("gpt-5.5".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let result = convert_message(&model, &msg);
+    // OpenAI models don't return reasoning_content blocks in normal operation,
+    // so this test ensures the thinking format check doesn't break OpenAI.
+    // The message should convert cleanly.
+    assert!(
+        result.is_some(),
+        "OpenAI assistant with thinking should convert"
+    );
+}
+
+#[test]
+fn reasoning_stripped_but_has_content_flag_set() {
+    // Even when reasoning is stripped, the message should not be dropped as
+    // "empty" — the text content is still present.
+    let model = deepseek_model();
+    let msg = Message::Assistant {
+        content: vec![
+            ContentBlock::Thinking {
+                thinking: "thinking...".into(),
+                signature: None,
+            },
+            ContentBlock::text("answer text"),
+        ],
+        api: Some(Api::OpenAiCompletions),
+        provider: Some(Provider::DeepSeek),
+        model: Some("deepseek-v4-pro".into()),
+        usage: None,
+        stop_reason: Some(StopReason::Stop),
+        error_message: None,
+        timestamp: 1,
+    };
+
+    let converted = convert_message(&model, &msg);
+    assert!(
+        converted.is_some(),
+        "DeepSeek message with thinking + text should convert (not be skipped as empty)"
+    );
+    let c = converted.unwrap();
+    assert_eq!(c["reasoning_content"], json!(""));
+    assert!(c["content"].as_str().unwrap().contains("answer text"));
+}

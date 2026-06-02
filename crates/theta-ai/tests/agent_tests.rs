@@ -351,3 +351,141 @@ mod types {
         assert!(matches!(msg, Message::ToolResult { .. }));
     }
 }
+
+mod error_class {
+    use theta_ai::{ErrorClass, ThetaError};
+
+    // ── Transient: transport-level errors ──
+
+    #[test]
+    fn connection_reset_is_transient() {
+        let e = ThetaError::Http("error sending request: connection reset by peer".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn broken_pipe_is_transient() {
+        let e = ThetaError::Http("broken pipe (os error 32)".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn eof_is_transient() {
+        let e = ThetaError::Http("unexpected eof during response".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn timeout_is_transient() {
+        let e = ThetaError::Http("request timeout after 30s".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn tls_error_is_transient() {
+        let e = ThetaError::Http("tls handshake failed".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn sending_request_wrapper_is_transient() {
+        // reqwest wraps real errors like "connection reset" under this phrase.
+        // The {:#} formatter includes the root cause, but the wrapper alone
+        // must also be classified as transient.
+        let e = ThetaError::Http("error sending request for url".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn dns_error_is_transient() {
+        let e = ThetaError::Http("dns resolution failed for api.openai.com".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn connection_refused_is_transient() {
+        let e = ThetaError::Http("connection refused (os error 61)".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    // ── Permanent: protocol-level errors ──
+
+    #[test]
+    fn http_400_is_permanent() {
+        let e = ThetaError::Http("400 Bad Request: invalid parameter".into());
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn stream_errors_are_transient() {
+        let e = ThetaError::Stream("decode error: invalid utf-8".into());
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn stream_ended_early_is_transient() {
+        assert_eq!(ThetaError::StreamEndedEarly.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn api_429_is_transient() {
+        let e = ThetaError::ApiError {
+            status: 429,
+            message: "rate limited".into(),
+            retry_after_ms: Some(1000),
+        };
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn api_500_is_transient() {
+        let e = ThetaError::ApiError {
+            status: 500,
+            message: "internal error".into(),
+            retry_after_ms: None,
+        };
+        assert_eq!(e.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn api_400_is_permanent() {
+        let e = ThetaError::ApiError {
+            status: 400,
+            message: "bad request".into(),
+            retry_after_ms: None,
+        };
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn missing_api_key_is_permanent() {
+        let e = ThetaError::MissingApiKey {
+            provider: theta_ai::Provider::OpenAI,
+        };
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn model_not_found_is_permanent() {
+        let e = ThetaError::ModelNotFound {
+            provider: theta_ai::Provider::OpenAI,
+            model_id: "nonexistent".into(),
+        };
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn provider_stream_error_is_permanent() {
+        let e = ThetaError::ProviderStreamError {
+            code: "invalid_request".into(),
+            message: "bad parameter".into(),
+        };
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn json_error_is_permanent() {
+        let e = ThetaError::Json(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err());
+        assert_eq!(e.class(), ErrorClass::Permanent);
+    }
+}

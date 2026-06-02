@@ -120,6 +120,7 @@ reserve_tokens = 4096
 keep_recent_tokens = 20000
 strategy = "llm"
 summary_max_tokens = 512
+auto_pause_threshold = 2
 
 [retry]
 max_retries = 2
@@ -154,6 +155,7 @@ Available fields:
 - `[compaction].keep_recent_tokens` (u32, default: `20000`): tokens of recent conversation to preserve.
 - `[compaction].strategy` (string, default: `"llm"`): compaction strategy. `"none"`, `"textual"`, or `"llm"`.
 - `[compaction].summary_max_tokens` (u32, default: `512`): max tokens used for compaction summaries.
+- `[compaction].auto_pause_threshold` (u32, default: `2`): consecutive compactions before auto-pausing. When the kept tail alone overflows the context trigger, compacting every turn degrades prefix cache. Set to `u32::MAX` to never auto-pause.
 - `[retry].max_retries` (u32, default: `2`): retry attempts for retryable provider errors.
 - `[retry].base_delay_ms` (u64, default: `1000`): exponential backoff base delay in milliseconds.
 - `[provider].timeout_ms` (u64, default: `120000`): provider request timeout in milliseconds.

@@ -9,7 +9,7 @@ Agent runtime: `Agent` struct, nested loop, tool execution, compaction, command 
 ## Public API
 
 - `Agent` — prompt, continue, steer, follow_up, subscribe, hooks.
-- `AgentEvent` enum — includes `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`, `AgentEnd`.
+- `AgentEvent` enum — includes `TurnTerminated`, `TurnModeResolved`, `SafetyDecision`, `ToolWatchdogWarning`, `ProviderCircuitOpen`, `ProviderFallback`, `CompactionPaused`, `AgentEnd`.
 - `Hooks` trait — `beforeToolCall`, `afterToolCall`, `shouldStopAfterTurn`, `prepareNextTurn`, `tui_status_lines()`, `tui_status_rows()`.
 - `AgentTool` trait — `name()`, `description()`, `label()`, `parameters()`, `execution_mode()`, `execute()`.
 
@@ -51,11 +51,13 @@ Centralized `evaluate_tool_call(mode, tool_call, strict)` engine. Classifies bas
 
 ## Compaction
 
-Truncation-based (oldest pairs first) with inline text summary. System prompt and last user message never trimmed.
+Prefix-preserving design: keeps the earliest messages (system prompt + prefix) byte-stable, summarizes the middle region, and keeps the recent tail verbatim. This preserves DeepSeek/MiMo prefix cache across compaction.
+
+Auto-pause: when consecutive compactions reach `auto_pause_threshold` (default 2) and the kept tail alone exceeds the context trigger, auto-compaction pauses to prevent cache-cratering loops. Pauses resume once a turn fits naturally.
 
 ## Retry
 
-Exponential backoff for 429, 5xx, connection/timeout. Non-retryable (4xx non-429) fail immediately.
+Exponential backoff for 429, 5xx, connection/timeout. Non-retryable (4xx non-429) fail immediately. Mid-stream connection breaks (e.g. DeepSeek during thinking) are detected and retried up to `MAX_STREAM_BREAKS` (2) times before falling through to the fallback chain.
 
 ## Error Handling
 

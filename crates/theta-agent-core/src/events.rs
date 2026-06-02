@@ -84,6 +84,12 @@ pub enum AgentEvent {
         /// Tokens after compaction.
         tokens_after: u32,
     },
+    /// Auto-compaction paused: the kept tail alone exceeds the context trigger,
+    /// so compacting every turn would crater the prefix cache.
+    CompactionPaused {
+        context_window: u32,
+        reserve_tokens: u32,
+    },
 
     /// Retrying a failed provider call.
     Retrying {

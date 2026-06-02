@@ -63,10 +63,22 @@ impl ThetaError {
         match self {
             Self::Http(msg) => {
                 let lower = msg.to_lowercase();
+                // Check both the top-level message and common reqwest root-cause
+                // phrases. reqwest often wraps the real cause ("connection reset",
+                // "connection refused") under "error sending request for url" —
+                // the {:#} formatter in the From<reqwest::Error> impl includes the
+                // full chain, but we also match the wrapper itself just in case.
                 if lower.contains("timeout")
                     || lower.contains("connect")
                     || lower.contains("connection")
                     || lower.contains("dns")
+                    || lower.contains("sending request")
+                    || lower.contains("tls")
+                    || lower.contains("ssl")
+                    || lower.contains("broken pipe")
+                    || lower.contains("reset by peer")
+                    || lower.contains("eof")
+                    || lower.contains("incomplete")
                 {
                     ErrorClass::Transient
                 } else {
@@ -101,13 +113,15 @@ impl ThetaError {
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for ThetaError {
     fn from(e: reqwest::Error) -> Self {
-        ThetaError::Http(e.to_string())
+        // Use {:#} to include the full error chain (root cause), not just
+        // the top-level "error sending request for url" message.
+        ThetaError::Http(format!("{:#}", e))
     }
 }
 
 #[cfg(feature = "eventsource-stream")]
 impl From<eventsource_stream::EventStreamError<reqwest::Error>> for ThetaError {
     fn from(e: eventsource_stream::EventStreamError<reqwest::Error>) -> Self {
-        ThetaError::Stream(e.to_string())
+        ThetaError::Stream(format!("{:#}", e))
     }
 }

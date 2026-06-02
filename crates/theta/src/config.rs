@@ -82,6 +82,13 @@ pub struct CompactionSettings {
     /// Max output tokens for compaction summaries.
     #[serde(default = "default_summary_max_tokens")]
     pub summary_max_tokens: u32,
+    /// Consecutive compactions before auto-pausing. Set high to disable.
+    #[serde(default = "default_auto_pause_threshold")]
+    pub auto_pause_threshold: u32,
+}
+
+fn default_auto_pause_threshold() -> u32 {
+    2
 }
 
 impl Default for CompactionSettings {
@@ -93,6 +100,7 @@ impl Default for CompactionSettings {
             strategy: CompactionStrategySetting::Llm,
             summarize_with_llm: None,
             summary_max_tokens: 512,
+            auto_pause_threshold: 2,
         }
     }
 }
@@ -633,6 +641,7 @@ pub fn to_agent_config(tc: &ThetaConfig) -> theta_agent_core::AgentLoopConfig {
             keep_recent_tokens: tc.compaction.keep_recent_tokens,
             strategy,
             summary_max_tokens: tc.compaction.summary_max_tokens,
+            auto_pause_threshold: tc.compaction.auto_pause_threshold,
         },
         retry: theta_agent_core::RetryConfig {
             max_retries: base.max_retries,

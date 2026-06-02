@@ -14,6 +14,7 @@ use futures::StreamExt;
 use futures_util::SinkExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::RwLock;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -36,8 +37,22 @@ pub struct OpenAiCodexProvider {
 impl OpenAiCodexProvider {
     pub fn new() -> Self {
         let env_token = std::env::var(CODEX_TOKEN_ENV).ok();
+        // Codex uses WebSocket (tokio-tungstenite) for the streaming chat API
+        // and reqwest only for preliminary REST calls (auth, token refresh).
+        // The key setting here is connect_timeout — the rest (keepalive,
+        // pool_idle_timeout) affect the WebSocket-managed transport layer
+        // minimally but are harmless to keep for consistency with the
+        // OpenAiCompat provider configuration.
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(4)
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest Client builder should not fail with default settings");
         Self {
-            client: reqwest::Client::new(),
+            client,
             token: RwLock::new(env_token),
         }
     }

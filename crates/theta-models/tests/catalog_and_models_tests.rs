@@ -82,8 +82,8 @@ mod deepseek_models {
             assert!(m.context_window > 0);
             assert!(m.max_tokens > 0);
             assert!(
-                m.compat.requires_reasoning_content_on_assistant,
-                "DeepSeek models must require reasoning_content on replayed assistant messages"
+                m.requires_reasoning_on_replay(),
+                "DeepSeek models must strip reasoning content on replay"
             );
         }
     }

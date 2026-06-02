@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing;
 
 use futures::StreamExt;
+use theta_ai::EventStream;
 use theta_ai::event::EventAccumulator;
 use theta_ai::{
     AssistantMessageEvent, ContentBlock, Context, ErrorClass, LlmProvider, Message, Model,
@@ -668,7 +669,8 @@ async fn run_single_turn(
 
 /// Consume an LLM stream, emitting AgentEvents and accumulating content.
 /// Returns the assembled assistant message and stop reason.
-/// Includes retry logic with exponential backoff for transient provider errors.
+/// Includes retry logic with exponential backoff for transient provider errors
+/// and mid-stream connection breaks (common with DeepSeek during thinking).
 #[allow(clippy::too_many_arguments)]
 async fn run_llm_stream(
     state: &mut AgentState,
@@ -691,9 +693,10 @@ async fn run_llm_stream(
 > {
     let retry = &config.retry;
     let fallback_models = resolve_fallback_models(state, config);
-    let mut stream = None;
     let mut selected_model = state.model.clone();
     let mut last_error: Option<theta_ai::ThetaError> = None;
+    /// Max times to retry a stream that broke mid-response before giving up.
+    const MAX_STREAM_BREAKS: u32 = 2;
 
     for (idx, candidate_model) in fallback_models.iter().enumerate() {
         if idx > 0 && emit_events {
@@ -716,12 +719,12 @@ async fn run_llm_stream(
         }
 
         let mut attempt: u32 = 0;
+        let mut stream_breaks: u32 = 0;
         loop {
-            match provider.stream(&selected_model, context, options).await {
+            let stream = match provider.stream(&selected_model, context, options).await {
                 Ok(s) => {
                     breaker_record_success(&mut state.circuit_breakers, &key);
-                    stream = Some(s);
-                    break;
+                    s
                 }
                 Err(e) => {
                     last_error = Some(e);
@@ -752,36 +755,121 @@ async fn run_llm_stream(
                         "provider call failed, retrying"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+            };
+
+            // ── Consume the stream ──
+            match consume_stream(
+                stream,
+                &selected_model,
+                event_tx,
+                &abort_token,
+                &steering_abort,
+                emit_events,
+            )
+            .await
+            {
+                Ok(ok) => return Ok(ok),
+                Err(consume_err) => {
+                    // Aborts propagate immediately.
+                    if matches!(consume_err, StreamConsumeError::Aborted) {
+                        return Err(AgentError::Aborted);
+                    }
+                    // Stream broke mid-response: retry the same request.
+                    stream_breaks += 1;
+                    if stream_breaks > MAX_STREAM_BREAKS {
+                        last_error = Some(theta_ai::ThetaError::Stream(
+                            "stream broke mid-response, retries exhausted".into(),
+                        ));
+                        break;
+                    }
+                    let delay_ms = retry
+                        .base_delay_ms
+                        .saturating_mul(2u64.pow(stream_breaks.saturating_sub(1)));
+                    if emit_events {
+                        let _ = event_tx.send(AgentEvent::Retrying {
+                            attempt: attempt + stream_breaks,
+                            delay_ms,
+                        });
+                    }
+                    tracing::warn!(
+                        model = %selected_model.id,
+                        stream_breaks = stream_breaks,
+                        delay_ms = delay_ms,
+                        "stream broke mid-response, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
                 }
             }
         }
-        if stream.is_some() {
-            break;
-        }
+        // Out of retries for this model; try next fallback.
     }
 
-    let Some(mut stream) = stream else {
-        return Err(AgentError::Llm(
-            last_error.unwrap_or(theta_ai::ThetaError::StreamEndedEarly),
-        ));
-    };
+    // All models and retries exhausted.
+    let err_msg = format!(
+        "all providers failed: {}",
+        last_error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "stream ended early".into())
+    );
+    if emit_events {
+        let _ = event_tx.send(AgentEvent::Error {
+            message: err_msg.clone(),
+        });
+    }
 
+    Err(AgentError::Llm(
+        last_error.unwrap_or(theta_ai::ThetaError::StreamEndedEarly),
+    ))
+}
+
+/// Error from consuming a stream — either a stream break (retryable) or abort.
+enum StreamConsumeError {
+    /// The stream broke mid-response (transport error).
+    StreamBroke,
+    /// User or system aborted.
+    Aborted,
+}
+
+/// Consume an LLM event stream, emitting events and building the accumulator.
+///
+/// Returns the accumulated message + stop reason on success, or
+/// `StreamConsumeError` if the stream broke or was aborted.
+async fn consume_stream(
+    mut stream: EventStream<'_>,
+    selected_model: &Model,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    abort_token: &Option<CancellationToken>,
+    steering_abort: &Arc<AtomicBool>,
+    emit_events: bool,
+) -> Result<
+    (
+        Message,
+        Option<StopReason>,
+        usize,
+        Vec<theta_ai::UnresolvedToolCall>,
+    ),
+    StreamConsumeError,
+> {
     let mut accumulator = EventAccumulator::new();
     // Suppress duplicate stream errors: a single transport failure (e.g. decode
-    // error) causes every subsequent SSE read to fail, spamming the TUI.
+    // error) causes every subsequent SSE read to fail.
     let mut stream_error_emitted = false;
 
     // Consume the stream, emitting events as we go.
     while let Some(event) = stream.next().await {
         // Check permanent abort.
-        if let Some(ref token) = abort_token
+        if let Some(token) = abort_token
             && token.is_cancelled()
         {
-            return Err(AgentError::Aborted);
+            return Err(StreamConsumeError::Aborted);
         }
         // Check per-stream steering abort.
         if steering_abort.load(Ordering::SeqCst) {
-            return Err(AgentError::Aborted);
+            return Err(StreamConsumeError::Aborted);
         }
 
         accumulator.feed(&event);
@@ -818,15 +906,23 @@ async fn run_llm_stream(
                 let _ = event_tx.send(AgentEvent::ToolCallEnd { id: id.clone() });
             }
             AssistantMessageEvent::Error { code, message }
-                if emit_events && !std::mem::replace(&mut stream_error_emitted, true) =>
+                if !std::mem::replace(&mut stream_error_emitted, true) =>
             {
-                let _ = event_tx.send(AgentEvent::Error {
-                    message: format!("provider stream error: code={code}, {message}"),
-                });
+                tracing::debug!(
+                    stream_error_code = %code,
+                    stream_error_message = %message,
+                    model = %selected_model.id,
+                    "stream transport error (suppressed for retry)"
+                );
             }
             AssistantMessageEvent::Done { .. } => {}
             _ => {}
         }
+    }
+
+    // If the stream ended with an error, it broke — retryable.
+    if accumulator.stop_reason() == Some(StopReason::Error) {
+        return Err(StreamConsumeError::StreamBroke);
     }
 
     // Build the assistant message from accumulated events.
@@ -928,7 +1024,15 @@ async fn build_context(
 
     // Compaction: only call compact_messages when enabled. When disabled,
     // use the cached sanitized messages directly — no clone or token scan needed.
-    let (mut messages, compaction_stats) = if config.compaction.enabled {
+    //
+    // Compaction loop guard: if compaction fires on consecutive turns, the kept
+    // tail alone exceeds the trigger — compacting again would just shift the
+    // same messages and crater the prefix cache. Pause auto-compaction until a
+    // turn naturally fits without compacting.
+    let pause_threshold = config.compaction.auto_pause_threshold;
+
+    let (mut messages, compaction_stats) = if config.compaction.enabled && !state.compaction_paused
+    {
         let effective_window = config.effective_context_window(state.model.context_window);
         let mut compact_result = crate::compact::compact_messages(
             messages,
@@ -937,27 +1041,61 @@ async fn build_context(
             &config.compaction,
         );
 
-        if compact_result.trimmed_count > 0 && config.compaction.strategy == CompactionStrategy::Llm
-        {
-            let trimmed_len = (compact_result.trimmed_count as usize).min(state.messages.len());
-            let trimmed_slice = state.messages[..trimmed_len].to_vec();
-            match summarize_compacted_messages(state, provider, &trimmed_slice, config, event_tx)
+        if compact_result.trimmed_count == 0 {
+            // Turn fits without compaction — reset the guard.
+            state.consecutive_compacts = 0;
+        } else {
+            state.consecutive_compacts += 1;
+
+            if state.consecutive_compacts >= pause_threshold {
+                state.compaction_paused = true;
+                let _ = event_tx.send(AgentEvent::CompactionPaused {
+                    context_window: effective_window,
+                    reserve_tokens: config.compaction.reserve_tokens,
+                });
+                tracing::warn!(
+                    context_window = effective_window,
+                    "auto-compaction paused: kept tail exceeds context trigger"
+                );
+            }
+
+            if config.compaction.strategy == CompactionStrategy::Llm {
+                let trim_end = (compact_result.trim_start + compact_result.trimmed_count as usize)
+                    .min(state.messages.len());
+                let trimmed_slice = state.messages[compact_result.trim_start..trim_end].to_vec();
+                match summarize_compacted_messages(
+                    state,
+                    provider,
+                    &trimmed_slice,
+                    config,
+                    event_tx,
+                )
                 .await
-            {
-                Ok(summary) => {
-                    if let Some(first) = compact_result.messages.first_mut() {
-                        *first = summary;
-                    } else {
-                        compact_result.messages.insert(0, summary);
+                {
+                    Ok(summary) => {
+                        // Find and replace the placeholder in the compacted messages.
+                        // The placeholder is at the boundary between prefix and tail
+                        // (index = head, where head = trim_start in the original).
+                        let placeholder_idx = compact_result.trim_start;
+                        if placeholder_idx < compact_result.messages.len() {
+                            compact_result.messages[placeholder_idx] = summary;
+                        } else if let Some(first) = compact_result.messages.first_mut() {
+                            *first = summary;
+                        } else {
+                            compact_result.messages.insert(0, summary);
+                        }
+                        compact_result.tokens_after = compact_result
+                            .messages
+                            .iter()
+                            .map(|message| message.token_count())
+                            .sum();
                     }
-                    compact_result.tokens_after = compact_result
-                        .messages
-                        .iter()
-                        .map(|message| message.token_count())
-                        .sum();
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "LLM compaction summary failed; using deterministic summary");
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "LLM compaction summary failed; using deterministic summary"
+                        );
+                    }
                 }
             }
         }
@@ -969,6 +1107,10 @@ async fn build_context(
         });
         (compact_result.messages, stats)
     } else {
+        if !config.compaction.enabled {
+            state.consecutive_compacts = 0;
+            state.compaction_paused = false;
+        }
         (messages.to_vec(), None)
     };
 

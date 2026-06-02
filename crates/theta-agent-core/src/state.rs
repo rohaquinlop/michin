@@ -46,6 +46,13 @@ pub struct AgentState {
     /// Per-model-id circuit breaker state. Scoped to this agent instance
     /// so concurrent agents (tests, multi-session) don't share breakers.
     pub(crate) circuit_breakers: HashMap<String, BreakerState>,
+    /// Consecutive turns that triggered compaction. Reset when a turn fits
+    /// without compacting. When this reaches the threshold, auto-compaction
+    /// pauses to prevent cache-cratering loops.
+    pub(crate) consecutive_compacts: u32,
+    /// Auto-compaction is paused because the kept tail alone exceeds the
+    /// trigger — compacting every turn would break the prefix cache.
+    pub(crate) compaction_paused: bool,
 }
 
 /// Circuit breaker per model key. Tracks consecutive transient failures
@@ -92,6 +99,8 @@ impl AgentState {
             resource_context_tokens: 0,
             theta_ai_tools: Vec::new(),
             circuit_breakers: HashMap::new(),
+            consecutive_compacts: 0,
+            compaction_paused: false,
         }
     }
 

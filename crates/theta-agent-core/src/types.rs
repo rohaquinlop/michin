@@ -204,6 +204,12 @@ pub struct CompactionConfig {
     pub strategy: CompactionStrategy,
     /// Maximum output tokens for compaction summaries.
     pub summary_max_tokens: u32,
+    /// Number of consecutive compactions before auto-pausing.
+    /// When the kept tail alone overflows the context trigger, compacting
+    /// every turn craters the prefix cache. This threshold detects that
+    /// condition and pauses until a turn fits naturally. Set to `u32::MAX`
+    /// to never auto-pause.
+    pub auto_pause_threshold: u32,
 }
 
 impl Default for CompactionConfig {
@@ -214,6 +220,7 @@ impl Default for CompactionConfig {
             keep_recent_tokens: 20_000,
             strategy: CompactionStrategy::Llm,
             summary_max_tokens: 512,
+            auto_pause_threshold: 2,
         }
     }
 }
