@@ -249,14 +249,24 @@ pub async fn run_tui(
 
             let blocks =
                 crate::mentions::expand_file_mentions(&msg_working_dir, &expanded_message).await;
-            if let Err(e) = agent.prompt(blocks).await {
+            let prompt_result = agent.prompt(blocks).await;
+            let aborted = matches!(&prompt_result, Err(e) if matches!(e, theta_agent_core::error::AgentError::Aborted));
+            if let Err(e) = &prompt_result {
                 tracing::error!("agent prompt failed: {e}");
-                let _ = msg_event_tx.send(TuiEvent::Error(format_error_chain(&e)));
-                let _ = session_mgr
-                    .mark_run_completed(&sid, Some("ProviderFailure"))
-                    .await;
-                continue;
+                let _ = msg_event_tx.send(TuiEvent::Error(format_error_chain(e)));
             }
+
+            // Always persist accumulated messages — even on abort or error.
+            // append_missing_entries is idempotent (fingerprint dedup), and
+            // the agent loop already skips persisting incomplete assistant
+            // messages from aborted streams.
+            let end_reason = if aborted {
+                Some("AbortedByUser")
+            } else if prompt_result.is_err() {
+                Some("ProviderFailure")
+            } else {
+                None
+            };
             let state = agent.state().await;
             match session_mgr.open_by_id(&sid).await {
                 Ok(mut session) => {
@@ -267,6 +277,8 @@ pub async fn run_tui(
                         tracing::error!("failed to persist session entries: {e}");
                         let _ = msg_event_tx
                             .send(TuiEvent::Error(format!("Failed to persist session: {e}")));
+                    } else if let Some(reason) = end_reason {
+                        let _ = session_mgr.mark_run_completed(&sid, Some(reason)).await;
                     } else {
                         let _ = session_mgr
                             .mark_run_completed(
