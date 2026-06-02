@@ -1273,6 +1273,7 @@ async fn handle_tui_action(
                         branch: m.branch,
                         token_count: m.token_count,
                         created_at: m.created_at,
+                        last_active_at: m.last_active_at,
                         message_count: m.message_count,
                     })
                     .collect();
@@ -1317,6 +1318,7 @@ async fn handle_tui_action(
                             branch: m.branch,
                             token_count: m.token_count,
                             created_at: m.created_at,
+                            last_active_at: m.last_active_at,
                             message_count: m.message_count,
                         });
                     }

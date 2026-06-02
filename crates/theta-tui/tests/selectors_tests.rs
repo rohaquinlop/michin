@@ -81,6 +81,7 @@ mod session_picker {
             branch: None,
             token_count: 0,
             created_at,
+            last_active_at: created_at,
             message_count: messages,
         }
     }
@@ -97,6 +98,10 @@ mod session_picker {
 
         picker.select_down();
         let selected = picker.selected_session().map(|s| s.id.clone());
+        picker.cycle_sort_mode();
+        assert_eq!(picker.sort_mode_label(), "newest");
+        assert_eq!(picker.selected_session().map(|s| s.id.clone()), selected);
+
         picker.cycle_sort_mode();
         assert_eq!(picker.sort_mode_label(), "oldest");
         assert_eq!(picker.selected_session().map(|s| s.id.clone()), selected);
@@ -119,6 +124,7 @@ mod session_picker {
             branch: Some("feature/ui".to_string()),
             token_count: 3200,
             created_at: 1_000_000_000_000,
+            last_active_at: 1_000_000_000_000,
             message_count: 18,
         };
         let max_w = 21usize;
@@ -174,6 +180,7 @@ mod tree_selector {
             branch: Some("feature/readability".to_string()),
             token_count: 0,
             created_at: 0,
+            last_active_at: 0,
             message_count: 12,
         };
         let row = tree_row_label(&session);

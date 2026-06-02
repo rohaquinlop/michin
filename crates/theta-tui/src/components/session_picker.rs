@@ -19,6 +19,7 @@ pub struct SessionInfo {
     pub branch: Option<String>,
     pub token_count: u32,
     pub created_at: u64,
+    pub last_active_at: u64,
     pub message_count: usize,
 }
 
@@ -38,6 +39,7 @@ pub struct SessionPicker {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionSortMode {
+    LastUpdated,
     Newest,
     Oldest,
     Title,
@@ -47,7 +49,7 @@ enum SessionSortMode {
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>, theme: Theme) -> Self {
         let mut sessions = sessions;
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
         let mut list_state = ListState::default();
         if !sessions.is_empty() {
             list_state.select(Some(0));
@@ -57,7 +59,7 @@ impl SessionPicker {
             selected: 0,
             list_state,
             theme,
-            sort_mode: SessionSortMode::Newest,
+            sort_mode: SessionSortMode::LastUpdated,
         }
     }
 
@@ -91,10 +93,11 @@ impl SessionPicker {
     pub fn cycle_sort_mode(&mut self) {
         let selected_id = self.selected_session().map(|s| s.id.clone());
         self.sort_mode = match self.sort_mode {
+            SessionSortMode::LastUpdated => SessionSortMode::Newest,
             SessionSortMode::Newest => SessionSortMode::Oldest,
             SessionSortMode::Oldest => SessionSortMode::Title,
             SessionSortMode::Title => SessionSortMode::Messages,
-            SessionSortMode::Messages => SessionSortMode::Newest,
+            SessionSortMode::Messages => SessionSortMode::LastUpdated,
         };
         self.apply_sort();
         if let Some(id) = selected_id
@@ -111,6 +114,7 @@ impl SessionPicker {
 
     pub fn sort_mode_label(&self) -> &'static str {
         match self.sort_mode {
+            SessionSortMode::LastUpdated => "last updated",
             SessionSortMode::Newest => "newest",
             SessionSortMode::Oldest => "oldest",
             SessionSortMode::Title => "title",
@@ -120,6 +124,10 @@ impl SessionPicker {
 
     fn apply_sort(&mut self) {
         match self.sort_mode {
+            SessionSortMode::LastUpdated => {
+                self.sessions
+                    .sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
+            }
             SessionSortMode::Newest => {
                 self.sessions
                     .sort_by_key(|s| std::cmp::Reverse(s.created_at));
@@ -186,7 +194,11 @@ impl SessionPicker {
                 s.title.clone()
             };
             truncated_titles.push(title);
-            when_strings.push(format_relative_time(s.created_at));
+            let ts = match self.sort_mode {
+                SessionSortMode::LastUpdated => s.last_active_at,
+                _ => s.created_at,
+            };
+            when_strings.push(format_relative_time(ts));
         }
 
         let max_title = truncated_titles
