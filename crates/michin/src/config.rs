@@ -1,4 +1,4 @@
-//! Configuration and auth storage for theta.
+//! Configuration and auth storage for michin.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

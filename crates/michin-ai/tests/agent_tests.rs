@@ -320,7 +320,7 @@ mod types {
     }
 
     #[test]
-    fn test_message_tool_result_serializes_to_theta_native_tag() {
+    fn test_message_tool_result_serializes_to_michin_native_tag() {
         let msg = Message::ToolResult {
             tool_call_id: "c1".into(),
             tool_name: "read".into(),

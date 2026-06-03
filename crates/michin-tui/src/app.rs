@@ -1693,7 +1693,7 @@ impl App {
                 if self.skill_commands.is_empty() {
                     self.chat.add_message(ChatMessage {
                         role: ChatRole::System,
-                        text: "No skills found in ~/.agents/skills, ~/.theta/skills, ./.agents/skills, or ./.theta/skills".into(),
+                        text: "No skills found in ~/.agents/skills, ~/.michin/skills, ./.agents/skills, or ./.michin/skills".into(),
                         tool_call_id: None,
                         is_streaming: false,
                     is_error: false,

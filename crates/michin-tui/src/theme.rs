@@ -1,7 +1,7 @@
 //! Color theme definitions.
 //!
 //! Built-in themes (`default`, `monokai`) plus user TOML themes from
-//! `~/.theta/themes/*.toml`. User themes may `inherits` from any built-in
+//! `~/.michin/themes/*.toml`. User themes may `inherits` from any built-in
 //! theme and override individual color keys.
 
 use std::collections::HashMap;
@@ -203,7 +203,7 @@ impl Theme {
 
 // ── User theme loading ──
 
-/// Load all user TOML themes from `~/.theta/themes/*.toml`.
+/// Load all user TOML themes from `~/.michin/themes/*.toml`.
 ///
 /// Each file's stem (without `.toml`) becomes the theme name.
 /// If a theme has `inherits`, its fields override the parent built-in theme.
@@ -215,7 +215,7 @@ pub fn load_user_themes() -> HashMap<String, Theme> {
 fn user_theme_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".theta")
+        .join(".michin")
         .join("themes")
 }
 
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn load_user_themes_from_disk() {
         let themes = load_user_themes();
-        // Should find catppuccin_mocha and catppuccin_latte if placed in ~/.theta/themes/.
+        // Should find catppuccin_mocha and catppuccin_latte if placed in ~/.michin/themes/.
         // This test is a no-op if the files aren't present (e.g. CI).
         for name in ["catppuccin_mocha", "catppuccin_latte"] {
             if let Some(theme) = themes.get(name) {

@@ -1,7 +1,7 @@
 //! MichiN Script: Rhai-powered scriptable hooks for MichiN.
 //!
-//! Loads `.rhai` scripts from `~/.theta/extensions/` (global) and
-//! `./.theta/extensions/` (project-local). Scripts can register
+//! Loads `.rhai` scripts from `~/.michin/extensions/` (global) and
+//! `./.michin/extensions/` (project-local). Scripts can register
 //! `before_tool` and `after_tool` hooks that intercept tool calls.
 //!
 //! # Script API

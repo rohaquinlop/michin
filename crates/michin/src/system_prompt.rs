@@ -156,9 +156,9 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
     }
 
     // MichiN context file
-    let theta_ctx = working_dir.join(".michin").join("context.md");
-    if theta_ctx.exists()
-        && let Ok(ctx) = tokio::fs::read_to_string(&theta_ctx).await
+    let ctx_path = working_dir.join(".michin").join("context.md");
+    if ctx_path.exists()
+        && let Ok(ctx) = tokio::fs::read_to_string(&ctx_path).await
     {
         context.push_str(&format!(
             "

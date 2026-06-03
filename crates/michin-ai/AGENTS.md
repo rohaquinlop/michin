@@ -8,10 +8,10 @@ Provides the unified LLM abstraction layer: types, provider trait, streaming, re
 
 ## Public API
 
-- `theta_ai::types` — `ContentBlock`, `Message`, `Tool`, `Provider`, `Context`, `StopReason`, `ThinkingLevel`, `Modality`, `Usage`.
-- `theta_ai::model` — `Model` definition struct.
-- `theta_ai::event` — `EventAccumulator`, `AssistantMessageEvent` for streaming.
-- `theta_ai::Provider` trait — the extension point for new LLM backends.
+- `michin_ai::types` — `ContentBlock`, `Message`, `Tool`, `Provider`, `Context`, `StopReason`, `ThinkingLevel`, `Modality`, `Usage`.
+- `michin_ai::model` — `Model` definition struct.
+- `michin_ai::event` — `EventAccumulator`, `AssistantMessageEvent` for streaming.
+- `michin_ai::Provider` trait — the extension point for new LLM backends.
 
 ## Provider Implementations
 

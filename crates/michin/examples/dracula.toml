@@ -1,7 +1,7 @@
-# ~/.theta/themes/dracula.toml
+# ~/.michin/themes/dracula.toml
 #
-# User theme file. Place TOML files in ~/.theta/themes/ to make them
-# available via Ctrl+T cycling and the `theme` field in ~/.theta/config.toml.
+# User theme file. Place TOML files in ~/.michin/themes/ to make them
+# available via Ctrl+T cycling and the `theme` field in ~/.michin/config.toml.
 #
 # The filename stem becomes the theme name (e.g. "dracula" for dracula.toml).
 #

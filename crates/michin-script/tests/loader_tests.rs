@@ -3,7 +3,7 @@ use michin_script::ScriptLoader;
 #[tokio::test]
 async fn test_discover_project_local_only() {
     let dir = tempfile::tempdir().unwrap();
-    let ext_dir = dir.path().join(".theta").join("extensions");
+    let ext_dir = dir.path().join(".michin").join("extensions");
     tokio::fs::create_dir_all(&ext_dir).await.unwrap();
     tokio::fs::write(ext_dir.join("test.rhai"), "// test")
         .await

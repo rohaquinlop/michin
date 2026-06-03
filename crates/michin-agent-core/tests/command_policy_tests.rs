@@ -25,8 +25,8 @@ fn parse_segments_respects_quotes_and_chaining() {
 #[test]
 fn always_on_policy_allows_read_only_commands() {
     for command in [
-        "cd /Users/rhafid/opensource-projects/theta && git status",
-        "git diff crates/theta/src/interactive.rs 2>/dev/null",
+        "cd /Users/rhafid/opensource-projects/michin && git status",
+        "git diff crates/michin/src/interactive.rs 2>/dev/null",
         "cargo test",
         "cargo clippy -- -D warnings",
         "cargo fmt --check",

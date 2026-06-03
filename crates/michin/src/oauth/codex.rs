@@ -213,7 +213,7 @@ fn build_authorize_url(challenge: &str, state: &str) -> String {
          state={state}&\
          id_token_add_organizations=true&\
          codex_cli_simplified_flow=true&\
-         originator=theta"
+         originator=michin"
     )
 }
 

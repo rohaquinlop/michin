@@ -45,7 +45,7 @@ All six phases complete. Active maintenance and polish.
 | ---------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1. Foundation    | Done   | `michin-ai` + `michin-models`                                                                                                                     |
 | 2. Agent Runtime | Done   | `michin-agent-core`                                                                                                                              |
-| 3. CLI + Tools   | Done   | `theta` binary with built-in tools                                                                                                              |
+| 3. CLI + Tools   | Done   | `michin` binary with built-in tools                                                                                                              |
 | 4. TUI           | Done   | `michin-tui` + interactive mode                                                                                                                  |
 | 5. Extensibility | Done   | Skills, templates, continue/resume, slash commands, login flow, scripts                                                                         |
 | 6. Polish        | Done   | Compaction (truncation + summary), retry (exponential backoff), session picker, tree selector, model selector, settings selector, theme cycling |
@@ -93,7 +93,7 @@ All six phases complete. Active maintenance and polish.
 | `crates/michin-script/src/lib.rs`                       | Public API: `ScriptEngine`, `ScriptHooks`, `ScriptLoader`                                 |
 | `crates/michin-script/src/engine.rs`                    | Rhai engine setup                                                                         |
 | `crates/michin-script/src/hooks.rs`                     | `ScriptHooks` — bridges Rhai callbacks to `Hooks` trait                                   |
-| `crates/michin-script/src/loader.rs`                    | File discovery: `~/.michin/extensions/*.rhai` + `./.theta/extensions/*.rhai`               |
+| `crates/michin-script/src/loader.rs`                    | File discovery: `~/.michin/extensions/*.rhai` + `./.michin/extensions/*.rhai`               |
 | `crates/michin/src/main.rs`                             | Entry point                                                                               |
 | `crates/michin/src/cli.rs`                              | Clap argument parsing: prompt, continue, resume, fork, sessions, login, rpc, tui          |
 | `crates/michin/src/config.rs`                           | `MichiNConfig` — config.toml parsing, `AuthConfig` — auth.json with env fallback           |
@@ -103,7 +103,7 @@ All six phases complete. Active maintenance and polish.
 | `crates/michin/src/skills.rs`                           | Skill discovery (global + project-local), YAML frontmatter parsing                        |
 | `crates/michin/src/scripts.rs`                          | Extension script discovery for system prompt injection                                    |
 | `crates/michin/src/session.rs`                          | `SessionManager` — pi-compatible JSONL sessions in `~/.michin/sessions/`                   |
-| `crates/michin/src/login.rs`                            | `theta login` — OAuth flow entry point                                                    |
+| `crates/michin/src/login.rs`                            | `michin login` — OAuth flow entry point                                                    |
 | `crates/michin/src/oauth/codex.rs`                      | Codex OAuth token exchange and refresh                                                    |
 | `crates/michin/src/rpc.rs`                              | JSON-RPC over stdin/stdout                                                                |
 | `crates/michin/src/prompts.rs`                          | Print-mode prompt execution                                                               |
@@ -152,7 +152,7 @@ Pi-compatible JSONL. MichiN reads/writes same format as pi. Sessions in `~/.mich
 
 ## Tool System
 
-Seven built-in tools, each implementing `theta_agent_core::AgentTool`:
+Seven built-in tools, each implementing `michin_agent_core::AgentTool`:
 
 | Tool    | File                              | Description                                       |
 | ------- | --------------------------------- | ------------------------------------------------- |
@@ -167,8 +167,8 @@ Path behavior: absolute paths honored directly. Output truncation at 2000 lines 
 
 Three tiers:
 
-1. **Skills** (`SKILL.md` files) — Markdown with YAML frontmatter, discovered from `~/.michin/skills/` and `./.theta/skills/`.
-2. **Rhai Scripts** (`~/.michin/extensions/*.rhai`, `./.theta/extensions/*.rhai`) — Runtime hooks.
+1. **Skills** (`SKILL.md` files) — Markdown with YAML frontmatter, discovered from `~/.michin/skills/` and `./.michin/skills/`.
+2. **Rhai Scripts** (`~/.michin/extensions/*.rhai`, `./.michin/extensions/*.rhai`) — Runtime hooks.
 3. **Rust Traits** — `AgentTool`, `Hooks`, `LlmProvider`. Fork MichiN, implement traits.
 
 ## TUI Keybindings

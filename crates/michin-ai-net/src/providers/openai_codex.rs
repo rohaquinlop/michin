@@ -6,7 +6,7 @@
 //! ## Headers
 //! - `OpenAI-Beta: responses=experimental` — required
 //! - `chatgpt-account-id` — extracted from JWT
-//! - `originator: theta` — request origin
+//! - `originator: michin` — request origin
 //! - `x-client-request-id` — per-request trace ID
 
 use async_trait::async_trait;
@@ -187,7 +187,7 @@ async fn sse_stream(
         .header("Content-Type", "application/json")
         .header("OpenAI-Beta", "responses=experimental")
         .header("accept", "text/event-stream")
-        .header("originator", "theta");
+        .header("originator", "michin");
 
     if !account_id.is_empty() {
         req = req.header("chatgpt-account-id", account_id);
@@ -210,7 +210,7 @@ async fn sse_stream(
         if status.as_u16() == 401 {
             return Err(MichiNError::ApiError {
                 status: 401,
-                message: "ChatGPT session token expired. Re-authenticate with `theta login`."
+                message: "ChatGPT session token expired. Re-authenticate with `michin login`."
                     .into(),
                 retry_after_ms: None,
             });
@@ -243,7 +243,7 @@ pub async fn ws_stream(
         .uri(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("OpenAI-Beta", "responses=experimental")
-        .header("originator", "theta");
+        .header("originator", "michin");
 
     if !account_id.is_empty() {
         req_builder = req_builder.header("chatgpt-account-id", account_id);

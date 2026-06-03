@@ -88,7 +88,7 @@ fn model_modalities(id: &str) -> Vec<Modality> {
 }
 
 fn model_from_entry(entry: &MiMoModelEntry) -> Option<Model> {
-    // Skip TTS models — theta only supports text generation.
+    // Skip TTS models — michin only supports text generation.
     if entry.id.contains("tts") {
         return None;
     }

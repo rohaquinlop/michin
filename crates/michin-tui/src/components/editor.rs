@@ -1418,7 +1418,7 @@ fn collect_file_paths(
         }
         if matches!(
             name.as_str(),
-            "target" | "node_modules" | ".git" | ".theta" | "dist" | "build"
+            "target" | "node_modules" | ".git" | ".michin" | "dist" | "build"
         ) {
             continue;
         }

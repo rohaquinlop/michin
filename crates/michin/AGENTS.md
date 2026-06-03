@@ -1,6 +1,6 @@
 # michin (CLI) — Agent Rules
 
-> Rules for working on the theta binary crate: CLI, TUI glue, tools, sessions, config.
+> Rules for working on the michin binary crate: CLI, TUI glue, tools, sessions, config.
 
 ## Crate Purpose
 
@@ -19,7 +19,7 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 | `src/skills.rs`                       | Skill discovery, YAML frontmatter, XML generation           |
 | `src/scripts.rs`                      | Extension script discovery                                  |
 | `src/session.rs`                      | `SessionManager` — pi-compatible JSONL                      |
-| `src/login.rs`                        | `theta login` OAuth entry point                             |
+| `src/login.rs`                        | `michin login` OAuth entry point                             |
 | `src/oauth/codex.rs`                  | Codex OAuth token exchange and refresh                      |
 | `src/rpc.rs`                          | JSON-RPC over stdin/stdout                                  |
 | `src/prompts.rs`                      | Print-mode prompt execution                                 |
@@ -34,19 +34,19 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 
 Four built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
 
-- All implement `theta_agent_core::AgentTool`.
+- All implement `michin_agent_core::AgentTool`.
 - `ToolContext` holds working directory — relative paths resolve against it.
 - Output truncation: `max_lines: 2000`, `max_bytes: 50_000`.
 
 ## Session Format
 
-Pi-compatible JSONL. Sessions in `~/.theta/sessions/` with `index.json`.
+Pi-compatible JSONL. Sessions in `~/.michin/sessions/` with `index.json`.
 JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_level_change`.
 
 ## Config and Auth
 
-- Config: `~/.theta/config.toml` (model default, thinking default, agent safety, compaction, retry, provider, profile, theme).
-- Auth: `~/.theta/auth.json` with env var fallback. OAuth tokens auto-refresh.
+- Config: `~/.michin/config.toml` (model default, thinking default, agent safety, compaction, retry, provider, profile, theme).
+- Auth: `~/.michin/auth.json` with env var fallback. OAuth tokens auto-refresh.
 - Supported providers: OpenAI, OpenAI Codex, DeepSeek, OpenCode, Xiaomi MiMo.
 
 ## Conventions

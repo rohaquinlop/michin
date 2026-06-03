@@ -4,7 +4,7 @@
 
 ## Crate Purpose
 
-Rhai-powered runtime hooks that bridge user scripts to `theta_agent_core::Hooks`. Scripts can intercept tool calls and render TUI status elements.
+Rhai-powered runtime hooks that bridge user scripts to `michin_agent_core::Hooks`. Scripts can intercept tool calls and render TUI status elements.
 
 ## Key Files
 
@@ -13,7 +13,7 @@ Rhai-powered runtime hooks that bridge user scripts to `theta_agent_core::Hooks`
 | `src/lib.rs`        | Public API: `ScriptEngine`, `ScriptHooks`, `ScriptLoader` |
 | `src/engine.rs`     | Rhai engine setup, `tool.before`/`tool.after`/`tui.status`/`tui.row` API |
 | `src/hooks.rs`      | `ScriptHooks` — bridges Rhai callbacks to `Hooks` trait |
-| `src/loader.rs`     | File discovery: `~/.theta/extensions/*.rhai` + `./.theta/extensions/*.rhai` |
+| `src/loader.rs`     | File discovery: `~/.michin/extensions/*.rhai` + `./.michin/extensions/*.rhai` |
 
 ## Script Loading
 

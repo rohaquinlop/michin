@@ -1,8 +1,8 @@
 //! Script loading and discovery.
 //!
 //! Auto-discovers `.rhai` scripts from:
-//! - `~/.theta/extensions/*.rhai` (global)
-//! - `./.theta/extensions/*.rhai` (project-local)
+//! - `~/.michin/extensions/*.rhai` (global)
+//! - `./.michin/extensions/*.rhai` (project-local)
 
 use std::path::{Path, PathBuf};
 
@@ -28,14 +28,14 @@ impl ScriptLoader {
     pub async fn discover(working_dir: &Path) -> Self {
         let mut scripts = Vec::new();
 
-        // Global: ~/.theta/extensions/*.rhai
+        // Global: ~/.michin/extensions/*.rhai
         if let Some(home) = dirs::home_dir() {
-            let global_dir = home.join(".theta").join("extensions");
+            let global_dir = home.join(".michin").join("extensions");
             Self::discover_in_dir(&global_dir, &mut scripts).await;
         }
 
-        // Project-local: ./.theta/extensions/*.rhai
-        let project_dir = working_dir.join(".theta").join("extensions");
+        // Project-local: ./.michin/extensions/*.rhai
+        let project_dir = working_dir.join(".michin").join("extensions");
         Self::discover_in_dir(&project_dir, &mut scripts).await;
 
         Self { scripts }
