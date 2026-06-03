@@ -12,10 +12,10 @@ fn tools_prompt_uses_function_calling_not_xml() {
 }
 
 #[test]
-fn response_contract_contains_execution_continuity() {
-    assert!(RESPONSE_CONTRACT.contains("DONE"));
-    assert!(RESPONSE_CONTRACT.contains("BLOCKED"));
-    assert!(RESPONSE_CONTRACT.contains("FAILED"));
+fn response_contract_no_longer_has_turn_status_markers() {
+    assert!(!RESPONSE_CONTRACT.contains("DONE — changes applied"));
+    assert!(!RESPONSE_CONTRACT.contains("BLOCKED"));
+    assert!(!RESPONSE_CONTRACT.contains("FAILED"));
 }
 
 #[test]

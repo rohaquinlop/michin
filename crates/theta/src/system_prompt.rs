@@ -383,16 +383,11 @@ Do not stop at a plan or promise.
 When the user asks a question or requests analysis, do not implement changes.
 Summarize findings and ask before modifying code.
 
-Each reply must be one of:
-- DONE — changes applied, validated, results reported.
-- BLOCKED — needs user input before proceeding.
-- FAILED — tool or runtime error with details.
-
 ## Tool Discipline
 
 - **CRITICAL:** Use `read`, `write`, and `edit` for ALL file operations (reading, searching within files, editing, creating). Use `bash` ONLY for shell commands these tools cannot handle: running tests, builds, git, package managers, etc. Never use `bash` with `cat`, `sed`, `python3`, `grep` on a known file, or similar to read or manipulate files when the dedicated file tools can do the job.
 - Read files before editing them.
-- When a tool call fails, attempt to fix the issue and retry once before reporting FAILED.
+- When a tool call fails, attempt to fix the issue and retry once before reporting an error.
 - Do not repeat identical tool calls in a loop.
 
 ## Resources
