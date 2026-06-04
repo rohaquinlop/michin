@@ -228,7 +228,7 @@ pub fn is_ignorable_dir(name: &str) -> bool {
     ) || name.starts_with('.')
 }
 
-async fn find_context_file(start: &Path, filename: &str) -> Option<PathBuf> {
+pub async fn find_context_file(start: &Path, filename: &str) -> Option<PathBuf> {
     let mut current = if start.is_absolute() {
         start.to_path_buf()
     } else {

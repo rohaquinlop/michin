@@ -291,7 +291,7 @@ impl Chat {
                 };
                 ("[tool] ", style)
             }
-            ChatRole::System => ("[system] ", Style::default().fg(self.theme.dim)),
+            ChatRole::System => ("", Style::default().fg(self.theme.dim)),
             ChatRole::Skill => (
                 "▸ skill ",
                 Style::default()
@@ -339,6 +339,17 @@ impl Chat {
                 Span::styled(parts.removed.to_string(), removed_style),
                 Span::styled(parts.suffix.to_string(), tool_style),
             ])];
+        }
+
+        // System messages are machine-generated (banners, session info, etc.) —
+        // render verbatim. No markdown processing, which would misinterpret
+        // centered text leading spaces as indented code blocks.
+        if msg.role == ChatRole::System {
+            let style = role_style;
+            return text
+                .lines()
+                .map(|line| Line::from(vec![Span::styled(format!("{prefix}{line}"), style)]))
+                .collect();
         }
 
         let markdown_width = if msg.role == ChatRole::User {

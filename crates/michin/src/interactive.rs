@@ -20,7 +20,10 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::config::MichiNConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::build_system_prompt_with_skills;
+use crate::skills;
+use crate::system_prompt::{
+    build_system_prompt_with_skills, discover_nested_agents, find_context_file,
+};
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -162,6 +165,17 @@ pub async fn run_tui(
             current: tl,
             show_selector: false,
         });
+
+        // Send startup banner.
+        {
+            let working_dir = working_dir.to_path_buf();
+            let tx = event_tx_raw.clone();
+            tokio::spawn(async move {
+                if let Some(banner) = build_startup_banner(&working_dir).await {
+                    let _ = tx.send(TuiEvent::Info(banner));
+                }
+            });
+        }
 
         // Poll extension status rows — wait on notify from hook evaluations.
         // Reads the current agent from agent_cell so it works across agent
@@ -976,6 +990,14 @@ async fn handle_tui_action(
                                         let _ = event_tx.send(TuiEvent::Info(
                                             "Connected to ChatGPT Plus. Ready.".into(),
                                         ));
+
+                                        // Show startup banner.
+                                        if let Some(banner) =
+                                            build_startup_banner(working_dir).await
+                                        {
+                                            let _ = event_tx.send(TuiEvent::Info(banner));
+                                        }
+
                                         // Persist model + thinking.
                                         let mut s = crate::settings::load_settings().await;
                                         s.set_model_thinking(
@@ -1053,6 +1075,12 @@ async fn handle_tui_action(
                                 let _ = event_tx.send(TuiEvent::Info(format!(
                                     "Connected to {provider}. Ready."
                                 )));
+
+                                // Show startup banner.
+                                if let Some(banner) = build_startup_banner(working_dir).await {
+                                    let _ = event_tx.send(TuiEvent::Info(banner));
+                                }
+
                                 // Persist model + thinking.
                                 let mut s = crate::settings::load_settings().await;
                                 s.set_model_thinking(
@@ -1470,6 +1498,11 @@ async fn handle_tui_action(
             let _ = event_tx.send(TuiEvent::Info(
                 "Started new unsaved session (saved on first message).".into(),
             ));
+
+            // Show startup banner on new session.
+            if let Some(banner) = build_startup_banner(working_dir).await {
+                let _ = event_tx.send(TuiEvent::Info(banner));
+            }
         }
         TuiAction::Steer(text) => {
             let Some(agent) = agent_cell.read().await.clone() else {
@@ -2216,4 +2249,75 @@ fn message_to_history_entries(msg: &michin_ai::Message) -> Vec<HistoryEntry> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Build the startup banner shown in chat at session start.
+pub async fn build_startup_banner(working_dir: &Path) -> Option<String> {
+    let art = "┌─────────────────┐\n│  /\\_/\\          │\n| ( o.o )         │\n│  > ^ <          │\n│  michin@dev:~$  │\n└─────────────────┘";
+
+    let mut banner = String::with_capacity(2048);
+
+    banner.push_str(art);
+    banner.push_str("\n\n");
+
+    // ── [Context] ──
+    let context_files = build_context_files_list(working_dir).await;
+    if !context_files.is_empty() {
+        banner.push_str("[Context]\n");
+        for f in &context_files {
+            banner.push_str(&format!("  {f}\n"));
+        }
+        banner.push('\n');
+    }
+
+    // ── [Skills] ──
+    let discovered = skills::discover_skills(working_dir).await;
+    if !discovered.is_empty() {
+        let names: Vec<&str> = discovered.iter().map(|s| s.name.as_str()).collect();
+        banner.push_str("[Skills]\n");
+        banner.push_str(&format!("  {}\n", names.join(", ")));
+    }
+
+    if banner.lines().all(|l| l.trim().is_empty()) {
+        None
+    } else {
+        Some(banner)
+    }
+}
+
+/// Build a compact list of context files discovered for the working directory.
+async fn build_context_files_list(working_dir: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+
+    // AGENTS.md and any nested AGENTS.md.
+    if let Some(root) = find_context_file(working_dir, "AGENTS.md").await {
+        files.push(root.display().to_string());
+
+        let project_root = root.parent().unwrap_or(working_dir);
+        let nested = discover_nested_agents(project_root).await;
+        for (rel_path, _) in &nested {
+            files.push(format!("  {rel_path}/AGENTS.md"));
+        }
+    }
+
+    // CLAUDE.md (only if distinct).
+    if let Some(claude) = find_context_file(working_dir, "CLAUDE.md").await {
+        let already = files.iter().any(|f| f.contains("CLAUDE.md"));
+        if !already {
+            // Check it's not the same file as AGENTS.md.
+            if let Some(ref agents) = find_context_file(working_dir, "AGENTS.md").await
+                && claude != *agents
+            {
+                files.push(claude.display().to_string());
+            }
+        }
+    }
+
+    // .michin/context.md
+    let ctx = working_dir.join(".michin").join("context.md");
+    if ctx.exists() {
+        files.push(ctx.display().to_string());
+    }
+
+    files
 }
