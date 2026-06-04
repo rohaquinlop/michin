@@ -1,8 +1,8 @@
 //! Script loading and discovery.
 //!
-//! Auto-discovers `.rhai` scripts from:
-//! - `~/.michin/extensions/*.rhai` (global)
-//! - `./.michin/extensions/*.rhai` (project-local)
+//! Two discovery paths:
+//! - Extension scripts: `~/.michin/extensions/*.rhai` and `./.michin/extensions/*.rhai`
+//! - Custom tools: `~/.michin/tools/*.rhai` and `./.michin/tools/*.rhai`
 
 use std::path::{Path, PathBuf};
 
@@ -17,14 +17,13 @@ pub struct ScriptDef {
     pub source: String,
 }
 
-/// Discover and load all `.rhai` scripts from standard locations.
+/// Discover and load all `.rhai` scripts from standard extension locations.
 pub struct ScriptLoader {
-    /// Loaded script definitions.
     scripts: Vec<ScriptDef>,
 }
 
 impl ScriptLoader {
-    /// Create a new loader and discover scripts.
+    /// Create a new loader and discover extension scripts.
     pub async fn discover(working_dir: &Path) -> Self {
         let mut scripts = Vec::new();
 
@@ -95,6 +94,45 @@ impl ScriptLoader {
     }
 
     /// Whether no scripts were found.
+    pub fn is_empty(&self) -> bool {
+        self.scripts.is_empty()
+    }
+}
+
+/// Discover and load custom tool `.rhai` scripts from standard locations.
+pub struct ToolLoader {
+    scripts: Vec<ScriptDef>,
+}
+
+impl ToolLoader {
+    /// Create a new loader and discover custom tool scripts.
+    pub async fn discover(working_dir: &Path) -> Self {
+        let mut scripts = Vec::new();
+
+        // Global: ~/.michin/tools/*.rhai
+        if let Some(home) = dirs::home_dir() {
+            let global_dir = home.join(".michin").join("tools");
+            ScriptLoader::discover_in_dir(&global_dir, &mut scripts).await;
+        }
+
+        // Project-local: ./.michin/tools/*.rhai
+        let project_dir = working_dir.join(".michin").join("tools");
+        ScriptLoader::discover_in_dir(&project_dir, &mut scripts).await;
+
+        Self { scripts }
+    }
+
+    /// Iterate over discovered tool script definitions.
+    pub fn scripts(&self) -> &[ScriptDef] {
+        &self.scripts
+    }
+
+    /// Number of tool scripts discovered.
+    pub fn len(&self) -> usize {
+        self.scripts.len()
+    }
+
+    /// Whether no tool scripts were found.
     pub fn is_empty(&self) -> bool {
         self.scripts.is_empty()
     }

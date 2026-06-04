@@ -73,7 +73,9 @@ fn extension_guardrails_rejects_general_language() {
 #[test]
 fn extension_guardrails_has_ambiguity_fallback() {
     assert!(EXTENSION_CREATION_GUARDRAILS.contains("extend michin"));
-    assert!(EXTENSION_CREATION_GUARDRAILS.contains("skill, extension, or code change"));
+    assert!(
+        EXTENSION_CREATION_GUARDRAILS.contains("skill, extension, custom tool, or code change")
+    );
 }
 
 #[test]

@@ -115,7 +115,23 @@ Do not create an extension when the user is working on their own project.
 Only create one when the user explicitly asks to extend MichiN's behavior.
 
 For ambiguous requests like "extend michin", ask whether the user means a
-skill, extension, or code change."#;
+skill, extension, custom tool, or code change.
+
+## Custom Tools
+
+Custom tools are Rhai scripts in `~/.michin/tools/*.rhai` that register
+new tools the LLM can invoke. A custom tool script must:
+
+1. Call `tool.register(name, schema)` at the top level to register the tool.
+2. Define an `execute(args)` function that returns a string or a map with
+   `content` (string) and `is_error` (bool).
+
+Available built-in functions: `exec(cmd, args)`, `read_file(path)`,
+`write_file(path, content)`, `set_state(key, value)`, `get_state(key)`,
+`cwd()`, `home_dir()`.
+
+The schema map must include `description` and `parameters` (JSON Schema).
+Optional: `execution_mode` ("parallel" or "sequential", default "parallel")."#;
 
 // ── Project context discovery ──────────────────────────────────────
 

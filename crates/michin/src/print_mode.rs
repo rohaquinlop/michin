@@ -44,6 +44,11 @@ pub async fn run_prompt_print_mode(
         agent.add_tool(tool).await;
     }
 
+    // Load custom tools from ~/.michin/tools/*.rhai and ./.michin/tools/*.rhai.
+    for tool in crate::scripts::load_custom_tools(working_dir).await {
+        agent.add_tool(tool).await;
+    }
+
     // Build and set the system prompt for prompt mode.
     let system_blocks =
         build_system_prompt(working_dir, model_id, Some("medium"), Some(250_000)).await;
@@ -234,6 +239,9 @@ pub async fn run_continue_print_mode(
     for tool in builtin_tools(tool_ctx) {
         agent.add_tool(tool).await;
     }
+    for tool in crate::scripts::load_custom_tools(working_dir).await {
+        agent.add_tool(tool).await;
+    }
 
     // Build and set system prompt.
     let system_blocks =
@@ -374,6 +382,9 @@ pub async fn run_resume_print_mode(
     let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
     agent.set_config(crate::config::to_agent_config(config));
     for tool in builtin_tools(tool_ctx) {
+        agent.add_tool(tool).await;
+    }
+    for tool in crate::scripts::load_custom_tools(working_dir).await {
         agent.add_tool(tool).await;
     }
 

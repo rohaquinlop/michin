@@ -1,16 +1,18 @@
 //! Script integration: loads Rhai scripts from disk and bridges
 //! them into the agent via the Hooks trait.
 //!
-//! Scripts live in `~/.michin/extensions/*.rhai` (global) and
-//! `./.michin/extensions/*.rhai` (project-local). They are written
-//! by the agent when the user asks for guardrails, permission gates,
-//! or tool-call interceptors.
+//! Extension scripts live in `~/.michin/extensions/*.rhai` and
+//! `./.michin/extensions/*.rhai`. They provide tool-call hooks and TUI rows.
+//!
+//! Custom tools live in `~/.michin/tools/*.rhai` and `./.michin/tools/*.rhai`.
+//! They register tools the LLM can invoke via `tool.register()` + `execute()`.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use michin_agent_core::hooks::Hooks;
-use michin_script::{ScriptEngine, ScriptHooks, ScriptLoader};
+use michin_agent_core::types::AgentTool;
+use michin_script::{RhaiCustomTool, ScriptEngine, ScriptHooks, ScriptLoader, ToolLoader};
 use tokio::sync::Notify;
 
 /// A discovered script with metadata for prompt display.
@@ -118,6 +120,45 @@ pub async fn load_script_hooks(
         let hooks = ScriptHooks::new(engine, status_notify);
         Some(Arc::new(hooks))
     }
+}
+
+/// Load custom tool scripts from disk and return them as `AgentTool` instances.
+/// Returns an empty vec if no tool scripts found.
+pub async fn load_custom_tools(working_dir: &Path) -> Vec<Arc<dyn AgentTool>> {
+    let loader = ToolLoader::discover(working_dir).await;
+
+    if loader.is_empty() {
+        tracing::info!("no custom tool scripts discovered");
+        return Vec::new();
+    }
+
+    tracing::info!(count = loader.len(), "loading custom tool scripts");
+
+    let engine = Arc::new(ScriptEngine::new());
+    let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
+
+    for def in loader.scripts() {
+        if let Err(e) = engine.load(def) {
+            tracing::error!(
+                script = %def.name,
+                location = %def.location.display(),
+                error = %e,
+                "failed to load custom tool script"
+            );
+            continue;
+        }
+    }
+
+    for tool_def in engine.registered_tools() {
+        tracing::info!(
+            tool_name = %tool_def.name,
+            script = %tool_def.script_name,
+            "registering custom tool"
+        );
+        tools.push(Arc::new(RhaiCustomTool::new(tool_def, Arc::clone(&engine))));
+    }
+
+    tools
 }
 
 /// Placeholder check — engine has at least one handler registered.

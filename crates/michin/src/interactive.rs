@@ -533,6 +533,11 @@ async fn create_agent(
         agent.set_hooks(hooks);
     }
 
+    // Load custom tools from ~/.michin/tools/*.rhai and ./.michin/tools/*.rhai.
+    for tool in crate::scripts::load_custom_tools(working_dir).await {
+        agent.add_tool(tool).await;
+    }
+
     // Apply thinking level from settings.
     let tl = parse_thinking_level(thinking);
     agent.set_thinking_level(tl).await;
@@ -1990,8 +1995,77 @@ pub fn format_tool_summary(
                 "write".to_string()
             }
         }
-        _ => content_blocks_to_text(&result.content, max_chars),
+        _ => summarize_custom_tool(result, max_chars),
     };
+    truncate_chars(&summary, max_chars)
+}
+
+/// Summarize output from a custom tool (not read/edit/bash/write).
+/// If the output is JSON, extract the most informative fields.
+/// Otherwise truncate the raw text.
+fn summarize_custom_tool(
+    result: &michin_agent_core::types::ToolResult,
+    max_chars: usize,
+) -> String {
+    let text = content_blocks_to_text(&result.content, usize::MAX);
+    // Try to parse as JSON and extract key fields for a compact summary.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if value.is_object() {
+            return summarize_json_tool_result(&value, &result.tool_name, max_chars);
+        } else if value.is_array() {
+            // Array of objects (e.g. search results) — show count + first title.
+            if let Some(arr) = value.as_array() {
+                let count = arr.len();
+                let first = arr.first().and_then(|v| {
+                    v.get("title")
+                        .or_else(|| v.get("url"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| truncate_chars(s, 80))
+                });
+                return match first {
+                    Some(f) => format!("{} ({count} results): {f}", result.tool_name),
+                    None => format!("{}: {count} results", result.tool_name),
+                };
+            }
+        }
+    }
+    // Not JSON or unparseable — truncate raw text.
+    truncate_chars(&text, max_chars)
+}
+
+/// Summarize a JSON object tool result by extracting the most useful keys.
+fn summarize_json_tool_result(
+    value: &serde_json::Value,
+    tool_name: &str,
+    max_chars: usize,
+) -> String {
+    let obj = value.as_object().unwrap();
+    // Priority fields: title, url, status, workdir (for fetch tools).
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(t) = obj.get("title").and_then(|v| v.as_str())
+        && !t.is_empty()
+    {
+        parts.push(format!("\"{}\"", truncate_chars(t, 60)));
+    }
+    if let Some(u) = obj.get("url").and_then(|v| v.as_str()) {
+        parts.push(truncate_chars(u, 50));
+    }
+    if let Some(s) = obj.get("status") {
+        parts.push(format!("status={}", s));
+    }
+    if let Some(err) = obj.get("error") {
+        parts.push(format!("error={}", err));
+    }
+    if parts.is_empty() {
+        // Fallback: use first non-trivial value.
+        for (k, v) in obj.iter().take(3) {
+            let s = v.to_string();
+            if !s.is_empty() && s != "null" {
+                parts.push(format!("{}={}", k, truncate_chars(&s, 40)));
+            }
+        }
+    }
+    let summary = format!("{}: {}", tool_name, parts.join(", "));
     truncate_chars(&summary, max_chars)
 }
 
