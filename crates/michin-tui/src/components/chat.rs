@@ -357,6 +357,7 @@ impl Chat {
             markdown_width,
         ));
         if msg.role == ChatRole::User {
+            lines = wrap_styled_lines(&lines, markdown_width);
             lines = wrap_user_bubble(
                 lines,
                 self.theme.user_bubble,
