@@ -7,7 +7,7 @@ use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
 };
@@ -848,9 +848,11 @@ impl App {
                 let prefix = if idx == selected { "> " } else { "  " };
                 let text = format!("{prefix}{item}");
                 let style = if idx == selected {
-                    Style::default().fg(self.theme.accent).bg(Color::DarkGray)
+                    Style::default()
+                        .fg(self.theme.accent)
+                        .bg(self.theme.highlight)
                 } else {
-                    Style::default().bg(self.theme.bg)
+                    Style::default().fg(self.theme.fg).bg(self.theme.bg)
                 };
                 // Pad to full row width so background fills entire row.
                 let padded = format!("{:<width$}", text, width = inner.width as usize);
@@ -858,7 +860,7 @@ impl App {
             })
             .collect();
 
-        let list = List::new(list_items);
+        let list = List::new(list_items).highlight_style(Style::default().bg(self.theme.bg));
         frame.render_widget(list, inner);
     }
 
