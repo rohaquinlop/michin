@@ -655,7 +655,7 @@ fn deepseek_reasoning_content_stripped_on_replay() {
 }
 
 #[test]
-fn mimo_reasoning_content_stripped_on_replay() {
+fn mimo_reasoning_content_preserved_on_replay() {
     let model = mimo_model();
     let msg = Message::Assistant {
         content: vec![
@@ -676,8 +676,12 @@ fn mimo_reasoning_content_stripped_on_replay() {
 
     let converted = convert_message(&model, &msg).expect("assistant converts");
 
-    // MiMo should send empty reasoning_content, same as DeepSeek.
-    assert_eq!(converted["reasoning_content"], json!(""));
+    // MiMo sends actual reasoning_content as required by the API.
+    // See: platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
+    assert_eq!(
+        converted["reasoning_content"],
+        json!("Processing request...")
+    );
     assert!(converted["content"].as_str().unwrap().contains("Done."));
 }
 

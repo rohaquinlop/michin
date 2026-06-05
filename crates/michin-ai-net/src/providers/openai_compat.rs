@@ -509,11 +509,15 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
             }
 
             // Reasoning content on replay:
-            // - DeepSeek and MiMo: always send empty string. Reasoning is a
-            //   response-only signal — re-uploading it is paid prompt input
-            //   (~500 tokens/turn) and breaks byte-stable prefix cache.
-            //   Matches reasonix: "reasoning_content is deliberately NOT sent
-            //   back: it is a response-only signal."
+            // - DeepSeek: always send empty string. Re-uploading reasoning is
+            //   paid prompt input (~500 tokens/turn) and breaks byte-stable
+            //   prefix cache. Matches reasonix: "reasoning_content is
+            //   deliberately NOT sent back."
+            // - MiMo: must send actual reasoning_content when thinking is
+            //   enabled and tool calls are present in history, otherwise the
+            //   API returns 400. MiMo's SWA-based prefix cache handles the
+            //   extra payload efficiently (93%+ cache hit rates).
+            //   See: platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
             // - OpenAI/OpenCode: send actual thinking blocks (these providers
             //   don't return reasoning_content, so this path is rarely hit).
             let thinking_blocks: Vec<&str> = content
@@ -524,19 +528,17 @@ pub fn convert_message(model: &Model, msg: &Message) -> Option<Value> {
                 })
                 .collect();
 
-            let strip_reasoning = matches!(
-                model.compat.thinking_format,
-                Some(ThinkingFormat::DeepSeek | ThinkingFormat::XiaomiMiMo)
-            );
+            let is_deepseek =
+                matches!(model.compat.thinking_format, Some(ThinkingFormat::DeepSeek));
 
-            if strip_reasoning {
-                // DeepSeek/MiMo: empty reasoning_content for cache stability.
+            if is_deepseek {
+                // DeepSeek: empty reasoning_content for cache stability.
                 msg_json["reasoning_content"] = json!("");
                 if !thinking_blocks.is_empty() {
                     has_content = true;
                 }
             } else if !thinking_blocks.is_empty() {
-                // OpenAI/OpenCode: send actual thinking content.
+                // MiMo / OpenAI / OpenCode: send actual thinking content.
                 msg_json["reasoning_content"] = json!(thinking_blocks.join("\n\n"));
                 has_content = true;
             }
@@ -914,14 +916,20 @@ fn parse_chunk(parser: &mut OpenAiCompatStreamParser, chunk: &Value) -> Vec<Assi
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             });
+        } else if reason == "content_filter" || reason == "insufficient_system_resource" {
+            events.push(AssistantMessageEvent::Done {
+                stop_reason: StopReason::Error,
+                usage: None,
+            });
         } else if reason == "length" {
             events.push(AssistantMessageEvent::Done {
                 stop_reason: StopReason::Length,
                 usage: None,
             });
-        } else if reason == "content_filter" || reason == "insufficient_system_resource" {
+        } else if reason == "repetition_truncation" {
+            // DeepSeek returns this when output is truncated due to repetition.
             events.push(AssistantMessageEvent::Done {
-                stop_reason: StopReason::Error,
+                stop_reason: StopReason::Length,
                 usage: None,
             });
         } else if reason == "stop" {

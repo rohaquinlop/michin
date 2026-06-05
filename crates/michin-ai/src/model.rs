@@ -91,9 +91,7 @@ impl ModelCompat {
     pub fn for_xiaomi() -> Self {
         Self {
             thinking_format: Some(ThinkingFormat::XiaomiMiMo),
-            // MiMo supports usage in non-streaming responses but the
-            // stream_options.include_usage field is OpenAI-specific.
-            supports_usage_in_streaming: false,
+            supports_usage_in_streaming: true,
             max_tokens_field: Some(MaxTokensField::MaxCompletionTokens),
             uses_api_key_header: true,
             ..Default::default()
