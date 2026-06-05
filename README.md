@@ -9,7 +9,7 @@
 └─────────────────┘
 ```
 
-MichiN is a minimal terminal coding-agent harness in Rust, inspired by Pi.
+MichiN is a minimal terminal coding-agent harness in Rust.
 
 ## Install / Run
 
@@ -83,21 +83,89 @@ michin resume abc123
 
 ## TUI
 
-- `@` opens Codex-style file autocomplete: gitignore-aware recursive paths, fuzzy-ranked.
-- Sending `@path/to/file` appends that file's contents to the prompt context.
-- `/sessions` opens the session picker.
-- `/tree [default|no-tools|user-only|labeled-only|all]` opens branch/session tree picker.
-- `/themes` opens the theme picker with live color preview.
-- `Enter` behavior is configurable via `settings.json` (`enter_behavior: "send" | "newline"`).
-- With `enter_behavior = "send"` (default), `Enter` sends normally when idle; while streaming it queues a steering message.
-- `Shift+Enter` inserts a newline in the editor.
-- `Alt+Enter` inserts a newline (or queues follow-up depending on mode config).
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/keys` | Show keyboard shortcuts |
+| `/model [id]` | Open model picker or switch directly by ID |
+| `/thinking [lvl]` | Set thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`) |
+| `/effort [lvl]` | Alias for `/thinking` |
+| `/plan` | Toggle plan mode |
+| `/clear` | Clear the chat display |
+| `/session` | Show session info (tokens, context window, compaction) |
+| `/status` | Show live runtime status snapshot |
+| `/timeline` | Show compact timeline from latest run report |
+| `/compact` | Manually compact context |
+| `/fork` | Fork the current session |
+| `/new` | Start a new unsaved session |
+| `/sessions` | List recent sessions to resume |
+| `/themes` | Open theme picker with live preview |
+| `/skills` | List available skills |
+| `/settings` | Open settings panel (UI behavior, prefs) |
+| `/skill:<name>` | Invoke a skill |
+| `/diag on\|off` | Toggle diagnostic event stream in chat |
+| `/tools-rate <hz>` | Set tool progress update rate (1–60) |
+| `/cancel` | Cancel current agent execution |
+| `/exit` | Exit MichiN |
+
+### Keyboard Shortcuts
+
+- `@` opens file autocomplete: gitignore-aware recursive paths, fuzzy-ranked.
+- `Enter` sends when idle; while streaming, queues a steering message (configurable).
+- `Shift+Enter` inserts a newline.
+- `Alt+Enter` inserts a newline (or queues follow-up depending on config).
 - `Ctrl+Enter` queues a follow-up message.
 - `Ctrl+P` opens model selector.
-- `Ctrl+T` cycles themes (built-in + user themes).
-- `Ctrl+U` edits the queued (steering/follow-up) message.
+- `Ctrl+T` cycles themes.
+- `Ctrl+U` edits the queued message.
+- `Shift+Tab` toggles plan mode.
 - `Tab` switches focus between input and chat.
+- `Up/Down` navigate history at the first/last editor line.
+- `Esc` or `Ctrl+C` cancels execution (or quits when idle).
 
+## Plan Mode
+
+Plan mode is a toggle for read-only exploration and planning. Use it to explore
+the codebase, analyze architecture, and prepare step-by-step implementation plans
+without modifying any source files.
+
+**Why:** Use a different (typically smarter) model for planning and a
+faster/cheaper model for implementing. The two model tracks are independent —
+swapping between them preserves thinking level, provider, and model separately.
+
+### Usage
+
+```
+/plan          # toggle plan mode on/off
+Shift+Tab      # shortcut to toggle plan mode
+```
+
+When plan mode is active:
+- The status bar shows `[plan:idle]`.
+- The model receives plan-mode instructions: explore and plan, don't modify
+  existing source code.
+- You can ask the model to `write` the plan to a file (default: Markdown,
+  but any format works) — just tell it where.
+- Switching models (`/model` or `Ctrl+P`) while in plan mode updates the
+  plan model track without affecting your non-plan model selection.
+- Toggle off with `/plan` or `Shift+Tab` to restore your previous
+  (non-plan) model and start implementing.
+
+### Settings
+
+The plan model is stored in `~/.michin/settings.json` under `plan_session`:
+
+```json
+{
+  "last_session": {"provider": "deepseek", "model": "deepseek-v4-pro", "thinking": "max"},
+  "plan_session": {"provider": "openai", "model": "o4", "thinking": "high"}
+}
+```
+
+Each session tracks its own `provider`, `model`, and `thinking` level.
+Both are independent — changing one never affects the other.
 ## Themes
 
 MichiN ships two built-in themes (`default` and `monokai`) and supports user-defined TOML theme files, inspired by Helix.
@@ -300,8 +368,8 @@ Session-level runtime settings are stored in `~/.michin/settings.json` (not in `
 
 Fields currently persisted there:
 
-- `last_session` (object, optional): last used provider+model pair (e.g. `{"provider": "openai", "model": "gpt-5.5"}`). Replaces old flat `last_model`/`last_thinking` fields.
-- `model_thinking_map` (object, default: `{}`): per-provider, per-model thinking level map. Example: `{"openai": {"gpt-5.5": "high"}}`. Enables restoring thinking level when switching models across providers.
+- `last_session` (object, optional): last used provider, model, and thinking level (e.g. `{"provider": "openai", "model": "gpt-5.5", "thinking": "high"}`).
+- `model_thinking_map` (object, default: `{}`): per-provider, per-model thinking level. Example: `{"openai": {"gpt-5.5": "high"}}`.
 - `steering_mode` (string, default: `"follow-up"`): Enter behavior while streaming.
 - `follow_up_mode` (string, default: `"steer"`): Ctrl+Enter behavior while streaming.
 - `transport_preference` (string, default: `"auto"`): transport hint (`auto`/`http`/`sse`).
@@ -313,6 +381,7 @@ Fields currently persisted there:
 - `disabled_models` (string[], default: `[]`): model IDs to hide from the model selector.
 - `favorite_models` (string[], default: `[]`): model IDs pinned at the top of the model selector.
 - `mimo_cluster_url` (string or null, default: `null`): MiMo token-plan cluster base URL (region endpoint). Overrides `MIMO_BASE_URL` env var when set.
+- `plan_session` (object, optional): plan mode model reference, same shape as `last_session` — `{"provider": "...", "model": "...", "thinking": "..."}`. Set automatically when you toggle plan mode on or switch models while in plan mode.
 
 RPC examples:
 

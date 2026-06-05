@@ -20,6 +20,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::config::MichiNConfig;
 use crate::session::SessionManager;
+use crate::settings::LastSession;
 use crate::skills;
 use crate::system_prompt::{
     build_system_prompt_with_skills, discover_nested_agents, find_context_file,
@@ -337,6 +338,10 @@ pub async fn run_tui(
             description: "Alias for /thinking".into(),
         },
         CommandEntry {
+            name: "plan".into(),
+            description: "Toggle plan mode (explore/plan without modifying source code)".into(),
+        },
+        CommandEntry {
             name: "clear".into(),
             description: "Clear the chat display".into(),
         },
@@ -515,6 +520,7 @@ async fn create_agent(
         model_id,
         Some(thinking),
         settings.max_context_window,
+        false, // plan mode starts off
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
@@ -828,6 +834,9 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 }
                 Ok(AgentEvent::AgentEnd { aborted }) => {
                     let _ = event_tx.send(TuiEvent::AgentEnd { aborted });
+                }
+                Ok(AgentEvent::PlanModeToggled { enabled }) => {
+                    let _ = event_tx.send(TuiEvent::PlanModeToggled { enabled });
                 }
                 Ok(AgentEvent::ContextCompacted {
                     trimmed_count,
@@ -1167,8 +1176,6 @@ async fn handle_tui_action(
 
                 agent.set_api_key(m.provider, key);
                 let levels = compute_valid_thinking_levels(&m);
-                // Restore saved thinking level for this model from the per-model map,
-                // falling back to the current agent thinking level.
                 let (saved_thinking, _had_saved) = {
                     let s = crate::settings::load_settings().await;
                     match s.thinking_for_model(&provider, &model_id) {
@@ -1182,10 +1189,6 @@ async fn handle_tui_action(
                     }
                 };
                 let is_valid = levels.contains(&saved_thinking);
-                // Normalize legacy level names: "minimal" → "enabled" for
-                // binary-thinking providers (MiMo). If the saved level isn't
-                // valid but its provider param matches one of the valid levels,
-                // use that valid level ID instead.
                 let normalized_saved = if is_valid {
                     Some(saved_thinking.clone())
                 } else {
@@ -1202,7 +1205,6 @@ async fn handle_tui_action(
                 agent.set_model(m).await;
 
                 if !show_thinking_selector {
-                    // Apply the restored thinking level.
                     let tl = parse_thinking_level(&current_thinking);
                     agent.set_thinking_level(tl).await;
                 } else {
@@ -1211,11 +1213,13 @@ async fn handle_tui_action(
                         .await;
                 }
                 let max_ctx = agent.config().max_context_window;
+                let plan_mode = agent.plan_mode().await;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
                     &model_id,
                     Some(&current_thinking),
                     max_ctx,
+                    plan_mode,
                 )
                 .await;
                 agent.set_system_prompt(blocks).await;
@@ -1235,7 +1239,21 @@ async fn handle_tui_action(
                 });
                 // Persist model + thinking preference (merge with existing settings).
                 let mut s = crate::settings::load_settings().await;
-                s.set_model_thinking(&provider, &model_id, &current_thinking);
+                if agent.plan_mode().await {
+                    // In plan mode: update plan_session only, keep last_session
+                    // untouched so toggle-off can restore the pre-plan model.
+                    s.model_thinking_map
+                        .entry(provider.clone())
+                        .or_default()
+                        .insert(model_id.to_string(), current_thinking.clone());
+                    s.plan_session = Some(LastSession {
+                        provider,
+                        model: model_id.to_string(),
+                        thinking: Some(current_thinking.clone()),
+                    });
+                } else {
+                    s.set_model_thinking(&provider, &model_id, &current_thinking);
+                }
                 crate::settings::save_settings(&s).await.ok();
                 acknowledge(event_tx);
             } else {
@@ -1375,11 +1393,13 @@ async fn handle_tui_action(
                     let current_thinking = thinking_level_to_string(state.thinking_level);
                     drop(state);
                     let max_ctx = agent.config().max_context_window;
+                    let plan_mode = agent.plan_mode().await;
                     let (blocks, resource_blocks) = build_system_prompt_with_skills(
                         working_dir,
                         &mid,
                         Some(&current_thinking),
                         max_ctx,
+                        plan_mode,
                     )
                     .await;
                     agent.set_system_prompt(blocks).await;
@@ -1438,11 +1458,13 @@ async fn handle_tui_action(
             let current_thinking = thinking_level_to_string(state.thinking_level);
             drop(state);
             let max_ctx = agent.config().max_context_window;
+            let plan_mode = agent.plan_mode().await;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
                 &current_model_id,
                 Some(&current_thinking),
                 max_ctx,
+                plan_mode,
             )
             .await;
             agent.set_system_prompt(blocks).await;
@@ -1709,6 +1731,190 @@ async fn handle_tui_action(
                 tool_progress_hz,
             });
             let _ = event_tx.send(TuiEvent::Info("Settings saved to settings.json".into()));
+        }
+        TuiAction::TogglePlanMode => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+
+            let enable = !agent.plan_mode().await;
+            let mut settings = crate::settings::load_settings().await;
+
+            if enable {
+                // Save current model+thinking as last_session so toggle-off restores them.
+                let (current_provider, current_model_id, current_thinking) = {
+                    let state = agent.state().await;
+                    (
+                        provider_to_string(state.model.provider),
+                        state.model.id.clone(),
+                        thinking_level_to_string(state.thinking_level),
+                    )
+                };
+                settings.set_last_session(
+                    &current_provider,
+                    &current_model_id,
+                    Some(&current_thinking),
+                );
+
+                // Switch to the plan model if one is already saved.
+                let plan_sess = settings.plan_session.clone();
+                if let Some(ref sess) = plan_sess {
+                    let runtime_models = runtime_models_cell.read().await.clone();
+                    if let Some(m) =
+                        find_model_by_provider_and_id(&runtime_models, &sess.provider, &sess.model)
+                    {
+                        let provider_str = provider_to_string(m.provider);
+                        let mut auth = crate::config::load_auth(None).await.unwrap_or_default();
+                        if let Some(key) = auth.get_api_key(&provider_str).await {
+                            let levels = compute_valid_thinking_levels(&m);
+                            let saved_thinking =
+                                sess.thinking.clone().unwrap_or_else(|| "off".to_string());
+                            let is_valid = levels.contains(&saved_thinking);
+                            let normalized = if is_valid {
+                                Some(saved_thinking.clone())
+                            } else {
+                                let tl = parse_thinking_level(&saved_thinking);
+                                let param = m.thinking_param(tl);
+                                param.and_then(|p| levels.iter().find(|l| **l == p).cloned())
+                            };
+                            let current_thinking = normalized.as_deref().unwrap_or("off");
+                            let show_selector = normalized.is_none();
+
+                            agent.set_api_key(m.provider, key);
+                            agent.set_model(m).await;
+                            if !show_selector {
+                                agent
+                                    .set_thinking_level(parse_thinking_level(current_thinking))
+                                    .await;
+                            } else {
+                                agent
+                                    .set_thinking_level(michin_ai::ThinkingLevel::Off)
+                                    .await;
+                            }
+                            let max_ctx = agent.config().max_context_window;
+                            let is_plan = true;
+                            let (blocks, resource_blocks) = build_system_prompt_with_skills(
+                                working_dir,
+                                &sess.model,
+                                Some(current_thinking),
+                                max_ctx,
+                                is_plan,
+                            )
+                            .await;
+                            agent.set_system_prompt(blocks).await;
+                            if !resource_blocks.is_empty() {
+                                agent.set_resource_context(resource_blocks).await;
+                            }
+                            let _ = event_tx.send(TuiEvent::ModelSwitched {
+                                model: sess.model.clone(),
+                            });
+                            let _ = event_tx.send(TuiEvent::ThinkingLevels {
+                                levels,
+                                current: current_thinking.to_string(),
+                                show_selector,
+                            });
+                        }
+                    }
+                } else {
+                    // First time: snapshot current as plan.
+                    settings.plan_session = Some(LastSession {
+                        provider: current_provider,
+                        model: current_model_id,
+                        thinking: Some(current_thinking),
+                    });
+                }
+            } else {
+                // Restore the regular last_session model.
+                if let Some(ref sess) = settings.last_session {
+                    let runtime_models = runtime_models_cell.read().await.clone();
+                    if let Some(m) =
+                        find_model_by_provider_and_id(&runtime_models, &sess.provider, &sess.model)
+                    {
+                        let provider_str = provider_to_string(m.provider);
+                        let mut auth = crate::config::load_auth(None).await.unwrap_or_default();
+                        if let Some(key) = auth.get_api_key(&provider_str).await {
+                            let levels = compute_valid_thinking_levels(&m);
+                            let saved_thinking =
+                                sess.thinking.clone().unwrap_or_else(|| "off".to_string());
+                            let is_valid = levels.contains(&saved_thinking);
+                            let normalized = if is_valid {
+                                Some(saved_thinking.clone())
+                            } else {
+                                let tl = parse_thinking_level(&saved_thinking);
+                                let param = m.thinking_param(tl);
+                                param.and_then(|p| levels.iter().find(|l| **l == p).cloned())
+                            };
+                            let current_thinking = normalized.as_deref().unwrap_or("off");
+                            let show_selector = normalized.is_none();
+
+                            agent.set_api_key(m.provider, key);
+                            agent.set_model(m).await;
+                            if !show_selector {
+                                agent
+                                    .set_thinking_level(parse_thinking_level(current_thinking))
+                                    .await;
+                            } else {
+                                agent
+                                    .set_thinking_level(michin_ai::ThinkingLevel::Off)
+                                    .await;
+                            }
+                            let max_ctx = agent.config().max_context_window;
+                            let is_plan = false;
+                            let (blocks, resource_blocks) = build_system_prompt_with_skills(
+                                working_dir,
+                                &sess.model,
+                                Some(current_thinking),
+                                max_ctx,
+                                is_plan,
+                            )
+                            .await;
+                            agent.set_system_prompt(blocks).await;
+                            if !resource_blocks.is_empty() {
+                                agent.set_resource_context(resource_blocks).await;
+                            }
+                            let _ = event_tx.send(TuiEvent::ModelSwitched {
+                                model: sess.model.clone(),
+                            });
+                            let _ = event_tx.send(TuiEvent::ThinkingLevels {
+                                levels,
+                                current: current_thinking.to_string(),
+                                show_selector,
+                            });
+                        }
+                    }
+                }
+            }
+
+            agent.set_plan_mode(enable).await;
+            crate::settings::save_settings(&settings).await.ok();
+
+            // For first-time toggle (no model switch happened), still rebuild
+            // system prompt to add/remove plan mode contract.
+            let state = agent.state().await;
+            let model_id = state.model.id.clone();
+            let thinking = thinking_level_to_string(state.thinking_level);
+            let provider_str = provider_to_string(state.model.provider);
+            drop(state);
+            let max_ctx = agent.config().max_context_window;
+            let plan_mode = agent.plan_mode().await;
+            let (blocks, resource_blocks) = build_system_prompt_with_skills(
+                working_dir,
+                &model_id,
+                Some(&thinking),
+                max_ctx,
+                plan_mode,
+            )
+            .await;
+            agent.set_system_prompt(blocks).await;
+            if !resource_blocks.is_empty() {
+                agent.set_resource_context(resource_blocks).await;
+            }
+
+            let _ = event_tx.send(TuiEvent::Info(format!(
+                "Plan mode {} (model: {model_id}, provider: {provider_str})",
+                if enable { "on" } else { "off" }
+            )));
         }
     }
 }

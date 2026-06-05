@@ -95,6 +95,8 @@ pub enum TuiAction {
         enter_behavior: String,
         max_context_window: Option<u32>,
     },
+    /// Toggle plan mode on or off.
+    TogglePlanMode,
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -215,6 +217,10 @@ pub enum TuiEvent {
     /// Thinking level was applied by backend.
     ThinkingSet {
         level: String,
+    },
+    /// Plan mode was toggled on or off.
+    PlanModeToggled {
+        enabled: bool,
     },
     /// A skill was activated by the agent.
     SkillActivated {
@@ -361,6 +367,8 @@ pub struct App {
     window_title: Option<String>,
     pending_config_actions: HashSet<u64>,
     next_config_request_id: u64,
+    /// Plan mode — controlled by `/plan` and tracked for status badge.
+    plan_mode: bool,
     queued_pending_messages: VecDeque<String>,
     /// Set to true when user presses Cancel while idle — second Cancel quits.
     quit_confirmation: bool,
@@ -560,6 +568,7 @@ impl App {
             window_title,
             pending_config_actions: HashSet::new(),
             next_config_request_id: 1,
+            plan_mode: false,
             queued_pending_messages: VecDeque::new(),
             quit_confirmation: false,
             quit_confirm_at: None,
@@ -1425,6 +1434,9 @@ impl App {
                     self.status.set_detail("");
                 }
             }
+            Action::TogglePlanMode => {
+                let _ = self.action_tx.send(TuiAction::TogglePlanMode);
+            }
             Action::CycleTheme => {
                 self.cycle_theme();
             }
@@ -1497,6 +1509,7 @@ impl App {
                     "  /model          Open model picker (available models)",
                     "  /thinking [lvl] Open selector or set thinking level (off/enabled/minimal/low/medium/high/xhigh)",
                     "  /effort [lvl]   Alias for /thinking",
+                    "  /plan           Toggle plan mode (explore/analyze without changing source code)",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
                     "  /status         Show live runtime status snapshot",
@@ -1697,6 +1710,22 @@ impl App {
                     is_error: false,
                 });
                 let _ = self.action_tx.send(TuiAction::CompactContext);
+            }
+            "plan" => {
+                // Single toggle: /plan flips plan mode on ↔ off.
+                let _ = self.action_tx.send(TuiAction::TogglePlanMode);
+                let new_state = !self.plan_mode;
+                self.chat.add_message(ChatMessage {
+                    role: ChatRole::System,
+                    text: if new_state {
+                        "Plan mode on. Explore and plan — ask me to save the plan to a file when ready.".into()
+                    } else {
+                        "Plan mode off.".into()
+                    },
+                    tool_call_id: None,
+                    is_streaming: false,
+                    is_error: false,
+                });
             }
             "login" => {
                 // Start the login flow.
@@ -2303,6 +2332,10 @@ impl App {
                     is_streaming: false,
                     is_error: false,
                 });
+            }
+            TuiEvent::PlanModeToggled { enabled } => {
+                self.plan_mode = enabled;
+                self.status.plan_mode = enabled;
             }
             TuiEvent::SkillActivated { name } => {
                 self.chat.add_message(ChatMessage {

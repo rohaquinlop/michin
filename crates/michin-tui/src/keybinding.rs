@@ -102,5 +102,10 @@ pub fn default_bindings() -> Vec<Keybinding> {
             action: Action::EditQueuedMessage,
             description: "Focus queued messages (navigate with arrows, Enter to edit)",
         },
+        Keybinding {
+            key: KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+            action: Action::TogglePlanMode,
+            description: "Toggle plan mode",
+        },
     ]
 }

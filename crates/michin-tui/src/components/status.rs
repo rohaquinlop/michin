@@ -30,6 +30,8 @@ pub struct StatusBar {
     pub reserve_tokens: u32,
     /// Context tokens from last API call.
     pub context_tokens: u32,
+    /// Whether plan mode is active.
+    pub plan_mode: bool,
     /// Extension status rows: rows[0] is primary bottom row.
     pub extension_rows: Vec<StatusRow>,
     /// Number of rows that need their own visual row (from tui.row() callbacks),
@@ -66,6 +68,7 @@ impl StatusBar {
             context_window: 0,
             reserve_tokens: 4096,
             context_tokens: 0,
+            plan_mode: false,
             extension_rows: Vec::new(),
             extension_row_count: 0,
             spinner_idx: 0,
@@ -151,10 +154,11 @@ impl Component for StatusBar {
         };
 
         let mode = mode_from_state(&self.agent_state);
+        let plan_badge = if self.plan_mode { "plan:" } else { "" };
         let right_badge = if self.show_diagnostics {
-            format!("[{mode}] turn:{}", self.turn_index)
+            format!("[{plan_badge}{mode}] turn:{}", self.turn_index)
         } else {
-            format!("[{mode}]")
+            format!("[{plan_badge}{mode}]")
         };
         // Dots animation for thinking/streaming states (shown left of the badge).
         // Throttled to 500ms per frame so it doesn't flash at render speed.

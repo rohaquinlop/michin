@@ -124,7 +124,7 @@ async fn prompt(
         agent.add_tool(tool).await;
     }
     let system_blocks =
-        build_system_prompt(working_dir, model_id, Some(thinking), Some(250_000)).await;
+        build_system_prompt(working_dir, model_id, Some(thinking), Some(250_000), false).await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {

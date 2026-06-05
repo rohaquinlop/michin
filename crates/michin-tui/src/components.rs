@@ -53,6 +53,7 @@ pub enum Action {
     OpenUrl(String),
     /// Focus the floating queue box for navigation (Ctrl+U toggles).
     EditQueuedMessage,
+    TogglePlanMode,
     None,
 }
 

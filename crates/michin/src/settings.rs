@@ -19,6 +19,9 @@ pub struct LastSession {
     pub provider: String,
     /// Model ID ("gpt-5.5", "deepseek-v4-pro", etc.).
     pub model: String,
+    /// Thinking level at the time of last session switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Persistent settings stored across sessions.
@@ -88,6 +91,12 @@ pub struct MichiNSettings {
     /// Overrides the MIMO_BASE_URL env var when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mimo_cluster_url: Option<String>,
+
+    /// Plan mode model: provider + model pair (parallels last_session).
+    /// Set implicitly when the user switches model while plan mode is active,
+    /// or via /plan-model <provider> <model>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_session: Option<LastSession>,
 }
 
 fn default_steering_mode() -> String {
@@ -155,14 +164,19 @@ impl MichiNSettings {
             .or_default()
             .insert(model_id.to_string(), thinking.to_string());
         // Keep last_session in sync so last_thinking() stays coherent.
-        self.set_last_session(provider, model_id);
+        self.last_session = Some(LastSession {
+            provider: provider.to_string(),
+            model: model_id.to_string(),
+            thinking: Some(thinking.to_string()),
+        });
     }
 
     /// Store the last used provider+model pair.
-    pub fn set_last_session(&mut self, provider: &str, model: &str) {
+    pub fn set_last_session(&mut self, provider: &str, model: &str, thinking: Option<&str>) {
         self.last_session = Some(LastSession {
             provider: provider.to_string(),
             model: model.to_string(),
+            thinking: thinking.map(|s| s.to_string()),
         });
     }
 
@@ -230,6 +244,7 @@ impl Default for MichiNSettings {
             disabled_models: Vec::new(),
             favorite_models: Vec::new(),
             mimo_cluster_url: None,
+            plan_session: None,
         }
     }
 }

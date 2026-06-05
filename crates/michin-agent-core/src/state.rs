@@ -35,6 +35,8 @@ pub struct AgentState {
     pub(crate) compaction_paused: bool,
     /// Prefix-cache shape from the previous turn (for diff diagnostics).
     pub(crate) prev_cache_shape: Option<CacheShape>,
+    /// Whether plan mode is active (read-only exploration, no code mutation).
+    pub plan_mode: bool,
 }
 
 /// Circuit breaker per model key.
@@ -83,6 +85,7 @@ impl AgentState {
             consecutive_compacts: 0,
             compaction_paused: false,
             prev_cache_shape: None,
+            plan_mode: false,
         }
     }
 

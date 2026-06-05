@@ -33,6 +33,9 @@ pub struct CommandSegment {
 /// The system prompt is responsible for guiding the model on *when* to
 /// use mutation tools vs read-only tools. The policy only blocks
 /// operations that are inherently dangerous regardless of context.
+///
+/// When `plan_mode` is true, also blocks any file-mutating tool calls
+/// (`write`, `edit`, and mutating bash commands).
 pub fn evaluate_tool_call(tc: &ToolCall, strict: bool) -> SafetyDecision {
     match tc.name.as_str() {
         "bash" => evaluate_bash(tc, strict),

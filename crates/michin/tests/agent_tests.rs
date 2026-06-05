@@ -412,7 +412,8 @@ mod execution_continuity {
         agent.add_tool(Arc::new(MockTool)).await;
 
         let wd = std::env::current_dir().expect("cwd");
-        let system = build_system_prompt(&wd, "test-model", Some("medium"), Some(250_000)).await;
+        let system =
+            build_system_prompt(&wd, "test-model", Some("medium"), Some(250_000), false).await;
         agent.set_system_prompt(system).await;
 
         agent

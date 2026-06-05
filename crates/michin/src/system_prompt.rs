@@ -24,6 +24,7 @@ pub async fn build_system_prompt(
     model_id: &str,
     thinking_level: Option<&str>,
     max_context_window: Option<u32>,
+    plan_mode: bool,
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -43,6 +44,10 @@ pub async fn build_system_prompt(
         max_context_window,
     ));
     parts.push(RESPONSE_CONTRACT.to_string());
+
+    if plan_mode {
+        parts.push(PLAN_MODE_CONTRACT.to_string());
+    }
 
     let text = parts.join("\n\n");
 
@@ -98,9 +103,16 @@ pub async fn build_system_prompt_with_skills(
     model_id: &str,
     thinking_level: Option<&str>,
     max_context_window: Option<u32>,
+    plan_mode: bool,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
-    let system =
-        build_system_prompt(working_dir, model_id, thinking_level, max_context_window).await;
+    let system = build_system_prompt(
+        working_dir,
+        model_id,
+        thinking_level,
+        max_context_window,
+        plan_mode,
+    )
+    .await;
     let resource = build_resource_context(working_dir).await;
     (system, resource)
 }
@@ -410,6 +422,29 @@ Summarize findings and ask before modifying code.
 
 Skills and extensions are listed in the conversation context. When a message
 matches a skill's trigger, read its file and follow its instructions."#;
+
+/// Injected after RESPONSE_CONTRACT when plan mode is active.
+/// Overrides Turn Completion to guide the model toward plan-only exploration.
+pub const PLAN_MODE_CONTRACT: &str = r#"# Plan Mode
+
+You are operating in **plan mode**: explore, analyze, and plan before implementing.
+Your job is to investigate the codebase, collect data, and prepare a clear
+step-by-step implementation plan.
+
+## Plan Mode Rules
+
+- **Explore first, implement later:** Do NOT write production code or edit
+  existing source files. Explore, research, and plan only.
+- **You MAY write files:** Use `write` to save the plan to a file when the
+  user asks. Default to Markdown (`.md`) — the user may request another format.
+- **Produce a concrete plan:** When done exploring, produce an ordered
+  implementation plan. Each step should include file paths, function names,
+  data structures, and acceptance criteria.
+- **Exit:** The user toggles plan mode with `/plan`. Do not try to switch
+  modes yourself.
+
+When asked to implement or change code while in plan mode, explain what you
+would do in the plan instead — do not modify existing source files."#;
 
 // ── System prompt overrides ────────────────────────────────────────
 

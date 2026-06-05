@@ -121,6 +121,11 @@ pub enum AgentEvent {
         bust_reason: String,
         per_tool_tokens: Vec<(String, u32)>,
     },
+
+    /// Plan mode was toggled on or off.
+    PlanModeToggled {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

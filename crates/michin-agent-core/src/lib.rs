@@ -22,7 +22,7 @@ pub use hooks::{Hooks, NoopHooks};
 pub use state::AgentState;
 pub use types::{
     AgentIntent, AgentLoopConfig, AgentTool, CircuitBreakerConfig, CompactionConfig,
-    CompactionStrategy, RetryConfig, RunReport, RunReportEvent, RuntimeProfile, SafetyDecisionKind,
-    ToolCall, ToolExecutionMode, ToolResult, ToolUpdate, ToolUpdateSender, ToolUpdateStatus,
-    ToolWatchdogConfig, TurnEndReason, TurnMode,
+    CompactionStrategy, ExtensionStatusRow, RetryConfig, RunReport, RunReportEvent, RuntimeProfile,
+    SafetyDecisionKind, ToolCall, ToolExecutionMode, ToolResult, ToolUpdate, ToolUpdateSender,
+    ToolUpdateStatus, ToolWatchdogConfig, TurnEndReason, TurnMode,
 };

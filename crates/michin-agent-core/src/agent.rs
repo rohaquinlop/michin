@@ -144,6 +144,22 @@ impl Agent {
         state.thinking_level = level;
     }
 
+    /// Toggle plan mode on or off.
+    ///
+    /// When enabled: mutations are blocked by command policy, the system prompt
+    /// guides the model toward plan-only exploration.
+    pub async fn set_plan_mode(&self, enabled: bool) {
+        let mut state = self.state.write().await;
+        state.plan_mode = enabled;
+        drop(state);
+        let _ = self.event_tx.send(AgentEvent::PlanModeToggled { enabled });
+    }
+
+    /// Returns whether plan mode is currently active.
+    pub async fn plan_mode(&self) -> bool {
+        self.state.read().await.plan_mode
+    }
+
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
         let (sanitized, stats) = michin_ai::sanitize_messages_for_replay(&messages, &state.model);
