@@ -32,6 +32,8 @@ pub struct StatusBar {
     pub context_tokens: u32,
     /// Whether plan mode is active.
     pub plan_mode: bool,
+    /// Caveman mode level. None = off, Some("full") = active.
+    pub caveman_mode: Option<String>,
     /// Extension status rows: rows[0] is primary bottom row.
     pub extension_rows: Vec<StatusRow>,
     /// Number of rows that need their own visual row (from tui.row() callbacks),
@@ -69,6 +71,7 @@ impl StatusBar {
             reserve_tokens: 4096,
             context_tokens: 0,
             plan_mode: false,
+            caveman_mode: None,
             extension_rows: Vec::new(),
             extension_row_count: 0,
             spinner_idx: 0,
@@ -120,6 +123,10 @@ impl StatusBar {
 
     pub fn set_extension_row_count(&mut self, count: usize) {
         self.extension_row_count = count;
+    }
+
+    pub fn set_caveman_mode(&mut self, level: Option<String>) {
+        self.caveman_mode = level;
     }
 
     /// Total rows needed: 1 primary + extension-only rows.
@@ -277,6 +284,13 @@ impl StatusBar {
         let ext_left = ext_row.map(|r| join_parts(&r.left)).unwrap_or_default();
         let ext_right = ext_row.map(|r| join_parts(&r.right)).unwrap_or_default();
 
+        // Caveman badge: shown between model section and ext-left when active.
+        let cav_badge = self
+            .caveman_mode
+            .as_ref()
+            .map(|l| format!("caveman:{l}"))
+            .unwrap_or_default();
+
         let detail_str = if self.detail.trim().is_empty() {
             String::new()
         } else {
@@ -285,9 +299,11 @@ impl StatusBar {
 
         let state_span = Span::styled(right_badge.to_string(), Style::default().fg(state_color));
 
-        // Layout: [model:effort] [ext-left]  <detail>  [ext-right] [idle/status]
+        // Layout: [model:effort] [cav:full] [ext-left]  <detail>  [ext-right] [idle/status]
         let model_text: String = model_spans.iter().map(|s| s.content.as_ref()).collect();
         let fixed = model_text.len()
+            + cav_badge.len()
+            + if cav_badge.is_empty() { 0 } else { 1 } // leading space
             + ext_left.len()
             + detail_str.len()
             + ext_right.len()
@@ -299,6 +315,12 @@ impl StatusBar {
         };
 
         let mut spans = model_spans;
+        if !cav_badge.is_empty() {
+            spans.push(Span::styled(
+                format!(" [{cav_badge}]"),
+                Style::default().fg(self.theme.dim),
+            ));
+        }
         if !ext_left.is_empty() {
             spans.push(Span::styled(
                 format!(" {ext_left}"),

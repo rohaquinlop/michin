@@ -37,6 +37,9 @@ pub struct AgentState {
     pub(crate) prev_cache_shape: Option<CacheShape>,
     /// Whether plan mode is active (read-only exploration, no code mutation).
     pub plan_mode: bool,
+    /// Caveman communication mode: None = off, Some("full") = active.
+    /// Persisted in settings.json.
+    pub caveman_mode: Option<String>,
 }
 
 /// Circuit breaker per model key.
@@ -86,6 +89,7 @@ impl AgentState {
             compaction_paused: false,
             prev_cache_shape: None,
             plan_mode: false,
+            caveman_mode: None,
         }
     }
 

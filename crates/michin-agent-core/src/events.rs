@@ -126,6 +126,10 @@ pub enum AgentEvent {
     PlanModeToggled {
         enabled: bool,
     },
+    /// Caveman mode level was changed. None = off, Some("full") = active.
+    CavemanModeToggled {
+        level: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

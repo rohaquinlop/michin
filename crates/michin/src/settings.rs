@@ -97,6 +97,10 @@ pub struct MichiNSettings {
     /// or via /plan-model <provider> <model>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_session: Option<LastSession>,
+
+    /// Caveman communication mode. None = off, Some("full") = active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caveman_mode: Option<String>,
 }
 
 fn default_steering_mode() -> String {
@@ -245,6 +249,7 @@ impl Default for MichiNSettings {
             favorite_models: Vec::new(),
             mimo_cluster_url: None,
             plan_session: None,
+            caveman_mode: None,
         }
     }
 }

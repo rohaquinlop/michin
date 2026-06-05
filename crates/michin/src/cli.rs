@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(short = 'C', long, global = true)]
     pub working_dir: Option<PathBuf>,
 
+    /// Caveman communication mode (off, lite, full, ultra, wenyan-lite, wenyan-full, wenyan-ultra).
+    #[arg(long, global = true)]
+    pub caveman: Option<String>,
+
     /// Config file path (defaults to ~/.michin/config.toml).
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,

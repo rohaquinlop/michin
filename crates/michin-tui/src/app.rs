@@ -14,6 +14,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::components::CommandEntry;
+use crate::components::caveman_selector::CavemanSelector;
 use crate::components::chat::{Chat, ChatMessage, ChatRole};
 use crate::components::editor::Editor;
 use crate::components::login_flow::{LoginFlow, known_providers};
@@ -97,6 +98,10 @@ pub enum TuiAction {
     },
     /// Toggle plan mode on or off.
     TogglePlanMode,
+    /// Toggle caveman compression mode. None = off, Some("full") = level.
+    ToggleCavemanMode {
+        level: Option<String>,
+    },
 }
 
 /// Events sent from the agent loop to the TUI.
@@ -222,6 +227,10 @@ pub enum TuiEvent {
     PlanModeToggled {
         enabled: bool,
     },
+    /// Caveman mode level changed. None = off, Some("full") = active.
+    CavemanModeToggled {
+        level: Option<String>,
+    },
     /// A skill was activated by the agent.
     SkillActivated {
         name: String,
@@ -308,6 +317,7 @@ pub struct App {
     model_selector: ModelSelector,
 
     thinking_selector: ThinkingSelector,
+    caveman_selector: CavemanSelector,
     theme_selector: ThemeSelector,
     mimo_cluster_selector: MimoClusterSelector,
     settings_selector: SettingsSelector,
@@ -520,6 +530,7 @@ impl App {
             session_picker: None,
             model_selector: ModelSelector::new(models, favorites, theme.clone()),
             thinking_selector: ThinkingSelector::new(theme.clone()),
+            caveman_selector: CavemanSelector::new(theme.clone()),
             mimo_cluster_selector: MimoClusterSelector::new(),
             settings_selector: SettingsSelector::new(
                 theme.clone(),
@@ -652,6 +663,10 @@ impl App {
         }
         self.thinking_selector.render(area, frame);
         if self.thinking_selector.visible {
+            return;
+        }
+        self.caveman_selector.render(area, frame);
+        if self.caveman_selector.visible {
             return;
         }
         self.theme_selector.render(area, frame, &self.theme);
@@ -974,6 +989,34 @@ impl App {
                     }
                     crossterm::event::KeyCode::Down => {
                         self.thinking_selector.select_down();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Caveman selector mode — handle keys exclusively.
+        if self.caveman_selector.visible {
+            if let crossterm::event::Event::Key(key) = event {
+                match key.code {
+                    crossterm::event::KeyCode::Esc => {
+                        self.caveman_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Enter => {
+                        if let Some(level) = self.caveman_selector.selected_level() {
+                            let level = level.to_string();
+                            let _ = self.action_tx.send(TuiAction::ToggleCavemanMode {
+                                level: if level == "off" { None } else { Some(level) },
+                            });
+                        }
+                        self.caveman_selector.hide();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        self.caveman_selector.select_up();
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        self.caveman_selector.select_down();
                     }
                     _ => {}
                 }
@@ -1510,6 +1553,7 @@ impl App {
                     "  /thinking [lvl] Open selector or set thinking level (off/enabled/minimal/low/medium/high/xhigh)",
                     "  /effort [lvl]   Alias for /thinking",
                     "  /plan           Toggle plan mode (explore/analyze without changing source code)",
+                    "  /caveman [lvl]  Open selector or set caveman level (off/lite/full/ultra/wenyan-lite/wenyan-full/wenyan-ultra)",
                     "  /clear          Clear the chat display",
                     "  /session        Show session info (tokens, context window, compaction)",
                     "  /status         Show live runtime status snapshot",
@@ -1726,6 +1770,24 @@ impl App {
                     is_streaming: false,
                     is_error: false,
                 });
+            }
+            "caveman" => {
+                if arg.is_empty() {
+                    self.caveman_selector
+                        .show(self.status.caveman_mode.as_deref());
+                } else {
+                    let level = arg.to_lowercase();
+                    let _ = self
+                        .action_tx
+                        .send(TuiAction::ToggleCavemanMode { level: Some(level) });
+                    self.chat.add_message(ChatMessage {
+                        role: ChatRole::System,
+                        text: format!("Caveman mode: {arg}"),
+                        tool_call_id: None,
+                        is_streaming: false,
+                        is_error: false,
+                    });
+                }
             }
             "login" => {
                 // Start the login flow.
@@ -2336,6 +2398,9 @@ impl App {
             TuiEvent::PlanModeToggled { enabled } => {
                 self.plan_mode = enabled;
                 self.status.plan_mode = enabled;
+            }
+            TuiEvent::CavemanModeToggled { level } => {
+                self.status.set_caveman_mode(level);
             }
             TuiEvent::SkillActivated { name } => {
                 self.chat.add_message(ChatMessage {

@@ -17,14 +17,23 @@ use crate::scripts;
 use crate::skills;
 use crate::tools::{ToolContext, builtin_tools};
 
+/// Configuration for building the system prompt.
+///
+/// Groups together the parameters that influence prompt content so new mode
+/// toggles don't keep adding positional parameters to `build_system_prompt`.
+pub struct SystemPromptConfig<'a> {
+    pub model_id: &'a str,
+    pub thinking_level: Option<&'a str>,
+    pub max_context_window: Option<u32>,
+    pub plan_mode: bool,
+    pub caveman_mode: Option<&'a str>,
+}
+
 /// Build the core system prompt: project context + tools + runtime + response contract.
 /// Does NOT include skills or extensions.
 pub async fn build_system_prompt(
     working_dir: &Path,
-    model_id: &str,
-    thinking_level: Option<&str>,
-    max_context_window: Option<u32>,
-    plan_mode: bool,
+    config: &SystemPromptConfig<'_>,
 ) -> Vec<ContentBlock> {
     let mut parts: Vec<String> = Vec::new();
 
@@ -39,13 +48,19 @@ pub async fn build_system_prompt(
 
     parts.push(build_runtime_context(
         working_dir,
-        model_id,
-        thinking_level,
-        max_context_window,
+        config.model_id,
+        config.thinking_level,
+        config.max_context_window,
     ));
     parts.push(RESPONSE_CONTRACT.to_string());
 
-    if plan_mode {
+    if let Some(level) = config.caveman_mode {
+        parts.push(format!(
+            "{CAVEMAN_CONTRACT}\n\nCurrent caveman level: {level}."
+        ));
+    }
+
+    if config.plan_mode {
         parts.push(PLAN_MODE_CONTRACT.to_string());
     }
 
@@ -96,23 +111,12 @@ pub async fn build_resource_context(working_dir: &Path) -> Vec<ContentBlock> {
 }
 
 /// Compatibility wrapper — builds both system prompt and resource context.
-/// Used by call sites that previously called `build_system_prompt_with_skills`.
 /// Returns (system_prompt, resource_context).
 pub async fn build_system_prompt_with_skills(
     working_dir: &Path,
-    model_id: &str,
-    thinking_level: Option<&str>,
-    max_context_window: Option<u32>,
-    plan_mode: bool,
+    config: &SystemPromptConfig<'_>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
-    let system = build_system_prompt(
-        working_dir,
-        model_id,
-        thinking_level,
-        max_context_window,
-        plan_mode,
-    )
-    .await;
+    let system = build_system_prompt(working_dir, config).await;
     let resource = build_resource_context(working_dir).await;
     (system, resource)
 }
@@ -422,6 +426,41 @@ Summarize findings and ask before modifying code.
 
 Skills and extensions are listed in the conversation context. When a message
 matches a skill's trigger, read its file and follow its instructions."#;
+
+/// Caveman communication mode contract — injected after RESPONSE_CONTRACT.
+/// Forces the model to compress all responses according to the selected level.
+pub const CAVEMAN_CONTRACT: &str = r#"# Caveman Mode
+
+You are in ultra-compressed communication mode. All technical substance stays. Only fluff dies.
+
+## Rules
+
+- Drop articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries (sure/certainly/of course/happy to), hedging.
+- Fragments OK. Use short synonyms (big not extensive, fix not \"implement a solution for\").
+- Technical terms must remain exact. Code blocks remain unchanged. Errors quoted exact.
+- Pattern: `[thing] [action] [reason]. [next step].`
+
+## Intensity
+
+| Level | Behavior |
+|-------|----------|
+| **lite** | No filler/hedging. Keep articles + full sentences. Professional but tight. |
+| **full** | Drop articles, fragments OK, short synonyms. Classic caveman. |
+| **ultra** | Abbreviate prose words (DB/auth/config/req/res/fn/impl), strip conjunctions, arrows for causality (X → Y), one word when one word enough. Never abbreviate code symbols, function names, API names, error strings. |
+| **wenyan-lite** | Semi-classical Chinese register. Drop filler/hedging but keep grammar structure. |
+| **wenyan-full** | Maximum classical Chinese terseness. 80-90% character reduction. Classical sentence patterns, subjects often omitted, classical particles (之/乃/為/其). |
+| **wenyan-ultra** | Extreme abbreviation while keeping classical Chinese feel. Maximum compression. |
+
+## Auto-Clarity Override
+
+Temporarily drop caveman when:
+- Security warnings
+- Irreversible action confirmations
+- Multi-step sequences where fragment order risks misread
+- Compression itself creates technical ambiguity
+- User asks to clarify or repeats a question
+
+Resume caveman after the clear part is done."#;
 
 /// Injected after RESPONSE_CONTRACT when plan mode is active.
 /// Overrides Turn Completion to guide the model toward plan-only exploration.

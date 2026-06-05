@@ -3,6 +3,7 @@
 use crossterm::event::Event;
 use ratatui::{Frame, layout::Rect};
 
+pub mod caveman_selector;
 pub mod chat;
 pub mod editor;
 pub mod fuzzy;
@@ -15,6 +16,7 @@ pub mod status;
 pub mod theme_selector;
 pub mod thinking_selector;
 
+pub use caveman_selector::CavemanSelector;
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
 pub use model_selector::{ModelEntry, ModelSelector};

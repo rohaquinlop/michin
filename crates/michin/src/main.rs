@@ -227,8 +227,29 @@ async fn handle_tui(
         Some(args.text.join(" "))
     };
     let prompt = prompt.as_deref();
-    run_tui(config, working_dir, model, thinking, prompt).await?;
+
+    // Priority: CLI flag > persisted settings. Normalize to handle "off" and invalid values.
+    let caveman = match cli.caveman.as_deref() {
+        None => settings.caveman_mode.clone(),
+        Some(cli_val) => normal_caveman_level_str(cli_val),
+    };
+
+    run_tui(config, working_dir, model, thinking, prompt, caveman).await?;
     Ok(())
+}
+
+/// Normalize a caveman level from the CLI. Maps "off" to None, invalid values to None.
+fn normal_caveman_level_str(input: &str) -> Option<String> {
+    match input.to_lowercase().trim() {
+        "off" => None,
+        s @ ("lite" | "full" | "ultra" | "wenyan-lite" | "wenyan-full" | "wenyan-ultra") => {
+            Some(s.to_string())
+        }
+        other => {
+            tracing::warn!("unknown caveman level from CLI: {other}, ignoring");
+            None
+        }
+    }
 }
 
 /// Format a millisecond timestamp as a human-readable string.

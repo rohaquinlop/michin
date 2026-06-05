@@ -162,7 +162,7 @@ mod execution_continuity {
     use async_trait::async_trait;
     use futures::Stream;
     use michin::session::SessionManager;
-    use michin::system_prompt::build_system_prompt;
+    use michin::system_prompt::{SystemPromptConfig, build_system_prompt};
     use michin_agent_core::{
         Agent, AgentError, AgentTool, ToolExecutionMode, ToolResult, ToolUpdateSender,
     };
@@ -412,8 +412,17 @@ mod execution_continuity {
         agent.add_tool(Arc::new(MockTool)).await;
 
         let wd = std::env::current_dir().expect("cwd");
-        let system =
-            build_system_prompt(&wd, "test-model", Some("medium"), Some(250_000), false).await;
+        let system = build_system_prompt(
+            &wd,
+            &SystemPromptConfig {
+                model_id: "test-model",
+                thinking_level: Some("medium"),
+                max_context_window: Some(250_000),
+                plan_mode: false,
+                caveman_mode: None,
+            },
+        )
+        .await;
         agent.set_system_prompt(system).await;
 
         agent

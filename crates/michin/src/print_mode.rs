@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::config::MichiNConfig;
 use crate::session::SessionManager;
-use crate::system_prompt::{build_resource_context, build_system_prompt};
+use crate::system_prompt::{SystemPromptConfig, build_resource_context, build_system_prompt};
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
 
@@ -50,8 +50,18 @@ pub async fn run_prompt_print_mode(
     }
 
     // Build and set the system prompt for prompt mode.
-    let system_blocks =
-        build_system_prompt(working_dir, model_id, Some("medium"), Some(250_000), false).await;
+    let settings = crate::settings::load_settings().await;
+    let system_blocks = build_system_prompt(
+        working_dir,
+        &SystemPromptConfig {
+            model_id,
+            thinking_level: Some("medium"),
+            max_context_window: Some(250_000),
+            plan_mode: false,
+            caveman_mode: settings.caveman_mode.as_deref(),
+        },
+    )
+    .await;
     agent.set_system_prompt(system_blocks).await;
     let resource_blocks = build_resource_context(working_dir).await;
     if !resource_blocks.is_empty() {
@@ -244,12 +254,16 @@ pub async fn run_continue_print_mode(
     }
 
     // Build and set system prompt.
+    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
-        &effective_model,
-        Some("medium"),
-        Some(250_000),
-        false,
+        &SystemPromptConfig {
+            model_id: &effective_model,
+            thinking_level: Some("medium"),
+            max_context_window: Some(250_000),
+            plan_mode: false,
+            caveman_mode: settings.caveman_mode.as_deref(),
+        },
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
@@ -394,12 +408,16 @@ pub async fn run_resume_print_mode(
         agent.add_tool(tool).await;
     }
 
+    let settings = crate::settings::load_settings().await;
     let system_blocks = build_system_prompt(
         working_dir,
-        &effective_model,
-        Some("medium"),
-        Some(250_000),
-        false,
+        &SystemPromptConfig {
+            model_id: &effective_model,
+            thinking_level: Some("medium"),
+            max_context_window: Some(250_000),
+            plan_mode: false,
+            caveman_mode: settings.caveman_mode.as_deref(),
+        },
     )
     .await;
     agent.set_system_prompt(system_blocks).await;

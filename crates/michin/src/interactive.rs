@@ -23,7 +23,7 @@ use crate::session::SessionManager;
 use crate::settings::LastSession;
 use crate::skills;
 use crate::system_prompt::{
-    build_system_prompt_with_skills, discover_nested_agents, find_context_file,
+    SystemPromptConfig, build_system_prompt_with_skills, discover_nested_agents, find_context_file,
 };
 use crate::tools::ToolContext;
 use crate::tools::builtin_tools;
@@ -37,6 +37,7 @@ pub async fn run_tui(
     model_id: &str,
     thinking: &str,
     initial_prompt: Option<&str>,
+    caveman_mode: Option<String>,
 ) -> anyhow::Result<()> {
     let catalog = BuiltInCatalog::new();
     let runtime_models_cell: Arc<RwLock<Vec<Model>>> = Arc::new(RwLock::new(
@@ -138,17 +139,24 @@ pub async fn run_tui(
 
     // ── Event bridge — if we have auth, create agent now ──
     if let Some(ref key) = api_key {
-        let agent = create_agent(
-            &model,
-            key,
+        let agent = create_agent(&AgentCreateCtx {
+            model: &model,
+            api_key: key,
             config,
             working_dir,
-            &model_id,
+            model_id: &model_id,
             thinking,
-            &status_notify,
-        )
+            status_notify: &status_notify,
+            caveman_mode: caveman_mode.as_deref(),
+        })
         .await?;
         let agent = Arc::new(agent);
+
+        // Apply caveman mode if starting with it active.
+        if let Some(ref level) = caveman_mode {
+            agent.set_caveman_mode(Some(level.clone())).await;
+        }
+
         *agent_cell.write().await = Some(agent.clone());
         let persisted = crate::settings::load_settings().await;
         spawn_event_bridge(
@@ -175,6 +183,13 @@ pub async fn run_tui(
                 if let Some(banner) = build_startup_banner(&working_dir).await {
                     let _ = tx.send(TuiEvent::Info(banner));
                 }
+            });
+        }
+
+        // Send caveman mode state for status bar badge on first paint.
+        if let Some(ref level) = caveman_mode {
+            let _ = event_tx_raw.send(TuiEvent::CavemanModeToggled {
+                level: Some(level.clone()),
             });
         }
 
@@ -342,6 +357,10 @@ pub async fn run_tui(
             description: "Toggle plan mode (explore/plan without modifying source code)".into(),
         },
         CommandEntry {
+            name: "caveman".into(),
+            description: "Toggle caveman compact mode (off/lite/full/ultra/wenyan-*)".into(),
+        },
+        CommandEntry {
             name: "clear".into(),
             description: "Clear the chat display".into(),
         },
@@ -481,31 +500,34 @@ pub async fn run_tui(
 
 // ── Helpers ──
 
-/// Create a fully configured agent.
-async fn create_agent(
-    model: &Model,
-    api_key: &str,
-    config: &MichiNConfig,
-    working_dir: &Path,
-    model_id: &str,
-    thinking: &str,
-    status_notify: &Arc<tokio::sync::Notify>,
-) -> anyhow::Result<Agent> {
+/// Parameters for creating a fully configured agent.
+struct AgentCreateCtx<'a> {
+    model: &'a Model,
+    api_key: &'a str,
+    config: &'a MichiNConfig,
+    working_dir: &'a Path,
+    model_id: &'a str,
+    thinking: &'a str,
+    status_notify: &'a Arc<tokio::sync::Notify>,
+    caveman_mode: Option<&'a str>,
+}
+
+async fn create_agent(ctx: &AgentCreateCtx<'_>) -> anyhow::Result<Agent> {
     let catalog = BuiltInCatalog::new();
     let available_models: Vec<michin_ai::Model> = catalog.list().into_iter().cloned().collect();
     let registry = default_registry();
-    registry.set_api_key(model.provider, api_key);
+    registry.set_api_key(ctx.model.provider, ctx.api_key);
 
-    let tool_ctx = ToolContext::new(working_dir.to_path_buf());
-    let mut agent = Agent::new(model.clone(), Arc::new(registry), available_models);
-    let mut loop_config = crate::config::to_agent_config(config);
+    let tool_ctx = ToolContext::new(ctx.working_dir.to_path_buf());
+    let mut agent = Agent::new(ctx.model.clone(), Arc::new(registry), available_models);
+    let mut loop_config = crate::config::to_agent_config(ctx.config);
     let settings = crate::settings::load_settings().await;
     loop_config.max_context_window = settings.max_context_window;
     agent.set_config(loop_config);
 
     // Restore saved MiMo cluster URL so token-plan keys route to the
     // user's preferred region instead of defaulting to SGP.
-    if model.provider == michin_ai::types::Provider::XiaomiMiMo
+    if ctx.model.provider == michin_ai::types::Provider::XiaomiMiMo
         && let Some(ref cluster_url) = settings.mimo_cluster_url
     {
         agent.set_mimo_base_url(cluster_url);
@@ -516,11 +538,14 @@ async fn create_agent(
     }
 
     let (system_blocks, resource_blocks) = build_system_prompt_with_skills(
-        working_dir,
-        model_id,
-        Some(thinking),
-        settings.max_context_window,
-        false, // plan mode starts off
+        ctx.working_dir,
+        &SystemPromptConfig {
+            model_id: ctx.model_id,
+            thinking_level: Some(ctx.thinking),
+            max_context_window: settings.max_context_window,
+            plan_mode: false, // plan mode starts off
+            caveman_mode: ctx.caveman_mode,
+        },
     )
     .await;
     agent.set_system_prompt(system_blocks).await;
@@ -530,18 +555,18 @@ async fn create_agent(
 
     // Load script hooks from ~/.michin/extensions/*.rhai and ./.michin/extensions/*.rhai.
     if let Some(hooks) =
-        crate::scripts::load_script_hooks(working_dir, Arc::clone(status_notify)).await
+        crate::scripts::load_script_hooks(ctx.working_dir, Arc::clone(ctx.status_notify)).await
     {
         agent.set_hooks(hooks);
     }
 
     // Load custom tools from ~/.michin/tools/*.rhai and ./.michin/tools/*.rhai.
-    for tool in crate::scripts::load_custom_tools(working_dir).await {
+    for tool in crate::scripts::load_custom_tools(ctx.working_dir).await {
         agent.add_tool(tool).await;
     }
 
     // Apply thinking level from settings.
-    let tl = parse_thinking_level(thinking);
+    let tl = parse_thinking_level(ctx.thinking);
     agent.set_thinking_level(tl).await;
 
     Ok(agent)
@@ -838,6 +863,9 @@ fn spawn_event_bridge(agent: Arc<Agent>, event_tx: mpsc::UnboundedSender<TuiEven
                 Ok(AgentEvent::PlanModeToggled { enabled }) => {
                     let _ = event_tx.send(TuiEvent::PlanModeToggled { enabled });
                 }
+                Ok(AgentEvent::CavemanModeToggled { level }) => {
+                    let _ = event_tx.send(TuiEvent::CavemanModeToggled { level });
+                }
                 Ok(AgentEvent::ContextCompacted {
                     trimmed_count,
                     tokens_before,
@@ -990,15 +1018,16 @@ async fn handle_tui_action(
                                     .cloned()
                                     .unwrap_or_else(|| model.clone());
 
-                                match create_agent(
-                                    &codex_model,
-                                    &creds.access_token,
+                                match create_agent(&AgentCreateCtx {
+                                    model: &codex_model,
+                                    api_key: &creds.access_token,
                                     config,
                                     working_dir,
-                                    &codex_model.id,
+                                    model_id: &codex_model.id,
                                     thinking,
                                     status_notify,
-                                )
+                                    caveman_mode: None, // caveman starts off on fresh login
+                                })
                                 .await
                                 {
                                     Ok(agent) => {
@@ -1076,15 +1105,16 @@ async fn handle_tui_action(
                     }
                     // If this was the initial login (no agent yet), create the agent now.
                     if agent_cell.read().await.is_none() {
-                        match create_agent(
+                        match create_agent(&AgentCreateCtx {
                             model,
-                            &token,
+                            api_key: &token,
                             config,
                             working_dir,
                             model_id,
                             thinking,
                             status_notify,
-                        )
+                            caveman_mode: None, // caveman starts off on fresh login
+                        })
                         .await
                         {
                             Ok(agent) => {
@@ -1214,12 +1244,16 @@ async fn handle_tui_action(
                 }
                 let max_ctx = agent.config().max_context_window;
                 let plan_mode = agent.plan_mode().await;
+                let settings = crate::settings::load_settings().await;
                 let (blocks, resource_blocks) = build_system_prompt_with_skills(
                     working_dir,
-                    &model_id,
-                    Some(&current_thinking),
-                    max_ctx,
-                    plan_mode,
+                    &SystemPromptConfig {
+                        model_id: &model_id,
+                        thinking_level: Some(&current_thinking),
+                        max_context_window: max_ctx,
+                        plan_mode,
+                        caveman_mode: settings.caveman_mode.as_deref(),
+                    },
                 )
                 .await;
                 agent.set_system_prompt(blocks).await;
@@ -1394,12 +1428,16 @@ async fn handle_tui_action(
                     drop(state);
                     let max_ctx = agent.config().max_context_window;
                     let plan_mode = agent.plan_mode().await;
+                    let settings = crate::settings::load_settings().await;
                     let (blocks, resource_blocks) = build_system_prompt_with_skills(
                         working_dir,
-                        &mid,
-                        Some(&current_thinking),
-                        max_ctx,
-                        plan_mode,
+                        &SystemPromptConfig {
+                            model_id: &mid,
+                            thinking_level: Some(&current_thinking),
+                            max_context_window: max_ctx,
+                            plan_mode,
+                            caveman_mode: settings.caveman_mode.as_deref(),
+                        },
                     )
                     .await;
                     agent.set_system_prompt(blocks).await;
@@ -1459,12 +1497,16 @@ async fn handle_tui_action(
             drop(state);
             let max_ctx = agent.config().max_context_window;
             let plan_mode = agent.plan_mode().await;
+            let settings = crate::settings::load_settings().await;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
-                &current_model_id,
-                Some(&current_thinking),
-                max_ctx,
-                plan_mode,
+                &SystemPromptConfig {
+                    model_id: &current_model_id,
+                    thinking_level: Some(&current_thinking),
+                    max_context_window: max_ctx,
+                    plan_mode,
+                    caveman_mode: settings.caveman_mode.as_deref(),
+                },
             )
             .await;
             agent.set_system_prompt(blocks).await;
@@ -1796,10 +1838,13 @@ async fn handle_tui_action(
                             let is_plan = true;
                             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                                 working_dir,
-                                &sess.model,
-                                Some(current_thinking),
-                                max_ctx,
-                                is_plan,
+                                &SystemPromptConfig {
+                                    model_id: &sess.model,
+                                    thinking_level: Some(current_thinking),
+                                    max_context_window: max_ctx,
+                                    plan_mode: is_plan,
+                                    caveman_mode: settings.caveman_mode.as_deref(),
+                                },
                             )
                             .await;
                             agent.set_system_prompt(blocks).await;
@@ -1863,10 +1908,13 @@ async fn handle_tui_action(
                             let is_plan = false;
                             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                                 working_dir,
-                                &sess.model,
-                                Some(current_thinking),
-                                max_ctx,
-                                is_plan,
+                                &SystemPromptConfig {
+                                    model_id: &sess.model,
+                                    thinking_level: Some(current_thinking),
+                                    max_context_window: max_ctx,
+                                    plan_mode: is_plan,
+                                    caveman_mode: settings.caveman_mode.as_deref(),
+                                },
                             )
                             .await;
                             agent.set_system_prompt(blocks).await;
@@ -1900,10 +1948,13 @@ async fn handle_tui_action(
             let plan_mode = agent.plan_mode().await;
             let (blocks, resource_blocks) = build_system_prompt_with_skills(
                 working_dir,
-                &model_id,
-                Some(&thinking),
-                max_ctx,
-                plan_mode,
+                &SystemPromptConfig {
+                    model_id: &model_id,
+                    thinking_level: Some(&thinking),
+                    max_context_window: max_ctx,
+                    plan_mode,
+                    caveman_mode: settings.caveman_mode.as_deref(),
+                },
             )
             .await;
             agent.set_system_prompt(blocks).await;
@@ -1915,6 +1966,70 @@ async fn handle_tui_action(
                 "Plan mode {} (model: {model_id}, provider: {provider_str})",
                 if enable { "on" } else { "off" }
             )));
+        }
+        TuiAction::ToggleCavemanMode { level } => {
+            let Some(agent) = agent_cell.read().await.clone() else {
+                let _ = event_tx.send(TuiEvent::Error("Agent not ready".into()));
+                return;
+            };
+
+            let normalized = normalize_caveman_level(level.as_deref());
+            agent.set_caveman_mode(normalized.clone()).await;
+
+            // Persist
+            let mut settings = crate::settings::load_settings().await;
+            settings.caveman_mode = normalized.clone();
+            crate::settings::save_settings(&settings).await.ok();
+
+            // Rebuild system prompt
+            let state = agent.state().await;
+            let model_id = state.model.id.clone();
+            let thinking = thinking_level_to_string(state.thinking_level);
+            drop(state);
+            let max_ctx = agent.config().max_context_window;
+            let plan_mode = agent.plan_mode().await;
+            let (blocks, resource_blocks) = build_system_prompt_with_skills(
+                working_dir,
+                &SystemPromptConfig {
+                    model_id: &model_id,
+                    thinking_level: Some(&thinking),
+                    max_context_window: max_ctx,
+                    plan_mode,
+                    caveman_mode: normalized.as_deref(),
+                },
+            )
+            .await;
+            agent.set_system_prompt(blocks).await;
+            if !resource_blocks.is_empty() {
+                agent.set_resource_context(resource_blocks).await;
+            }
+
+            let msg = match normalized {
+                Some(ref l) => format!("Caveman mode on ({l})"),
+                None => "Caveman mode off.".into(),
+            };
+            let _ = event_tx.send(TuiEvent::Info(msg));
+            let _ = event_tx.send(TuiEvent::CavemanModeToggled { level: normalized });
+        }
+    }
+}
+
+/// Normalize a caveman level string. Returns None for "off" or invalid values.
+fn normalize_caveman_level(input: Option<&str>) -> Option<String> {
+    match input
+        .map(|s| s.to_lowercase().trim().to_string())
+        .as_deref()
+    {
+        None | Some("off") => None,
+        Some("lite") => Some("lite".into()),
+        Some("full") => Some("full".into()),
+        Some("ultra") => Some("ultra".into()),
+        Some("wenyan-lite") => Some("wenyan-lite".into()),
+        Some("wenyan-full") => Some("wenyan-full".into()),
+        Some("wenyan-ultra") => Some("wenyan-ultra".into()),
+        Some(other) => {
+            tracing::warn!("unknown caveman level: {other}, ignoring");
+            None
         }
     }
 }

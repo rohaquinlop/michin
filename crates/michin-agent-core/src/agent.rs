@@ -160,6 +160,21 @@ impl Agent {
         self.state.read().await.plan_mode
     }
 
+    /// Set the caveman communication mode level.
+    ///
+    /// `None` disables caveman mode. `Some("full")` enables at that level.
+    pub async fn set_caveman_mode(&self, level: Option<String>) {
+        let mut state = self.state.write().await;
+        state.caveman_mode = level.clone();
+        drop(state);
+        let _ = self.event_tx.send(AgentEvent::CavemanModeToggled { level });
+    }
+
+    /// Returns the current caveman mode level, if active.
+    pub async fn caveman_mode(&self) -> Option<String> {
+        self.state.read().await.caveman_mode.clone()
+    }
+
     pub async fn load_messages(&self, messages: Vec<Message>) {
         let mut state = self.state.write().await;
         let (sanitized, stats) = michin_ai::sanitize_messages_for_replay(&messages, &state.model);
