@@ -14,7 +14,6 @@ pub mod settings_selector;
 pub mod status;
 pub mod theme_selector;
 pub mod thinking_selector;
-pub mod tree_selector;
 
 pub use login_flow::{LoginFlow, ProviderEntry, known_providers};
 pub use mimo_cluster::{MimoClusterEntry, MimoClusterSelector};
@@ -50,7 +49,6 @@ pub enum Action {
     ShowModelSelector,
     ShowThinkingSelector,
     CycleTheme,
-    ShowTree,
     CopySelection(String),
     OpenUrl(String),
     /// Focus the floating queue box for navigation (Ctrl+U toggles).

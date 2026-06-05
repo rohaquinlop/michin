@@ -24,7 +24,6 @@ use crate::components::settings_selector::{SettingsSelector, SettingsView};
 use crate::components::status::StatusBar;
 use crate::components::theme_selector::ThemeSelector;
 use crate::components::thinking_selector::ThinkingSelector;
-use crate::components::tree_selector::{TreeFilter, TreeSelector};
 use crate::components::{Action, Component};
 use crate::keybinding::{Keybinding, default_bindings, resolve_event};
 use crate::terminal;
@@ -57,7 +56,6 @@ pub enum TuiAction {
     NewSession,
     /// Show the session picker.
     ShowSessions,
-    ShowTree(String),
     Steer(String),
     FollowUp(String),
     /// Start Codex OAuth flow (triggered from login_flow).
@@ -199,10 +197,6 @@ pub enum TuiEvent {
         steer: usize,
         follow_up: usize,
     },
-    TreeSessions {
-        sessions: Vec<SessionInfo>,
-        filter: String,
-    },
     /// Extension status line update from Rhai scripts.
     ExtensionStatus(ExtensionStatusPayload),
     /// Real token usage from the last API call (input_tokens from usage).
@@ -282,7 +276,6 @@ pub struct SettingsPayload {
 enum AppMode {
     Chat,
     SessionPicker,
-    TreePicker,
 }
 
 /// A queued steer or follow-up message shown in the floating queue box above
@@ -307,7 +300,7 @@ pub struct App {
     working_dir: std::path::PathBuf,
     session_picker: Option<SessionPicker>,
     model_selector: ModelSelector,
-    tree_selector: TreeSelector,
+
     thinking_selector: ThinkingSelector,
     theme_selector: ThemeSelector,
     mimo_cluster_selector: MimoClusterSelector,
@@ -518,7 +511,6 @@ impl App {
             user_themes,
             session_picker: None,
             model_selector: ModelSelector::new(models, favorites, theme.clone()),
-            tree_selector: TreeSelector::new(theme.clone()),
             thinking_selector: ThinkingSelector::new(theme.clone()),
             mimo_cluster_selector: MimoClusterSelector::new(),
             settings_selector: SettingsSelector::new(
@@ -647,10 +639,6 @@ impl App {
         // Model selector overlay — renders on top of everything.
         self.model_selector.render(area, frame);
         if self.model_selector.visible {
-            return;
-        }
-        self.tree_selector.render(area, frame);
-        if self.tree_selector.visible {
             return;
         }
         self.thinking_selector.render(area, frame);
@@ -1072,34 +1060,6 @@ impl App {
             }
             return;
         }
-
-        if self.mode == AppMode::TreePicker {
-            if let crossterm::event::Event::Key(key) = event {
-                match key.code {
-                    crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
-                        self.tree_selector.select_down()
-                    }
-                    crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
-                        self.tree_selector.select_up()
-                    }
-                    crossterm::event::KeyCode::Enter => {
-                        if let Some(s) = self.tree_selector.selected() {
-                            self.chat.clear_messages();
-                            let _ = self.action_tx.send(TuiAction::ResumeSession(s.id.clone()));
-                        }
-                        self.tree_selector.visible = false;
-                        self.mode = AppMode::Chat;
-                    }
-                    crossterm::event::KeyCode::Esc => {
-                        self.tree_selector.visible = false;
-                        self.mode = AppMode::Chat;
-                    }
-                    _ => {}
-                }
-            }
-            return;
-        }
-
         // Session picker mode — handle picker keys exclusively.
         if self.mode == AppMode::SessionPicker {
             if let crossterm::event::Event::Key(key) = event {
@@ -1546,7 +1506,6 @@ impl App {
                     "  /new            Start a new unsaved session",
                     "  /sessions       List recent sessions (in picker press s to sort)",
                     "  /resume         Alias for /sessions",
-                    "  /tree [filter]  Open branch tree (default|no-tools|user-only|labeled-only|all)",
                     "  /themes         Open theme picker with live preview",
                     "  /skills         List available skills",
                     "  /settings       Open settings panel (UI behavior, prefs)",
@@ -1599,7 +1558,7 @@ impl App {
                     "  @              Trigger file autocomplete (fuzzy)",
                     "  /              Trigger command autocomplete",
                     "",
-                    "Overlays (model picker, tree, etc.):",
+                    "Overlays (model picker, etc.):",
                     "  Up/Down        Navigate list",
                     "  Enter          Select",
                     "  Esc            Close",
@@ -1751,10 +1710,6 @@ impl App {
             }
             "sessions" | "resume" => {
                 let _ = self.action_tx.send(TuiAction::ShowSessions);
-            }
-            "tree" => {
-                let filter = if arg.is_empty() { "default" } else { arg };
-                let _ = self.action_tx.send(TuiAction::ShowTree(filter.to_string()));
             }
             "themes" | "theme" => {
                 self.theme_selector.show(&self.current_theme_name);
@@ -2300,11 +2255,6 @@ impl App {
                 // TUI queue is now independent of the agent's steer/follow-up
                 // queue. Messages queued during streaming are processed locally
                 // as new prompts via process_next_queued on AgentEnd.
-            }
-            TuiEvent::TreeSessions { sessions, filter } => {
-                self.tree_selector
-                    .set_sessions(sessions, TreeFilter::parse(&filter));
-                self.mode = AppMode::TreePicker;
             }
             TuiEvent::ExtensionStatus(payload) => {
                 self.status.set_extension_rows(payload.rows);
