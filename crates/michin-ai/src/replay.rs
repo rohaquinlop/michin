@@ -170,7 +170,9 @@ pub fn sanitize_messages_for_replay(
                 out.push(Message::ToolResult {
                     tool_call_id: id,
                     tool_name: name,
-                    content: vec![ContentBlock::text("No result provided")],
+                    content: vec![ContentBlock::text(
+                        "Session interrupted before this tool call completed. Re-emit the tool call if needed.",
+                    )],
                     details: None,
                     is_error: true,
                     timestamp: ts,
