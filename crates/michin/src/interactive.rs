@@ -2653,19 +2653,6 @@ async fn build_context_files_list(working_dir: &Path) -> Vec<String> {
         }
     }
 
-    // CLAUDE.md (only if distinct).
-    if let Some(claude) = find_context_file(working_dir, "CLAUDE.md").await {
-        let already = files.iter().any(|f| f.contains("CLAUDE.md"));
-        if !already {
-            // Check it's not the same file as AGENTS.md.
-            if let Some(ref agents) = find_context_file(working_dir, "AGENTS.md").await
-                && claude != *agents
-            {
-                files.push(claude.display().to_string());
-            }
-        }
-    }
-
     // .michin/context.md
     let ctx = working_dir.join(".michin").join("context.md");
     if ctx.exists() {

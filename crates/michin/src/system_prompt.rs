@@ -173,20 +173,6 @@ async fn load_project_context(working_dir: &Path) -> Option<String> {
         ));
     }
 
-    // CLAUDE.md (only if different from root AGENTS.md)
-    if let Some(claude_path) = find_context_file(working_dir, "CLAUDE.md").await
-        && claude_path != agents_path
-        && let Ok(claude) = tokio::fs::read_to_string(&claude_path).await
-    {
-        context.push_str(&format!(
-            "
-
-# Additional Context
-
-{claude}"
-        ));
-    }
-
     // MichiN context file
     let ctx_path = working_dir.join(".michin").join("context.md");
     if ctx_path.exists()

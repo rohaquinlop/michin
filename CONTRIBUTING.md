@@ -99,7 +99,7 @@ All six phases complete. Active maintenance and polish.
 | `crates/michin/src/config.rs`                           | `MichiNConfig` — config.toml parsing, `AuthConfig` — auth.json with env fallback           |
 | `crates/michin/src/settings.rs`                         | Persistent settings.json (last model, thinking, steering mode, etc.)                      |
 | `crates/michin/src/interactive.rs`                      | TUI mode glue: agent creation, model resolution, auth auto-switch                         |
-| `crates/michin/src/system_prompt.rs`                    | System prompt builder: AGENTS.md (nested), CLAUDE.md, skills, extensions, tools           |
+| `crates/michin/src/system_prompt.rs`                    | System prompt builder: AGENTS.md (nested), skills, extensions, tools           |
 | `crates/michin/src/skills.rs`                           | Skill discovery (global + project-local), YAML frontmatter parsing                        |
 | `crates/michin/src/scripts.rs`                          | Extension script discovery for system prompt injection                                    |
 | `crates/michin/src/session.rs`                          | `SessionManager` — pi-compatible JSONL sessions in `~/.michin/sessions/`                   |
