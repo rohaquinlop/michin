@@ -1,11 +1,20 @@
 //! Skills system: discover and load Markdown skill files with YAML frontmatter.
 //!
-//! Compatible with Pi's SKILL.md format. Skills are discovered from:
-//! - `~/.michin/skills/` (global)
-//! - `.michin/skills/` (project-local)
+//! Follows the [Agent Skills spec](https://agentskills.io/specification).
+//! Skills are discovered from:
+//! - `~/.michin/skills/` (global, priority)
+//! - `~/.agents/skills/` (global)
+//! - `.michin/skills/` (project-local, priority)
+//! - `.agents/skills/` (project-local)
 //!
-//! Each skill is a Markdown file with YAML frontmatter between `---` delimiters.
-//! The frontmatter must contain `name` and `description` fields.
+//! `.michin/` takes priority over `.agents/` — if two skills share a name,
+//! the `.michin/` version wins.
+//!
+//! Each skill is a directory containing SKILL.md with YAML frontmatter
+//! between `---` delimiters. The frontmatter must contain `name` and
+//! `description` fields, and the `name` must match the parent directory name.
+//! The name must be 1-64 lowercase alphanumeric characters and hyphens,
+//! with no leading/trailing/consecutive hyphens.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,7 +47,8 @@ struct SkillFrontmatter {
 }
 
 impl Skill {
-    /// Parse a SKILL.md file. Returns `None` if the file has no valid frontmatter.
+    /// Parse a SKILL.md file. Returns `None` if the file has no valid frontmatter
+    /// or if the `name` field fails spec validation.
     pub fn from_file(path: &Path) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         let trimmed = content.trim_start();
@@ -54,6 +64,11 @@ impl Skill {
             .to_string();
 
         let fm: SkillFrontmatter = serde_yaml::from_str(yaml_str).ok()?;
+
+        if !is_valid_skill_name(&fm.name) {
+            tracing::warn!("invalid skill name '{}' in {}", fm.name, path.display());
+            return None;
+        }
 
         Some(Skill {
             name: fm.name,
@@ -81,22 +96,24 @@ impl Skill {
 
 /// Discover all skills from global and project directories.
 ///
-/// Search roots:
-/// - ~/.agents/skills
+/// Search roots (`.michin/` processed first for name priority):
 /// - ~/.michin/skills
-/// - ./.agents/skills
+/// - ~/.agents/skills
 /// - ./.michin/skills
+/// - ./.agents/skills
 pub async fn discover_skills(working_dir: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
 
+    // .michin/ takes priority over .agents/ — process it first so its
+    // names are reserved before .agents/ is scanned.
     let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".agents").join("skills"));
         roots.push(home.join(".michin").join("skills"));
+        roots.push(home.join(".agents").join("skills"));
     }
-    roots.push(working_dir.join(".agents").join("skills"));
     roots.push(working_dir.join(".michin").join("skills"));
+    roots.push(working_dir.join(".agents").join("skills"));
 
     for root in roots {
         load_skills_from_dir_recursive(&root, &mut skills, &mut seen_names);
@@ -105,8 +122,10 @@ pub async fn discover_skills(working_dir: &Path) -> Vec<Skill> {
     skills
 }
 
-/// Recursively load skills.
-/// If a directory contains SKILL.md, treat that directory as one skill root and do not recurse deeper.
+/// Recursively load skills from a directory. Only directory-based skills are
+/// loaded: each skill must be a directory containing SKILL.md, and the
+/// frontmatter `name` must match the parent directory name per the
+/// [Agent Skills spec](https://agentskills.io/specification).
 fn load_skills_from_dir_recursive(
     dir: &Path,
     skills: &mut Vec<Skill>,
@@ -119,27 +138,53 @@ fn load_skills_from_dir_recursive(
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_dir() {
-            let skill_md = path.join("SKILL.md");
-            if skill_md.exists() {
-                if let Some(skill) = Skill::from_file(&skill_md)
-                    && seen_names.insert(skill.name.clone())
-                {
-                    skills.push(skill);
-                }
-                continue;
-            }
+        if !path.is_dir() {
+            continue;
+        }
+
+        let skill_md = path.join("SKILL.md");
+        if !skill_md.exists() {
             load_skills_from_dir_recursive(&path, skills, seen_names);
             continue;
         }
 
-        if path.file_name().map(|n| n == "SKILL.md").unwrap_or(false)
-            && let Some(skill) = Skill::from_file(&path)
-            && seen_names.insert(skill.name.clone())
-        {
+        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        let Some(skill) = Skill::from_file(&skill_md) else {
+            continue;
+        };
+
+        // Per spec: frontmatter name must match parent directory name.
+        if skill.name != dir_name {
+            tracing::warn!(
+                "skill name '{}' does not match directory '{}', skipping {}",
+                skill.name,
+                dir_name,
+                skill_md.display()
+            );
+            continue;
+        }
+
+        if seen_names.insert(skill.name.clone()) {
             skills.push(skill);
         }
     }
+}
+
+/// Validate a skill name per the Agent Skills spec:
+/// 1-64 chars, lowercase alphanumeric + hyphens, no leading/trailing/consecutive hyphens.
+fn is_valid_skill_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return false;
+    }
+    if name.contains("--") {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Build the `<available_skills>` block for injection into the system prompt.
