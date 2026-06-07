@@ -1339,6 +1339,29 @@ pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<Stri
     entries.dedup();
 
     let trimmed = query.trim();
+
+    // Git excludes gitignored directories (e.g. docs/). When query has a
+    // slash and the directory prefix exists on disk, supplement entries
+    // with filesystem listing from that dir so partial paths like
+    // `docs/risk` still match.
+    if let Some(slash_pos) = trimmed.rfind('/') {
+        let dir_prefix = &trimmed[..slash_pos + 1];
+        let abs_dir = base_dir.join(dir_prefix.trim_end_matches('/'));
+        if abs_dir.is_dir() {
+            let include_hidden = trimmed.starts_with('.');
+            let mut dir_entries = Vec::new();
+            collect_file_paths(base_dir, &abs_dir, include_hidden, &mut dir_entries);
+            dir_entries.sort();
+            dir_entries.dedup();
+            for entry in dir_entries {
+                if !entries.contains(&entry) {
+                    entries.push(entry);
+                }
+            }
+            entries.sort();
+        }
+    }
+
     if trimmed.is_empty() {
         return entries.into_iter().take(50).collect();
     }
