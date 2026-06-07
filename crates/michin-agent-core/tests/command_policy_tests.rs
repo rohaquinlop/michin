@@ -33,7 +33,7 @@ fn always_on_policy_allows_read_only_commands() {
         "npm test",
         "make check",
     ] {
-        let d = evaluate_tool_call(&bash_call(command), true);
+        let d = evaluate_tool_call(&bash_call(command), true, false);
         assert_eq!(
             d.decision,
             SafetyDecisionKind::Allowed,
@@ -52,7 +52,7 @@ fn always_on_policy_allows_bash_commands_not_catastrophic() {
         "npm install express",
         "echo hi > out.txt",
     ] {
-        let d = evaluate_tool_call(&bash_call(command), true);
+        let d = evaluate_tool_call(&bash_call(command), true, false);
         assert_eq!(d.decision, SafetyDecisionKind::Allowed);
     }
 }
@@ -65,7 +65,7 @@ fn non_bash_tools_always_allowed() {
             name: name.to_string(),
             arguments: json!({"path":"a","content":"b"}),
         };
-        let d = evaluate_tool_call(&tc, true);
+        let d = evaluate_tool_call(&tc, true, false);
         assert_eq!(
             d.decision,
             SafetyDecisionKind::Allowed,
@@ -83,7 +83,7 @@ fn strict_mode_rejects_catastrophic_commands() {
         "mkfs /dev/disk9",
         "shutdown now",
     ] {
-        let d = evaluate_tool_call(&bash_call(command), true);
+        let d = evaluate_tool_call(&bash_call(command), true, false);
         assert_eq!(
             d.decision,
             SafetyDecisionKind::Rejected,
@@ -94,13 +94,13 @@ fn strict_mode_rejects_catastrophic_commands() {
 
 #[test]
 fn strict_mode_allows_non_catastrophic_recursive_delete() {
-    let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), true);
+    let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), true, false);
     assert_eq!(d.decision, SafetyDecisionKind::Allowed);
 }
 
 #[test]
 fn non_strict_allows_recursive_delete() {
-    let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), false);
+    let d = evaluate_tool_call(&bash_call("rm -rf /tmp/foo"), false, false);
     assert_eq!(d.decision, SafetyDecisionKind::Allowed);
 }
 
@@ -139,4 +139,78 @@ fn required_authorization_classification_is_generic() {
         arguments: json!({"command":"git diff"}),
     };
     assert_eq!(required_user_authorization(&inspect), None);
+}
+
+// ── Plan mode tests ────────────────────────────────────────────────
+
+#[test]
+fn plan_mode_allows_write() {
+    let tc = ToolCall {
+        id: "w1".to_string(),
+        name: "write".to_string(),
+        arguments: json!({"path":"plan.md","content":"# Plan"}),
+    };
+    let d = evaluate_tool_call(&tc, true, true);
+    assert_eq!(d.decision, SafetyDecisionKind::Allowed);
+}
+
+#[test]
+fn plan_mode_rejects_edit() {
+    let tc = ToolCall {
+        id: "e1".to_string(),
+        name: "edit".to_string(),
+        arguments: json!({"path":"foo.rs","edits":[]}),
+    };
+    let d = evaluate_tool_call(&tc, true, true);
+    assert_eq!(d.decision, SafetyDecisionKind::Rejected);
+}
+
+#[test]
+fn plan_mode_allows_read() {
+    let tc = ToolCall {
+        id: "r1".to_string(),
+        name: "read".to_string(),
+        arguments: json!({"path":"foo.rs"}),
+    };
+    let d = evaluate_tool_call(&tc, true, true);
+    assert_eq!(d.decision, SafetyDecisionKind::Allowed);
+}
+
+#[test]
+fn plan_mode_rejects_mutating_bash() {
+    for command in [
+        "sed -i 's/a/b/' f.txt",
+        "cargo add serde",
+        "git push origin main",
+        "rm -rf /tmp/foo",
+        "echo hi > out.txt",
+    ] {
+        let d = evaluate_tool_call(&bash_call(command), true, true);
+        assert_eq!(
+            d.decision,
+            SafetyDecisionKind::Rejected,
+            "{command} should be rejected in plan mode"
+        );
+    }
+}
+
+#[test]
+fn plan_mode_allows_read_only_bash() {
+    for command in [
+        "cargo check",
+        "cargo test",
+        "git status",
+        "git diff",
+        "rg pattern src/",
+        "grep -n foo bar.rs",
+        "cargo fmt --check",
+        "make check",
+    ] {
+        let d = evaluate_tool_call(&bash_call(command), true, true);
+        assert_eq!(
+            d.decision,
+            SafetyDecisionKind::Allowed,
+            "{command} should be allowed in plan mode"
+        );
+    }
 }

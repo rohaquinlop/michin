@@ -508,14 +508,16 @@ async fn run_single_turn(
                     return Ok(());
                 }
 
-                // Execute tools. Command policy runs as always-on safety net:
-                // it blocks destructive operations regardless of "mode".
-                // The system prompt is responsible for guiding the model on
-                // when to use mutation tools vs read-only tools.
+                // Execute tools. Command policy: always-on safety net.
+                // In plan mode, edit/mutating-bash are blocked. read/write (for plans) allowed.
+                let plan_mode = state.plan_mode;
                 let mut allowed = Vec::new();
                 for tc in &tool_calls {
-                    let decision =
-                        command_policy::evaluate_tool_call(tc, config.command_policy_strict);
+                    let decision = command_policy::evaluate_tool_call(
+                        tc,
+                        config.command_policy_strict,
+                        plan_mode,
+                    );
                     let _ = event_tx.send(AgentEvent::SafetyDecision {
                         decision: decision.decision,
                         tool_name: tc.name.clone(),

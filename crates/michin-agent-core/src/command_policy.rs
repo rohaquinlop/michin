@@ -34,9 +34,13 @@ pub struct CommandSegment {
 /// use mutation tools vs read-only tools. The policy only blocks
 /// operations that are inherently dangerous regardless of context.
 ///
-/// When `plan_mode` is true, also blocks any file-mutating tool calls
-/// (`write`, `edit`, and mutating bash commands).
-pub fn evaluate_tool_call(tc: &ToolCall, strict: bool) -> SafetyDecision {
+/// When `plan_mode` is true, blocks source-file mutation (`edit`,
+/// mutating bash commands). `read`, `write` (for plan files), and
+/// read-only bash are allowed.
+pub fn evaluate_tool_call(tc: &ToolCall, strict: bool, plan_mode: bool) -> SafetyDecision {
+    if plan_mode {
+        return evaluate_with_plan_mode(tc);
+    }
     match tc.name.as_str() {
         "bash" => evaluate_bash(tc, strict),
         _ => SafetyDecision {
@@ -155,6 +159,78 @@ fn contains_token_sequence(tokens: &[&str], phrase_tokens: &[&str]) -> bool {
         .any(|w| w.iter().copied().eq(phrase_tokens.iter().copied()))
 }
 
+fn evaluate_with_plan_mode(tc: &ToolCall) -> SafetyDecision {
+    match tc.name.as_str() {
+        "read" => SafetyDecision {
+            decision: SafetyDecisionKind::Allowed,
+            details: "read allowed in plan mode".to_string(),
+        },
+        "write" => SafetyDecision {
+            decision: SafetyDecisionKind::Allowed,
+            details: "write allowed in plan mode — for saving plan files".to_string(),
+        },
+        "edit" => SafetyDecision {
+            decision: SafetyDecisionKind::Rejected,
+            details: "edit blocked in plan mode — source files are read-only".to_string(),
+        },
+        "bash" => {
+            // In plan mode, block bash commands that would mutate files or deps.
+            // read-only commands (cargo check, grep, git status, etc.) are allowed.
+            let Some(command) = tc.arguments.get("command").and_then(|v| v.as_str()) else {
+                return SafetyDecision {
+                    decision: SafetyDecisionKind::Rejected,
+                    details: "bash command is missing".to_string(),
+                };
+            };
+            let segments = parse_command_segments(command);
+            if segments.is_empty() {
+                return SafetyDecision {
+                    decision: SafetyDecisionKind::Rejected,
+                    details: "bash command is empty".to_string(),
+                };
+            }
+            for segment in &segments {
+                // Check raw segment for shell redirects (output to file).
+                if has_output_redirect(&segment.raw) {
+                    return SafetyDecision {
+                        decision: SafetyDecisionKind::Rejected,
+                        details: format!(
+                            "bash command '{}' blocked in plan mode — output redirect not allowed",
+                            segment.raw
+                        ),
+                    };
+                }
+                let argv = segment
+                    .argv
+                    .iter()
+                    .map(|s| s.to_lowercase())
+                    .collect::<Vec<_>>();
+                let toks: Vec<&str> = argv.iter().map(String::as_str).collect();
+                if is_file_mutating_command(&toks)
+                    || is_dependency_mutating_command(&toks)
+                    || is_vcs_mutating_command(&toks)
+                {
+                    return SafetyDecision {
+                        decision: SafetyDecisionKind::Rejected,
+                        details: format!(
+                            "bash command '{}' blocked in plan mode — mutation not allowed",
+                            segment.raw
+                        ),
+                    };
+                }
+            }
+            SafetyDecision {
+                decision: SafetyDecisionKind::Allowed,
+                details: "read-only bash command allowed in plan mode".to_string(),
+            }
+        }
+        _ => SafetyDecision {
+            decision: SafetyDecisionKind::Allowed,
+            details: format!("tool '{}' allowed in plan mode", tc.name),
+        },
+    }
+}
+
 fn evaluate_bash(tc: &ToolCall, strict: bool) -> SafetyDecision {
     let Some(command) = tc.arguments.get("command").and_then(|v| v.as_str()) else {
         return SafetyDecision {
@@ -193,6 +269,43 @@ fn is_destructive_command(segment: &CommandSegment) -> bool {
         "rm" => contains_recursive_delete(segment),
         _ => false,
     }
+}
+
+/// Check if raw command segment has an output redirect (writing to a file).
+fn has_output_redirect(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+            }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                // >> (append) — mutation
+                return true;
+            }
+            b'>' => {
+                // > or 2> or &> — mutation
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 fn effective_command(segment: &CommandSegment) -> &str {

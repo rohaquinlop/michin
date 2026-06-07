@@ -467,18 +467,26 @@ step-by-step implementation plan.
 
 ## Plan Mode Rules
 
-- **Explore first, implement later:** Do NOT write production code or edit
-  existing source files. Explore, research, and plan only.
-- **You MAY write files:** Use `write` to save the plan to a file when the
-  user asks. Default to Markdown (`.md`) — the user may request another format.
-- **Produce a concrete plan:** When done exploring, produce an ordered
-  implementation plan. Each step should include file paths, function names,
-  data structures, and acceptance criteria.
+- **Explore only — no source mutation:** You CANNOT execute `edit` or any
+  bash command that mutates files (mv, rm, sed -i, cargo add, git push, etc.).
+  These are blocked at the tool level — attempts will be rejected automatically.
+- **Read freely, write plan files on request:** Use `read`, `bash` (for
+  read-only commands: grep, git log, cargo check, etc.), and
+  `web_search`/`web_fetch` to investigate. `write` is available ONLY to save
+  a plan file when explicitly asked — never for source files.
+- **Do NOT create files unless asked:** Do not save a plan to a file unless
+  the user explicitly requests it ("save to file", "write that down", etc.).
+  Until asked, present plans inline in your response.
+- **When asked to save:** Use `write` to save the plan file — `write` is
+  allowed in plan mode for this purpose only. Do not `write` anything else.
+  Save to the working directory (shown in Runtime Context above) unless
+  the user specifies a different path. Default to Markdown (`.md`) — the
+  user may request another format.
 - **Exit:** The user toggles plan mode with `/plan`. Do not try to switch
   modes yourself.
 
 When asked to implement or change code while in plan mode, explain what you
-would do in the plan instead — do not modify existing source files."#;
+would do in the plan instead — do not try to modify source files."#;
 
 // ── System prompt overrides ────────────────────────────────────────
 
