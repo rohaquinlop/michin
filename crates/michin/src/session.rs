@@ -1,7 +1,7 @@
 //! Session management: create, open, fork, resume, and append JSONL sessions.
 //!
 //! Writes MichiN-native message keys while remaining backward-compatible when
-//! reading legacy Pi-compatible entries.
+//! reading legacy entries with toolCallId/toolName keys.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};

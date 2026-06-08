@@ -337,7 +337,7 @@ mod types {
     }
 
     #[test]
-    fn test_message_tool_result_deserializes_legacy_pi_keys() {
+    fn test_message_tool_result_deserializes_legacy_keys() {
         let v = serde_json::json!({
             "type": "toolResult",
             "toolCallId": "c1",

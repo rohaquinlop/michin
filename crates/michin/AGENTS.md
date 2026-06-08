@@ -18,7 +18,7 @@ The main binary crate. Clap CLI, TUI mode, built-in tools, session management, c
 | `src/system_prompt.rs`                | System prompt builder (`SystemPromptConfig`, AGENTS.md, skills, tools) |
 | `src/skills.rs`                       | Skill discovery, YAML frontmatter, XML generation           |
 | `src/scripts.rs`                      | Extension script discovery                                  |
-| `src/session.rs`                      | `SessionManager` — pi-compatible JSONL                      |
+| `src/session.rs`                      | `SessionManager` — JSONL session store                      |
 | `src/login.rs`                        | `michin login` OAuth entry point                             |
 | `src/oauth/codex.rs`                  | Codex OAuth token exchange and refresh                      |
 | `src/rpc.rs`                          | JSON-RPC over stdin/stdout                                  |
@@ -40,7 +40,7 @@ Four built-in tools in `src/tools/`: `read`, `write`, `edit`, `bash`.
 
 ## Session Format
 
-Pi-compatible JSONL. Sessions in `~/.michin/sessions/` with `index.json`.
+JSONL sessions in `~/.michin/sessions/` with `index.json`.
 JSONL entries: `user`, `assistant`, `toolResult`, `model_change`, `thinking_level_change`.
 
 ## Config and Auth

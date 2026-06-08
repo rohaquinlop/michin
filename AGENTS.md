@@ -11,11 +11,9 @@
 
 ## Project Philosophy
 
-MichiN = minimal terminal coding-agent harness in Rust, inspired by [pi](https://github.com/earendil-works/pi).
+MichiN is a terminal coding-agent harness.
 
-> **Adapt MichiN to your workflows, not the other way around.**
-
-Extend without forking internals: custom tools via Rust traits, skills via Markdown, prompt templates, Rhai scripts, themes. No sub-agents, no plan mode in core.
+**Extend without forking internals:** custom tools via Rust traits, skills via Markdown, prompt templates, Rhai scripts, themes. No sub-agents, no plan mode in core.
 
 ### The model decides, not the code
 

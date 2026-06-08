@@ -80,7 +80,7 @@ async fn test_append_and_reload() {
 }
 
 #[tokio::test]
-async fn test_open_parses_legacy_pi_tool_result_entry() {
+async fn test_open_parses_legacy_tool_result_entry() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mgr = SessionManager::with_dir(tmp.path().to_path_buf());
     let session = mgr.create(None).await.unwrap();

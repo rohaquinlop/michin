@@ -11,8 +11,6 @@
 
 MichiN is an extensible terminal coding agent harness.
 
-Adapt it to your workflows, not the other way around.
-
 ## Install / Run
 
 ```bash

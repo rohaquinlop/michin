@@ -35,7 +35,7 @@ Agent runtime: `Agent` struct, nested loop, tool execution, compaction, command 
 
 **Turn modes:** `Execute`, `Inspect`, `AnalyzeOnly`, `PlanOnly`, `Clarify`.
 
-**Turn enforcement (Pi-style):** intent flags with bounded one-shot retry per enforcement path.
+**Turn enforcement:** intent flags with bounded one-shot retry per enforcement path.
 
 **Loop guard:** `max_same_tool_call_repeats` (default 6) — aborts inner loop if same tool+args repeats.
 
