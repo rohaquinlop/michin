@@ -4,9 +4,11 @@
 //! These are Rhai functions that store FnPtr callbacks for later evaluation.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rhai::{AST, Dynamic, Engine, EvalAltResult, FnPtr, Position, Scope};
+use tokio_util::sync::CancellationToken;
 
 use michin_agent_core::command_policy;
 use michin_agent_core::types::{ExtensionStatusRow, ToolExecutionMode};
@@ -80,10 +82,12 @@ pub struct ScriptEngine {
     suppress_registration: Arc<Mutex<bool>>,
     /// Namespace prefix for set_state/get_state keys during script load.
     state_namespace: Arc<Mutex<Option<String>>>,
+    /// Current cancellation token for exec() subprocesses.
+    current_cancel_token: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl ScriptEngine {
-    pub fn new() -> Self {
+    pub fn new(working_dir: PathBuf) -> Self {
         let mut engine = Engine::new();
         engine.set_max_operations(1_000_000);
         let handlers = Arc::new(Mutex::new(HashMap::new()));
@@ -95,6 +99,8 @@ impl ScriptEngine {
         let shared_state: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let state_namespace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let current_cancel_token: Arc<Mutex<Option<CancellationToken>>> =
+            Arc::new(Mutex::new(None));
 
         // Register set_state(key, value) — accessible from all Rhai scripts.
         {
@@ -230,175 +236,79 @@ impl ScriptEngine {
         }
 
         // Register exec(command, args_array) -> #{ stdout, stderr, exit_code }
-        // Kills the subprocess after 30 seconds to prevent hanging.
-        engine.register_fn("exec", |command: &str, args: rhai::Array| -> Dynamic {
-            let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-
-            // Check command safety policy.
-            let decision = command_policy::evaluate_exec_command(command, &arg_strings);
-            if decision.decision == michin_agent_core::SafetyDecisionKind::Rejected {
-                let mut map = rhai::Map::new();
-                map.insert("stdout".into(), Dynamic::from(String::new()));
-                map.insert("stderr".into(), Dynamic::from(decision.details));
-                map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                return Dynamic::from(map);
-            }
-
-            let output = std::process::Command::new(command)
-                .args(&arg_strings)
-                .output();
-            match output {
-                Ok(out) => {
-                    let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    let mut truncated = false;
-                    if stdout.len() > MAX_OUTPUT_BYTES {
-                        let cap = cap_bytes(&stdout, MAX_OUTPUT_BYTES);
-                        truncated |= stdout.len() != cap.len();
-                        stdout = cap;
-                    }
-                    if stderr.len() > MAX_OUTPUT_BYTES {
-                        let cap = cap_bytes(&stderr, MAX_OUTPUT_BYTES);
-                        truncated |= stderr.len() != cap.len();
-                        stderr = cap;
-                    }
-                    if truncated {
-                        stderr.push_str("\n[output truncated at 256KB]");
-                    }
-                    let exit_code = out.status.code().unwrap_or(-1) as rhai::INT;
-                    let mut map = rhai::Map::new();
-                    map.insert("stdout".into(), Dynamic::from(stdout));
-                    map.insert("stderr".into(), Dynamic::from(stderr));
-                    map.insert("exit_code".into(), Dynamic::from(exit_code));
-                    Dynamic::from(map)
-                }
-                Err(e) => {
-                    let mut map = rhai::Map::new();
-                    map.insert("stdout".into(), Dynamic::from(String::new()));
-                    map.insert("stderr".into(), Dynamic::from(e.to_string()));
-                    map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                    Dynamic::from(map)
-                }
-            }
-        });
+        // Polls with a default 120s timeout and checks the cancel token.
+        {
+            let wd = Arc::new(working_dir.clone());
+            let cancel_token = Arc::clone(&current_cancel_token);
+            engine.register_fn("exec", move |command: &str, args: rhai::Array| -> Dynamic {
+                exec_impl(command, &args, 120, &cancel_token, &wd)
+            });
+        }
 
         // Register exec_with_timeout(command, args_array, timeout_secs)
-        // Returns the same shape as exec() but kills the process after the timeout.
-        // Falls back to a timeout error #{ stdout: "", stderr: "timeout", exit_code: -1 }.
-        engine.register_fn(
-            "exec_with_timeout",
-            |command: &str, args: rhai::Array, timeout_secs: i64| -> Dynamic {
-                let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-
-                // Check command safety policy.
-                let decision = command_policy::evaluate_exec_command(command, &arg_strings);
-                if decision.decision == michin_agent_core::SafetyDecisionKind::Rejected {
-                    let mut map = rhai::Map::new();
-                    map.insert("stdout".into(), Dynamic::from(String::new()));
-                    map.insert("stderr".into(), Dynamic::from(decision.details));
-                    map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                    return Dynamic::from(map);
-                }
-
-                let mut child = match std::process::Command::new(command)
-                    .args(&arg_strings)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let mut map = rhai::Map::new();
-                        map.insert("stdout".into(), Dynamic::from(String::new()));
-                        map.insert("stderr".into(), Dynamic::from(e.to_string()));
-                        map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                        return Dynamic::from(map);
-                    }
-                };
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(timeout_secs.max(1) as u64);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_status)) => break,
-                        Ok(None) => {
-                            if std::time::Instant::now() >= deadline {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                let mut map = rhai::Map::new();
-                                map.insert("stdout".into(), Dynamic::from(String::new()));
-                                map.insert(
-                                    "stderr".into(),
-                                    Dynamic::from(format!(
-                                        "process timed out after {timeout_secs}s"
-                                    )),
-                                );
-                                map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                                return Dynamic::from(map);
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        Err(e) => {
-                            let mut map = rhai::Map::new();
-                            map.insert("stdout".into(), Dynamic::from(String::new()));
-                            map.insert("stderr".into(), Dynamic::from(e.to_string()));
-                            map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
-                            return Dynamic::from(map);
-                        }
-                    }
-                }
-                let result = child.wait_with_output().unwrap();
-                let mut stdout = String::from_utf8_lossy(&result.stdout).to_string();
-                let mut stderr = String::from_utf8_lossy(&result.stderr).to_string();
-                let mut truncated = false;
-                if stdout.len() > MAX_OUTPUT_BYTES {
-                    let cap = cap_bytes(&stdout, MAX_OUTPUT_BYTES);
-                    truncated |= stdout.len() != cap.len();
-                    stdout = cap;
-                }
-                if stderr.len() > MAX_OUTPUT_BYTES {
-                    let cap = cap_bytes(&stderr, MAX_OUTPUT_BYTES);
-                    truncated |= stderr.len() != cap.len();
-                    stderr = cap;
-                }
-                if truncated {
-                    stderr.push_str("\n[output truncated at 256KB]");
-                }
-                let exit_code = result.status.code().unwrap_or(-1) as rhai::INT;
-                let mut map = rhai::Map::new();
-                map.insert("stdout".into(), Dynamic::from(stdout));
-                map.insert("stderr".into(), Dynamic::from(stderr));
-                map.insert("exit_code".into(), Dynamic::from(exit_code));
-                Dynamic::from(map)
-            },
-        );
+        // Same as exec() but with a user-specified timeout.
+        {
+            let wd = Arc::new(working_dir.clone());
+            let cancel_token = Arc::clone(&current_cancel_token);
+            engine.register_fn(
+                "exec_with_timeout",
+                move |command: &str, args: rhai::Array, timeout_secs: i64| -> Dynamic {
+                    exec_impl(
+                        command,
+                        &args,
+                        timeout_secs.max(1) as u64,
+                        &cancel_token,
+                        &wd,
+                    )
+                },
+            );
+        }
 
         // Register read_file(path) -> String
-        engine.register_fn(
-            "read_file",
-            |path: &str| -> Result<String, Box<EvalAltResult>> {
-                std::fs::read_to_string(path).map_err(|e| {
-                    EvalAltResult::ErrorRuntime(
-                        format!("read_file failed: {e}").into(),
-                        Position::NONE,
-                    )
-                    .into()
-                })
-            },
-        );
+        // Resolves relative paths against working_dir. Absolute paths pass through.
+        {
+            let wd = working_dir.clone();
+            engine.register_fn(
+                "read_file",
+                move |path: &str| -> Result<String, Box<EvalAltResult>> {
+                    let resolved = resolve_tool_path(path, &wd);
+                    std::fs::read_to_string(&resolved).map_err(|e| {
+                        EvalAltResult::ErrorRuntime(
+                            format!("read_file failed: {e}").into(),
+                            Position::NONE,
+                        )
+                        .into()
+                    })
+                },
+            );
+        }
 
         // Register write_file(path, content)
-        engine.register_fn(
-            "write_file",
-            |path: &str, content: &str| -> Result<(), Box<EvalAltResult>> {
-                std::fs::write(path, content).map_err(|e| {
-                    EvalAltResult::ErrorRuntime(
-                        format!("write_file failed: {e}").into(),
-                        Position::NONE,
-                    )
-                    .into()
-                })
-            },
-        );
+        // Resolves relative paths against working_dir. Absolute paths pass through.
+        {
+            let wd = working_dir.clone();
+            engine.register_fn(
+                "write_file",
+                move |path: &str, content: &str| -> Result<(), Box<EvalAltResult>> {
+                    let resolved = resolve_tool_path(path, &wd);
+                    // Create parent directories if needed.
+                    if let Some(parent) = std::path::Path::new(&resolved).parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            Box::new(EvalAltResult::ErrorRuntime(
+                                format!("write_file mkdir failed: {e}").into(),
+                                Position::NONE,
+                            ))
+                        })?;
+                    }
+                    std::fs::write(&resolved, content).map_err(|e| {
+                        Box::new(EvalAltResult::ErrorRuntime(
+                            format!("write_file failed: {e}").into(),
+                            Position::NONE,
+                        ))
+                    })
+                },
+            );
+        }
 
         // Register str_trim(s) -> String — returns a new trimmed copy.
         // Rhai's built-in trim() mutates in place and returns (), so it
@@ -508,7 +418,14 @@ impl ScriptEngine {
             registered_tools,
             suppress_registration,
             state_namespace,
+            current_cancel_token,
         }
+    }
+
+    /// Set the cancellation token for exec() subprocesses.
+    /// Called before and after spawn_blocking to allow abort propagation.
+    pub fn set_cancel_token(&self, token: Option<CancellationToken>) {
+        *self.current_cancel_token.lock().unwrap() = token;
     }
 
     /// Load a script file. The script calls `tool.before(name, fn)` / `tool.after(name, fn)`.
@@ -812,8 +729,122 @@ impl ScriptEngine {
 
 impl Default for ScriptEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(PathBuf::from("."))
     }
+}
+
+/// Resolve a tool path against the working directory.
+/// Relative paths are resolved. Absolute paths pass through unchanged.
+fn resolve_tool_path(path: &str, working_dir: &Path) -> std::path::PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        working_dir.join(p)
+    }
+}
+
+/// Shared implementation for exec() and exec_with_timeout().
+/// Polls the process with the given timeout and checks the cancel token.
+fn exec_impl(
+    command: &str,
+    args: &rhai::Array,
+    timeout_secs: u64,
+    cancel_token: &Arc<Mutex<Option<CancellationToken>>>,
+    _working_dir: &Path,
+) -> Dynamic {
+    let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+
+    // Check command safety policy.
+    let decision = command_policy::evaluate_exec_command(command, &arg_strings);
+    if decision.decision == michin_agent_core::SafetyDecisionKind::Rejected {
+        let mut map = rhai::Map::new();
+        map.insert("stdout".into(), Dynamic::from(String::new()));
+        map.insert("stderr".into(), Dynamic::from(decision.details));
+        map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+        return Dynamic::from(map);
+    }
+
+    let mut child = match std::process::Command::new(command)
+        .args(&arg_strings)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let mut map = rhai::Map::new();
+            map.insert("stdout".into(), Dynamic::from(String::new()));
+            map.insert("stderr".into(), Dynamic::from(e.to_string()));
+            map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+            return Dynamic::from(map);
+        }
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let mut map = rhai::Map::new();
+                    map.insert("stdout".into(), Dynamic::from(String::new()));
+                    map.insert(
+                        "stderr".into(),
+                        Dynamic::from(format!("process timed out after {timeout_secs}s")),
+                    );
+                    map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+                    return Dynamic::from(map);
+                }
+                // Check cancel token.
+                #[allow(clippy::collapsible_if)]
+                if let Some(ref token) = *cancel_token.lock().unwrap() {
+                    if token.is_cancelled() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let mut map = rhai::Map::new();
+                        map.insert("stdout".into(), Dynamic::from(String::new()));
+                        map.insert("stderr".into(), Dynamic::from("aborted".to_string()));
+                        map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+                        return Dynamic::from(map);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                let mut map = rhai::Map::new();
+                map.insert("stdout".into(), Dynamic::from(String::new()));
+                map.insert("stderr".into(), Dynamic::from(e.to_string()));
+                map.insert("exit_code".into(), Dynamic::from(-1 as rhai::INT));
+                return Dynamic::from(map);
+            }
+        }
+    }
+    let result = child.wait_with_output().unwrap();
+    let mut stdout = String::from_utf8_lossy(&result.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&result.stderr).to_string();
+    let mut truncated = false;
+    if stdout.len() > MAX_OUTPUT_BYTES {
+        let cap = cap_bytes(&stdout, MAX_OUTPUT_BYTES);
+        truncated |= stdout.len() != cap.len();
+        stdout = cap;
+    }
+    if stderr.len() > MAX_OUTPUT_BYTES {
+        let cap = cap_bytes(&stderr, MAX_OUTPUT_BYTES);
+        truncated |= stderr.len() != cap.len();
+        stderr = cap;
+    }
+    if truncated {
+        stderr.push_str("\n[output truncated at 256KB]");
+    }
+    let exit_code = result.status.code().unwrap_or(-1) as rhai::INT;
+    let mut map = rhai::Map::new();
+    map.insert("stdout".into(), Dynamic::from(stdout));
+    map.insert("stderr".into(), Dynamic::from(stderr));
+    map.insert("exit_code".into(), Dynamic::from(exit_code));
+    Dynamic::from(map)
 }
 
 /// Cap a string at `limit` bytes, preserving UTF-8 validity.

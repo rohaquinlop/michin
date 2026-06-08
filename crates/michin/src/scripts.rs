@@ -94,7 +94,7 @@ pub async fn load_script_hooks(
 
     tracing::info!(count = loader.len(), "loading scripts");
 
-    let engine = Arc::new(ScriptEngine::new());
+    let engine = Arc::new(ScriptEngine::new(working_dir.to_path_buf()));
     let mut errors = 0usize;
 
     for def in loader.scripts() {
@@ -134,7 +134,7 @@ pub async fn load_custom_tools(working_dir: &Path) -> Vec<Arc<dyn AgentTool>> {
 
     tracing::info!(count = loader.len(), "loading custom tool scripts");
 
-    let engine = Arc::new(ScriptEngine::new());
+    let engine = Arc::new(ScriptEngine::new(working_dir.to_path_buf()));
     let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
 
     for def in loader.scripts() {

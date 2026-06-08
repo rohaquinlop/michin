@@ -58,16 +58,22 @@ impl AgentTool for RhaiCustomTool {
         let engine = Arc::clone(&self.engine);
         let def = self.def.clone();
 
-        let result = tokio::task::spawn_blocking(move || engine.eval_tool_execute(&def, &args))
-            .await
-            .map_err(|e| AgentError::ToolExecution {
-                tool_name: self.def.name.clone(),
-                message: format!("custom tool task panicked: {e}"),
-            })?
-            .map_err(|e| AgentError::ToolExecution {
-                tool_name: self.def.name.clone(),
-                message: e,
-            })?;
+        engine.set_cancel_token(signal.clone());
+
+        let engine_for_blocking = Arc::clone(&engine);
+        let result =
+            tokio::task::spawn_blocking(move || engine_for_blocking.eval_tool_execute(&def, &args))
+                .await
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: self.def.name.clone(),
+                    message: format!("custom tool task panicked: {e}"),
+                })?
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: self.def.name.clone(),
+                    message: e,
+                })?;
+
+        engine.set_cancel_token(None);
 
         // If cancellation was requested while spawn_blocking ran, discard result.
         if let Some(ref sig) = signal

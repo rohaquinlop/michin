@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_register_custom_tool() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "echo-tool".into(),
         location: PathBuf::from("echo.rhai"),
@@ -42,7 +42,7 @@ fn test_register_custom_tool() {
 
 #[test]
 fn test_execute_custom_tool_returns_string() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "greet".into(),
         location: PathBuf::from("greet.rhai"),
@@ -77,7 +77,7 @@ fn test_execute_custom_tool_returns_string() {
 
 #[test]
 fn test_execute_custom_tool_returns_map() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "calc".into(),
         location: PathBuf::from("calc.rhai"),
@@ -114,7 +114,7 @@ fn test_execute_custom_tool_returns_map() {
 
 #[test]
 fn test_execute_custom_tool_error_result() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "fail-tool".into(),
         location: PathBuf::from("fail.rhai"),
@@ -147,7 +147,7 @@ fn test_execute_custom_tool_error_result() {
 
 #[test]
 fn test_custom_tool_uses_exec() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "exec-tool".into(),
         location: PathBuf::from("exec.rhai"),
@@ -183,7 +183,7 @@ fn test_custom_tool_uses_exec() {
 
 #[test]
 fn test_custom_tool_sequential_mode() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "seq-tool".into(),
         location: PathBuf::from("seq.rhai"),
@@ -217,7 +217,7 @@ fn test_custom_tool_sequential_mode() {
 
 #[test]
 fn test_multiple_tools_in_one_script() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "multi-tools".into(),
         location: PathBuf::from("multi.rhai"),
@@ -259,7 +259,7 @@ fn test_multiple_tools_in_one_script() {
 
 #[test]
 fn test_custom_tool_coexists_with_hooks() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "hybrid".into(),
         location: PathBuf::from("hybrid.rhai"),
@@ -318,7 +318,7 @@ fn test_web_search_tool_file_loads() {
     if !path.exists() {
         return; // skip if file not present
     }
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let source = std::fs::read_to_string(&path).unwrap();
     let script = ScriptDef {
         name: "web-search".into(),
@@ -342,7 +342,7 @@ fn test_web_fetch_tool_file_loads() {
     if !path.exists() {
         return;
     }
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let source = std::fs::read_to_string(&path).unwrap();
     let script = ScriptDef {
         name: "web-fetch".into(),
@@ -362,7 +362,7 @@ fn test_web_fetch_tool_file_loads() {
 
 #[test]
 fn test_custom_tool_const_with_exec_comparison() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "const-exec".into(),
         location: PathBuf::from("const_exec.rhai"),
@@ -402,7 +402,7 @@ fn test_custom_tool_const_with_exec_comparison() {
 
 #[test]
 fn test_is_error_integer_coercion() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "int-error".into(),
         location: PathBuf::from("int_error.rhai"),
@@ -434,7 +434,7 @@ fn test_is_error_integer_coercion() {
 
 #[test]
 fn test_no_duplicate_hooks_after_tool_execute() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "dup-test".into(),
         location: PathBuf::from("dup.rhai"),
@@ -485,7 +485,7 @@ fn test_no_duplicate_hooks_after_tool_execute() {
 
 #[test]
 fn test_init_error_is_surfaced() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "bad-const".into(),
         location: PathBuf::from("bad.rhai"),
@@ -513,7 +513,7 @@ fn test_init_error_is_surfaced() {
 
 #[test]
 fn test_execute_error_is_surfaced() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "undef-in-exec".into(),
         location: PathBuf::from("undef.rhai"),
@@ -546,7 +546,7 @@ fn test_execute_error_is_surfaced() {
 
 #[test]
 fn test_exec_integer_type_consistency() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "exec-types".into(),
         location: PathBuf::from("exec_types.rhai"),
@@ -586,7 +586,7 @@ fn test_exec_integer_type_consistency() {
 
 #[test]
 fn test_array_iteration_with_push() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "arr-push".into(),
         location: PathBuf::from("arr_push.rhai"),
@@ -619,7 +619,7 @@ fn test_array_iteration_with_push() {
 
 #[test]
 fn test_map_contains_check_for_optional_args() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "map-contains".into(),
         location: PathBuf::from("map_contains.rhai"),
@@ -663,7 +663,7 @@ fn test_map_contains_check_for_optional_args() {
 
 #[test]
 fn test_str_trim_returns_value_not_unit() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let script = ScriptDef {
         name: "trim-test".into(),
         location: PathBuf::from("trim_test.rhai"),

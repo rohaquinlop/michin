@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_allow_without_handler() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
     let args = serde_json::json!({"command": "echo hello"});
     let result = engine.eval_before("bash", &args).unwrap();
     assert!(matches!(result, BeforeHookResult::Allow));
@@ -11,7 +11,7 @@ fn test_allow_without_handler() {
 
 #[test]
 fn test_block_rm_rf() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
 
     let script = ScriptDef {
         name: "test".into(),
@@ -42,7 +42,7 @@ fn test_block_rm_rf() {
 
 #[test]
 fn test_env_protection() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
 
     let script = ScriptDef {
         name: "guard".into(),
@@ -70,7 +70,7 @@ fn test_env_protection() {
 
 #[test]
 fn test_tui_status_registration() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
 
     let script = ScriptDef {
         name: "status-demo".into(),
@@ -93,7 +93,7 @@ fn test_tui_status_registration() {
 
 #[test]
 fn test_shared_state_across_hooks() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
 
     let script = ScriptDef {
         name: "state-demo".into(),
@@ -141,7 +141,7 @@ fn test_shared_state_across_hooks() {
 
 #[test]
 fn test_tui_status_multiple_keys() {
-    let engine = ScriptEngine::new();
+    let engine = ScriptEngine::new(PathBuf::from("."));
 
     let script = ScriptDef {
         name: "multi-status".into(),
