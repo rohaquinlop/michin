@@ -115,6 +115,8 @@ pub struct Editor {
     pub cursor: usize,
     /// `[byte_offset, …]` per character on each visual line.
     vis_lines: Vec<Vec<usize>>,
+    /// Start byte offset of each visual line (cached for O(log N) lookup).
+    vis_line_starts: Vec<usize>,
     /// Horizontal aim during vertical navigation.
     desired_col: usize,
     /// Inner width used for vis_lines cache.
@@ -150,6 +152,7 @@ impl Editor {
             text: String::new(),
             cursor: 0,
             vis_lines: Vec::new(),
+            vis_line_starts: Vec::new(),
             desired_col: 0,
             cached_width: 0,
             cache_dirty: true,
@@ -220,6 +223,7 @@ impl Editor {
             return;
         }
         self.vis_lines = build_vis_lines(&self.text, width);
+        self.vis_line_starts = build_vis_line_starts_from_layout(&self.vis_lines, &self.text);
         self.cached_width = width;
         self.cache_dirty = false;
     }
@@ -232,8 +236,13 @@ impl Editor {
             80
         };
         self.rebuild_visual_lines(width);
-        let (_, col) = byte_to_vis(&self.vis_lines, &self.text, byte);
+        let (_, col) = self.byte_to_vis_cached_internal(byte);
         col
+    }
+
+    /// Cached visual line position for a byte offset.
+    fn byte_to_vis_cached_internal(&self, byte: usize) -> (usize, usize) {
+        byte_to_vis_cached(&self.vis_lines, &self.vis_line_starts, &self.text, byte)
     }
 
     fn nav_width(&self) -> usize {
@@ -252,7 +261,7 @@ impl Editor {
         if !self.text.is_empty() && self.cursor > self.text.len() {
             self.cursor = self.text.len();
         }
-        let (_vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (_vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
         self.desired_col = vc;
         self.ensure_cursor_visible();
     }
@@ -311,7 +320,7 @@ impl Editor {
         if self.vis_lines.is_empty() {
             return;
         }
-        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         let height = self
             .last_inner_area
             .map(|a| a.height as usize)
@@ -331,7 +340,7 @@ impl Editor {
         if self.vis_lines.is_empty() {
             return false;
         }
-        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         if vl == 0 {
             // At first visual line — signal caller to handle history.
             return true;
@@ -371,7 +380,7 @@ impl Editor {
         if self.vis_lines.is_empty() {
             return false;
         }
-        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         if vl >= self.vis_lines.len().saturating_sub(1) {
             // Already at last visual line — signal caller to handle history.
             return true;
@@ -411,7 +420,7 @@ impl Editor {
         }
         // If cursor is at start of a visual line (excl. the very first),
         // wrap to end of previous visual line.
-        let (vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
         if vc == 0 && vl > 0 {
             // Go to the last byte offset of the previous visual line.
             let prev = &self.vis_lines[vl - 1];
@@ -440,7 +449,7 @@ impl Editor {
         if self.cursor >= self.text.len() {
             return;
         }
-        let (vl, vc) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
         if vc >= self.vis_lines[vl].len().saturating_sub(1) && vl + 1 < self.vis_lines.len() {
             // At end of visual line (not the last) — wrap to start of next.
             if let Some(&next_byte) = self.vis_lines[vl + 1].first() {
@@ -497,7 +506,7 @@ impl Editor {
     pub fn move_line_start(&mut self) {
         // Move to the start of the current visual line.
         self.rebuild_visual_lines(self.nav_width());
-        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         if vl < self.vis_lines.len() {
             if self.vis_lines[vl].is_empty() {
                 self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), vl);
@@ -511,7 +520,7 @@ impl Editor {
     pub fn move_line_end(&mut self) {
         // Move to the end of the current visual line.
         self.rebuild_visual_lines(self.nav_width());
-        let (vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         if vl < self.vis_lines.len() {
             if self.vis_lines[vl].is_empty() {
                 // Empty line: start and end are the same position.
@@ -651,9 +660,13 @@ impl Editor {
             return;
         };
 
-        // Query = text between prefix_start and cursor.
+        // Query = text from prefix_start to end of token (next whitespace/end).
         if self.cursor >= ac.prefix_start {
-            ac.query = self.text[ac.prefix_start..self.cursor].to_string();
+            let token_end = self.text[ac.prefix_start..]
+                .find(|c: char| c.is_whitespace())
+                .map(|end| ac.prefix_start + end)
+                .unwrap_or(self.text.len());
+            ac.query = self.text[ac.prefix_start..token_end].to_string();
         } else {
             ac.query.clear();
         }
@@ -824,7 +837,7 @@ impl Component for Editor {
         let total_lines = self.vis_lines.len();
 
         // Find cursor visual line and auto-scroll.
-        let (cursor_vl, _) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+        let (cursor_vl, _) = self.byte_to_vis_cached_internal(self.cursor);
         if cursor_vl < self.scroll {
             self.scroll = cursor_vl;
         } else if cursor_vl >= self.scroll + height {
@@ -850,7 +863,7 @@ impl Component for Editor {
             }
             // Block cursor at end of current line.
             if self.focused && cursor_vl == line_idx {
-                let (_, cursor_col) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+                let (_, cursor_col) = self.byte_to_vis_cached_internal(self.cursor);
                 if cursor_col == spans.len() {
                     spans.push(Span::styled(
                         " ",
@@ -877,7 +890,7 @@ impl Component for Editor {
         );
 
         if self.focused {
-            let (cursor_line, cursor_col) = byte_to_vis(&self.vis_lines, &self.text, self.cursor);
+            let (cursor_line, cursor_col) = self.byte_to_vis_cached_internal(self.cursor);
             if cursor_line >= self.scroll && cursor_line < self.scroll + height {
                 let x = inner.x.saturating_add(cursor_col as u16);
                 let y = inner
@@ -1279,20 +1292,24 @@ pub fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
     lines
 }
 
-/// Convert byte offset to (vis_line, vis_col) using the cached layout.
-pub fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
+/// Convert byte offset to (vis_line, vis_col) using cached line starts.
+pub fn byte_to_vis_cached(
+    vis_lines: &[Vec<usize>],
+    vis_line_starts: &[usize],
+    text: &str,
+    byte: usize,
+) -> (usize, usize) {
     if vis_lines.is_empty() {
         return (0, 0);
     }
 
-    let starts = build_vis_line_starts_from_layout(vis_lines, text);
     let text_len = text.len();
     if byte >= text_len {
         let last_idx = vis_lines.len() - 1;
         return (last_idx, vis_lines[last_idx].len());
     }
 
-    let line_idx = match starts.binary_search(&byte) {
+    let line_idx = match vis_line_starts.binary_search(&byte) {
         Ok(idx) => idx,
         Err(ins) => ins.saturating_sub(1),
     }
@@ -1306,6 +1323,12 @@ pub fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize,
     }
 
     (line_idx, line.len())
+}
+
+/// Convert byte offset to (vis_line, vis_col) using the cached layout.
+pub fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
+    let starts = build_vis_line_starts_from_layout(vis_lines, text);
+    byte_to_vis_cached(vis_lines, &starts, text, byte)
 }
 
 fn build_vis_line_starts_from_layout(vis_lines: &[Vec<usize>], text: &str) -> Vec<usize> {
