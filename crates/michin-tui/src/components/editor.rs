@@ -647,14 +647,13 @@ impl Component for Editor {
                     }
                     return None;
                 }
-                // Alt+Backspace in autocomplete: delete word (skip whitespace first).
+                // Alt+Backspace/Delete in autocomplete: delete whitespace only.
                 crossterm::event::KeyEvent {
                     code: KeyCode::Backspace,
                     modifiers: KeyModifiers::ALT,
                     ..
                 } => {
-                    skip_trailing_whitespace_backward(&mut self.textarea);
-                    self.textarea.delete_word();
+                    delete_whitespace_backward(&mut self.textarea);
                     self.update_autocomplete_items();
                     return None;
                 }
@@ -663,8 +662,7 @@ impl Component for Editor {
                     modifiers: KeyModifiers::ALT,
                     ..
                 } => {
-                    skip_leading_whitespace_forward(&mut self.textarea);
-                    self.textarea.delete_next_word();
+                    delete_whitespace_forward(&mut self.textarea);
                     self.update_autocomplete_items();
                     return None;
                 }
@@ -811,14 +809,13 @@ impl Component for Editor {
                 self.textarea.move_cursor(CursorMove::WordForward);
                 return None;
             }
-            // ── Option+Backspace / Option+Delete → delete word (skip whitespace first) ──
+            // ── Option+Backspace / Option+Delete → delete whitespace only ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Backspace,
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
-                skip_trailing_whitespace_backward(&mut self.textarea);
-                self.textarea.delete_word();
+                delete_whitespace_backward(&mut self.textarea);
                 return None;
             }
             crossterm::event::KeyEvent {
@@ -826,8 +823,7 @@ impl Component for Editor {
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
-                skip_leading_whitespace_forward(&mut self.textarea);
-                self.textarea.delete_next_word();
+                delete_whitespace_forward(&mut self.textarea);
                 return None;
             }
             crossterm::event::KeyEvent {
@@ -980,8 +976,8 @@ fn is_text_mutation_key(key: &crossterm::event::KeyEvent) -> bool {
     )
 }
 
-/// Move cursor backward past trailing whitespace.
-fn skip_trailing_whitespace_backward(textarea: &mut TextArea) {
+/// Delete consecutive whitespace left of cursor.
+fn delete_whitespace_backward(textarea: &mut TextArea) {
     loop {
         let (row, col) = textarea.cursor();
         if col == 0 {
@@ -991,20 +987,21 @@ fn skip_trailing_whitespace_backward(textarea: &mut TextArea) {
         let prev = line[..col].chars().last();
         if prev.is_some_and(|c| c.is_whitespace()) {
             textarea.move_cursor(CursorMove::Back);
+            textarea.delete_next_char();
         } else {
             break;
         }
     }
 }
 
-/// Move cursor forward past leading whitespace.
-fn skip_leading_whitespace_forward(textarea: &mut TextArea) {
+/// Delete consecutive whitespace right of cursor.
+fn delete_whitespace_forward(textarea: &mut TextArea) {
     loop {
         let (row, col) = textarea.cursor();
         let line = &textarea.lines()[row];
         let next = line[col..].chars().next();
         if next.is_some_and(|c| c.is_whitespace()) {
-            textarea.move_cursor(CursorMove::Forward);
+            textarea.delete_next_char();
         } else {
             break;
         }
