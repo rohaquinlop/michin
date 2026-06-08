@@ -1,16 +1,16 @@
-//! Input editor — multiline text input with visual-line cursor navigation,
-//! inline fuzzy autocomplete for @ files and / commands, clipboard, and
-//! proper terminal cursor positioning via `frame.set_cursor()`.
+//! Input editor — multiline text input backed by `tui-textarea` with
+//! inline fuzzy autocomplete for @ files and / commands, paste handling,
+//! and proper terminal cursor positioning via `frame.set_cursor()`.
 
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    style::{Modifier, Style},
+    widgets::{Block, Borders},
 };
 use std::path::{Path, PathBuf};
+use tui_textarea::{CursorMove, Input, Key, Scrolling, TextArea};
 
 use crate::components::fuzzy::fuzzy_filter;
 use crate::components::{Action, Component};
@@ -22,8 +22,9 @@ use crate::theme::Theme;
 struct AutocompleteState {
     items: Vec<String>,
     selected: usize,
-    /// Byte position where @ or / was typed.
-    prefix_start: usize,
+    /// Visual (row, col) where @ or / was typed.
+    prefix_row: usize,
+    prefix_col: usize,
     /// Filter query between trigger and cursor.
     query: String,
     /// '@' or '/'.
@@ -100,30 +101,12 @@ fn build_file_index(base_dir: &Path) -> Vec<String> {
 
 /// Multiline text editor with visual-line cursor navigation.
 ///
-/// ## Cursor model
-///
-/// Canonical cursor position is a byte offset into `text`.
-/// `vis_lines` (built by `rebuild_visual_lines`) maps each visual line
-/// to `Vec<usize>` of byte offsets per character, from which
-/// `(vis_line, vis_col)` is derived on demand.
-///
-/// `desired_col` tracks horizontal aim during vertical navigation,
-/// preserving column position across lines of varying length.
+/// Backed by `tui-textarea` for all text editing, cursor movement,
+/// undo/redo, kill/yank, and line navigation. The Editor layer adds
+/// MichiN-specific features: autocomplete, history, enter behavior,
+/// and app-global keybindings.
 pub struct Editor {
-    pub text: String,
-    /// Byte offset into `text`.
-    pub cursor: usize,
-    /// `[byte_offset, …]` per character on each visual line.
-    vis_lines: Vec<Vec<usize>>,
-    /// Start byte offset of each visual line (cached for O(log N) lookup).
-    vis_line_starts: Vec<usize>,
-    /// Horizontal aim during vertical navigation.
-    desired_col: usize,
-    /// Inner width used for vis_lines cache.
-    pub cached_width: usize,
-    /// Cache invalidation flag.
-    pub cache_dirty: bool,
-
+    textarea: TextArea<'static>,
     focused: bool,
     theme: Theme,
     history: Vec<String>,
@@ -131,13 +114,12 @@ pub struct Editor {
     history_idx: usize,
     /// Stash for history restore.
     saved_text: String,
-    scroll: usize,
     autocomplete: Option<AutocompleteState>,
     file_index: FileIndex,
     working_dir: PathBuf,
     slash_commands: Vec<String>,
     enter_behavior: EnterBehavior,
-    /// For hit-testing + cursor placement.
+    /// For popup positioning + mouse hit-testing.
     pub last_inner_area: Option<Rect>,
 }
 
@@ -148,20 +130,18 @@ impl Editor {
         slash_commands: Vec<String>,
         enter_behavior: String,
     ) -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_tab_length(2);
+        textarea.set_max_histories(100);
+        // Style will be applied in set_theme() and render().
+
         Self {
-            text: String::new(),
-            cursor: 0,
-            vis_lines: Vec::new(),
-            vis_line_starts: Vec::new(),
-            desired_col: 0,
-            cached_width: 0,
-            cache_dirty: true,
+            textarea,
             focused: false,
             theme,
             history: Vec::new(),
             history_idx: 0,
             saved_text: String::new(),
-            scroll: 0,
             autocomplete: None,
             file_index: FileIndex::new(),
             working_dir,
@@ -172,413 +152,55 @@ impl Editor {
     }
 
     pub fn set_text(&mut self, text: &str) {
-        self.text = text.to_string();
-        self.cursor = self.text.len();
-        self.desired_col = 0;
-        self.scroll = 0;
-        self.cache_dirty = true;
+        let lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+        let lines = if lines.is_empty() {
+            vec![String::new()]
+        } else {
+            lines
+        };
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_tab_length(2);
+        self.textarea.set_max_histories(100);
+        self.apply_theme_styles();
+        // Place cursor at end.
+        self.textarea.move_cursor(CursorMove::Bottom);
+        self.textarea.move_cursor(CursorMove::End);
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
     }
 
-    pub fn desired_height(&mut self, width: usize, max_height: u16) -> u16 {
-        let inner_width = width.saturating_sub(2).max(1);
-        self.rebuild_visual_lines(inner_width);
-        let lines = self.vis_lines.len() as u16;
+    pub fn desired_height(&self, _width: usize, max_height: u16) -> u16 {
+        let lines = self.textarea.lines().len() as u16;
+        // Borders add 2 lines, minimum 3 rows.
         lines.saturating_add(2).clamp(3, max_height.max(3))
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+        self.apply_theme_styles();
+    }
+
+    fn apply_theme_styles(&mut self) {
+        let text_style = Style::default().fg(self.theme.fg);
+        let cursor_style = Style::default().fg(self.theme.bg).bg(self.theme.accent);
+        self.textarea.set_style(text_style);
+        self.textarea.set_cursor_style(cursor_style);
+        self.textarea
+            .set_cursor_line_style(Style::default().add_modifier(Modifier::UNDERLINED));
     }
 
     /// Insert at cursor. Used by path picker.
     pub fn insert_at_cursor(&mut self, s: &str) {
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
-        self.after_mutate();
+        for c in s.chars() {
+            self.textarea.insert_char(c);
+        }
     }
 
     /// Delete the last character.
     pub fn delete_last_char(&mut self) {
-        if let Some(c) = self.text.chars().last() {
-            let len = c.len_utf8();
-            self.text.truncate(self.text.len() - len);
-            if self.cursor > self.text.len() {
-                self.cursor = self.text.len();
-            }
-            self.after_mutate();
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Visual line cache
-    // ------------------------------------------------------------------
-
-    /// Rebuild visual line cache if dirty or width changed.
-    pub fn rebuild_visual_lines(&mut self, width: usize) {
-        if !self.cache_dirty && self.cached_width == width {
-            return;
-        }
-        self.vis_lines = build_vis_lines(&self.text, width);
-        self.vis_line_starts = build_vis_line_starts_from_layout(&self.vis_lines, &self.text);
-        self.cached_width = width;
-        self.cache_dirty = false;
-    }
-
-    /// Visual column at byte offset, rebuilding cache as needed.
-    fn byte_to_vis_col(&mut self, byte: usize) -> usize {
-        let width = if self.cached_width > 0 {
-            self.cached_width
-        } else {
-            80
-        };
-        self.rebuild_visual_lines(width);
-        let (_, col) = self.byte_to_vis_cached_internal(byte);
-        col
-    }
-
-    /// Cached visual line position for a byte offset.
-    fn byte_to_vis_cached_internal(&self, byte: usize) -> (usize, usize) {
-        byte_to_vis_cached(&self.vis_lines, &self.vis_line_starts, &self.text, byte)
-    }
-
-    fn nav_width(&self) -> usize {
-        if self.cached_width > 0 {
-            self.cached_width
-        } else {
-            80
-        }
-    }
-
-    /// Post-mutation: rebuild cache, clamp cursor, maintain scroll.
-    pub fn after_mutate(&mut self) {
-        self.cache_dirty = true;
-        self.rebuild_visual_lines(self.nav_width());
-        // Clamp cursor to valid range.
-        if !self.text.is_empty() && self.cursor > self.text.len() {
-            self.cursor = self.text.len();
-        }
-        let (_vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
-        self.desired_col = vc;
-        self.ensure_cursor_visible();
-    }
-
-    pub fn clamp_scroll(&mut self) {
-        if self.vis_lines.is_empty() {
-            self.scroll = 0;
-            return;
-        }
-        let height = self
-            .last_inner_area
-            .map(|a| a.height as usize)
-            .unwrap_or(3)
-            .max(1);
-        let max_scroll = self.vis_lines.len().saturating_sub(height);
-        self.scroll = self.scroll.min(max_scroll);
-    }
-
-    // ------------------------------------------------------------------
-    // Text editing operations
-    // ------------------------------------------------------------------
-
-    pub fn insert_char(&mut self, c: char) {
-        self.text.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-        self.after_mutate();
-    }
-
-    fn delete_before(&mut self) {
-        if self.cursor > 0
-            && let Some(prev) = self.text[..self.cursor].chars().last()
-        {
-            let len = prev.len_utf8();
-            self.text.replace_range(self.cursor - len..self.cursor, "");
-            self.cursor -= len;
-            self.after_mutate();
-        }
-    }
-
-    fn delete_after(&mut self) {
-        if self.cursor < self.text.len()
-            && let Some(next) = self.text[self.cursor..].chars().next()
-        {
-            self.text
-                .replace_range(self.cursor..self.cursor + next.len_utf8(), "");
-            self.after_mutate();
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Cursor navigation (visual-line based)
-    // ------------------------------------------------------------------
-
-    /// Scroll to keep cursor line visible.
-    fn ensure_cursor_visible(&mut self) {
-        if self.vis_lines.is_empty() {
-            return;
-        }
-        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        let height = self
-            .last_inner_area
-            .map(|a| a.height as usize)
-            .unwrap_or(3)
-            .max(1);
-        if vl < self.scroll {
-            self.scroll = vl;
-        } else if vl >= self.scroll + height {
-            self.scroll = vl.saturating_add(1).saturating_sub(height);
-        }
-        self.clamp_scroll();
-    }
-
-    /// Move cursor up. Returns true if at first line (caller handles history).
-    pub fn move_up(&mut self) -> bool {
-        self.rebuild_visual_lines(self.nav_width());
-        if self.vis_lines.is_empty() {
-            return false;
-        }
-        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        if vl == 0 {
-            // At first visual line — signal caller to handle history.
-            return true;
-        }
-        let target_line = vl.saturating_sub(1);
-        let clamped_col = self
-            .desired_col
-            .min(self.vis_lines[target_line].len().saturating_sub(1));
-        if self.vis_lines[target_line].is_empty() {
-            // Empty line: position cursor at the start of this line.
-            self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), target_line);
-        } else {
-            self.cursor = self.vis_lines[target_line]
-                .get(clamped_col)
-                .copied()
-                .unwrap_or(0);
-            // If past end of line, go to last byte on that line.
-            if self.cursor > self.text.len() {
-                self.cursor = self.vis_lines[target_line].last().copied().unwrap_or(0);
-                // Move past that char to the end.
-                self.cursor += self.text[self.cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-            }
-        }
-        self.clamp_scroll();
-        // Update desired_col to the new position.
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-        self.ensure_cursor_visible();
-        false
-    }
-
-    pub fn move_down(&mut self) -> bool {
-        self.rebuild_visual_lines(self.nav_width());
-        if self.vis_lines.is_empty() {
-            return false;
-        }
-        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        if vl >= self.vis_lines.len().saturating_sub(1) {
-            // Already at last visual line — signal caller to handle history.
-            return true;
-        }
-        let target_line = vl + 1;
-        let clamped_col = self
-            .desired_col
-            .min(self.vis_lines[target_line].len().saturating_sub(1));
-        if self.vis_lines[target_line].is_empty() {
-            // Empty line: position cursor at the start of this line.
-            self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), target_line);
-        } else {
-            self.cursor = self.vis_lines[target_line]
-                .get(clamped_col)
-                .copied()
-                .unwrap_or(0);
-            if self.cursor > self.text.len() {
-                self.cursor = self.vis_lines[target_line].last().copied().unwrap_or(0);
-                self.cursor += self.text[self.cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-            }
-        }
-        self.clamp_scroll();
-        // Update desired_col to the new position.
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-        self.ensure_cursor_visible();
-        false
-    }
-
-    pub fn move_left(&mut self) {
-        self.rebuild_visual_lines(self.nav_width());
-        if self.cursor == 0 {
-            return;
-        }
-        // If cursor is at start of a visual line (excl. the very first),
-        // wrap to end of previous visual line.
-        let (vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
-        if vc == 0 && vl > 0 {
-            // Go to the last byte offset of the previous visual line.
-            let prev = &self.vis_lines[vl - 1];
-            if let Some(&last_byte) = prev.last() {
-                let orig = self.cursor;
-                self.cursor = last_byte;
-                // Advance past that character so we're AFTER it.
-                if let Some(ch) = self.text[last_byte..].chars().next() {
-                    self.cursor = last_byte + ch.len_utf8();
-                }
-                // Wrapped visual line with no gap (e.g. "Hello"+"World"
-                // at width=5): end of prev line and start of current line
-                // share the same byte offset. Move onto the last char.
-                if self.cursor == orig {
-                    self.cursor = last_byte;
-                }
-            }
-        } else if let Some(prev) = self.text[..self.cursor].chars().last() {
-            self.cursor -= prev.len_utf8();
-        }
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-    }
-
-    pub fn move_right(&mut self) {
-        self.rebuild_visual_lines(self.nav_width());
-        if self.cursor >= self.text.len() {
-            return;
-        }
-        let (vl, vc) = self.byte_to_vis_cached_internal(self.cursor);
-        if vc >= self.vis_lines[vl].len().saturating_sub(1) && vl + 1 < self.vis_lines.len() {
-            // At end of visual line (not the last) — wrap to start of next.
-            if let Some(&next_byte) = self.vis_lines[vl + 1].first() {
-                self.cursor = next_byte;
-            }
-        } else if let Some(next) = self.text[self.cursor..].chars().next() {
-            self.cursor += next.len_utf8();
-        }
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-    }
-
-    pub fn move_word_left(&mut self) {
-        // Skip delimiters leftwards, then skip word chars leftwards.
-        while self.cursor > 0 {
-            if let Some(prev) = self.text[..self.cursor].chars().last() {
-                if is_word_char(prev) {
-                    break;
-                }
-                self.cursor -= prev.len_utf8();
-            }
-        }
-        while self.cursor > 0 {
-            if let Some(prev) = self.text[..self.cursor].chars().last() {
-                if !is_word_char(prev) {
-                    break;
-                }
-                self.cursor -= prev.len_utf8();
-            }
-        }
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-    }
-
-    pub fn move_word_right(&mut self) {
-        // Skip delimiters rightwards, then skip word chars rightwards.
-        while self.cursor < self.text.len() {
-            if let Some(next) = self.text[self.cursor..].chars().next() {
-                if is_word_char(next) {
-                    break;
-                }
-                self.cursor += next.len_utf8();
-            }
-        }
-        while self.cursor < self.text.len() {
-            if let Some(next) = self.text[self.cursor..].chars().next() {
-                if !is_word_char(next) {
-                    break;
-                }
-                self.cursor += next.len_utf8();
-            }
-        }
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-    }
-
-    pub fn move_line_start(&mut self) {
-        // Move to the start of the current visual line.
-        self.rebuild_visual_lines(self.nav_width());
-        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        if vl < self.vis_lines.len() {
-            if self.vis_lines[vl].is_empty() {
-                self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), vl);
-            } else {
-                self.cursor = *self.vis_lines[vl].first().unwrap_or(&0);
-            }
-        }
-        self.desired_col = 0;
-    }
-
-    pub fn move_line_end(&mut self) {
-        // Move to the end of the current visual line.
-        self.rebuild_visual_lines(self.nav_width());
-        let (vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        if vl < self.vis_lines.len() {
-            if self.vis_lines[vl].is_empty() {
-                // Empty line: start and end are the same position.
-                self.cursor = line_start_byte_for_width(&self.text, self.nav_width(), vl);
-                self.desired_col = 0;
-            } else if let Some(&last_byte) = self.vis_lines[vl].last() {
-                // After the last character on the line.
-                if let Some(ch) = self.text[last_byte..].chars().next() {
-                    self.cursor = last_byte + ch.len_utf8();
-                } else {
-                    self.cursor = last_byte;
-                }
-                self.desired_col = self.vis_lines[vl].len();
-            }
-        }
-    }
-
-    /// Move cursor up one page. Returns `true` if at first visual line.
-    pub fn move_page_up(&mut self) -> bool {
-        self.rebuild_visual_lines(self.nav_width());
-        let height = self
-            .last_inner_area
-            .map(|a| a.height as usize)
-            .unwrap_or(10)
-            .max(1);
-        for _ in 0..height {
-            if self.move_up() {
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn move_page_down(&mut self) -> bool {
-        self.rebuild_visual_lines(self.nav_width());
-        let height = self
-            .last_inner_area
-            .map(|a| a.height as usize)
-            .unwrap_or(10)
-            .max(1);
-        for _ in 0..height {
-            if self.move_down() {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn move_text_start(&mut self) {
-        self.cursor = 0;
-        self.desired_col = 0;
-        self.scroll = 0;
-    }
-
-    fn move_text_end(&mut self) {
-        self.cursor = self.text.len();
-        self.desired_col = self.byte_to_vis_col(self.cursor);
-        self.clamp_scroll();
+        self.textarea.delete_char();
     }
 
     // ------------------------------------------------------------------
@@ -586,13 +208,14 @@ impl Editor {
     // ------------------------------------------------------------------
 
     fn submit(&mut self) -> Option<String> {
-        let text = self.text.trim().to_string();
-        self.text.clear();
-        self.cursor = 0;
-        self.desired_col = 0;
-        self.scroll = 0;
+        let text = self.textarea.lines().join("\n");
+        let text = text.trim().to_string();
+        // Reset textarea.
+        self.textarea = TextArea::default();
+        self.textarea.set_tab_length(2);
+        self.textarea.set_max_histories(100);
+        self.apply_theme_styles();
         self.autocomplete = None;
-        self.cache_dirty = true;
         if text.is_empty() {
             return None;
         }
@@ -606,15 +229,12 @@ impl Editor {
             return;
         }
         if self.history_idx == self.history.len() {
-            self.saved_text = self.text.clone();
+            self.saved_text = self.textarea.lines().join("\n");
         }
         if self.history_idx > 0 {
             self.history_idx -= 1;
-            self.text = self.history[self.history_idx].clone();
-            self.cursor = self.text.len();
-            self.desired_col = 0;
-            self.scroll = 0;
-            self.cache_dirty = true;
+            let text = self.history[self.history_idx].clone();
+            self.set_text(&text);
         }
     }
 
@@ -624,19 +244,41 @@ impl Editor {
         }
         if self.history_idx < self.history.len() - 1 {
             self.history_idx += 1;
-            self.text = self.history[self.history_idx].clone();
-            self.cursor = self.text.len();
-            self.desired_col = 0;
-            self.scroll = 0;
-            self.cache_dirty = true;
+            let text = self.history[self.history_idx].clone();
+            self.set_text(&text);
         } else if self.history_idx == self.history.len() - 1 {
             self.history_idx += 1;
-            self.text = self.saved_text.clone();
-            self.cursor = self.text.len();
-            self.desired_col = 0;
-            self.scroll = 0;
-            self.cache_dirty = true;
+            let text = self.saved_text.clone();
+            self.set_text(&text);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor ↔ byte helpers (for autocomplete)
+    // ------------------------------------------------------------------
+
+    /// Convert visual (row, col) from tui-textarea cursor to byte offset.
+    fn visual_to_byte(&self, row: usize, col: usize) -> usize {
+        let lines = self.textarea.lines();
+        let mut byte = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if i == row {
+                let chars_in_col: usize = line.chars().take(col).map(|c| c.len_utf8()).sum();
+                return byte + chars_in_col;
+            }
+            byte += line.len() + 1; // +1 for the newline
+        }
+        byte
+    }
+
+    /// Get the cursor position as (row, col) from textarea.
+    fn cursor_pos(&self) -> (usize, usize) {
+        self.textarea.cursor()
+    }
+
+    /// Full text from textarea.
+    fn full_text(&self) -> String {
+        self.textarea.lines().join("\n")
     }
 
     // ------------------------------------------------------------------
@@ -644,11 +286,12 @@ impl Editor {
     // ------------------------------------------------------------------
 
     fn start_autocomplete(&mut self, trigger: char) {
-        let prefix_start = self.cursor;
+        let (row, col) = self.cursor_pos();
         self.autocomplete = Some(AutocompleteState {
             items: Vec::new(),
             selected: 0,
-            prefix_start,
+            prefix_row: row,
+            prefix_col: col,
             query: String::new(),
             trigger,
         });
@@ -656,22 +299,32 @@ impl Editor {
     }
 
     fn update_autocomplete_items(&mut self) {
+        // Extract autocomplete state to avoid dual mutable+immutable borrow.
+        let (prefix_row, prefix_col, trigger) = match self.autocomplete.as_ref() {
+            Some(ac) => (ac.prefix_row, ac.prefix_col, ac.trigger),
+            None => return,
+        };
+
+        let full = self.full_text();
+        let (cursor_row, cursor_col) = self.cursor_pos();
+        let start_byte = self.visual_to_byte(prefix_row, prefix_col);
+        let end_byte = self.visual_to_byte(cursor_row, cursor_col);
+
         let Some(ref mut ac) = self.autocomplete else {
             return;
         };
 
-        // Query = text from prefix_start to end of token (next whitespace/end).
-        if self.cursor >= ac.prefix_start {
-            let token_end = self.text[ac.prefix_start..]
-                .find(|c: char| c.is_whitespace())
-                .map(|end| ac.prefix_start + end)
-                .unwrap_or(self.text.len());
-            ac.query = self.text[ac.prefix_start..token_end].to_string();
+        // Query = text from prefix_start to cursor.
+        if end_byte >= start_byte && start_byte <= full.len() {
+            let end = end_byte.min(full.len());
+            ac.query = full[start_byte..end].to_string();
         } else {
             ac.query.clear();
+            ac.items.clear();
+            return;
         }
 
-        ac.items = match ac.trigger {
+        let items = match trigger {
             '@' => {
                 self.file_index.ensure_built(&self.working_dir);
                 file_mention_matches_from_cache(
@@ -684,21 +337,11 @@ impl Editor {
             _ => Vec::new(),
         };
 
+        ac.items = items;
         ac.selected = 0;
     }
 
     fn accept_autocomplete(&mut self) {
-        let _trigger = self
-            .autocomplete
-            .as_ref()
-            .map(|ac| ac.trigger)
-            .unwrap_or('/');
-        let start = self
-            .autocomplete
-            .as_ref()
-            .map(|ac| ac.prefix_start)
-            .unwrap_or(self.cursor);
-
         let Some(ref ac) = self.autocomplete else {
             return;
         };
@@ -706,25 +349,67 @@ impl Editor {
             return;
         };
         let is_dir = item.ends_with('/');
+        let prefix_row = ac.prefix_row;
+        let prefix_col = ac.prefix_col;
 
-        // Replace query text with the selected item.
-        let end = self.cursor;
-        self.text.replace_range(start..end, &item);
-        self.cursor = start + item.len();
-        self.cache_dirty = true;
+        let full = self.full_text();
+        let (cursor_row, cursor_col) = self.cursor_pos();
+        let start_byte = self.visual_to_byte(prefix_row, prefix_col);
+        let end_byte = self.visual_to_byte(cursor_row, cursor_col);
+
+        // Build replacement text.
+        let mut new_text = String::with_capacity(full.len() + item.len());
+        new_text.push_str(&full[..start_byte.min(full.len())]);
+        new_text.push_str(&item);
+        if end_byte < full.len() {
+            new_text.push_str(&full[end_byte..]);
+        }
+
+        if !is_dir {
+            // Insert trailing space.
+            let trail_byte = start_byte + item.len();
+            if trail_byte <= new_text.len() {
+                new_text.insert(trail_byte, ' ');
+            }
+        }
+
+        let new_cursor_byte = start_byte + item.len() + if is_dir { 0 } else { 1 };
+        self.set_text(&new_text);
+
+        // Position cursor at the end of inserted text.
+        if let Some((row, col)) = self.byte_to_visual(new_cursor_byte) {
+            self.textarea
+                .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        }
 
         if is_dir {
             // Keep autocomplete open so user can keep navigating.
-            self.autocomplete.as_mut().unwrap().prefix_start = start;
-            self.autocomplete.as_mut().unwrap().query.clear();
+            if let Some(ref mut ac) = self.autocomplete {
+                ac.prefix_row = prefix_row;
+                ac.prefix_col = prefix_col;
+                ac.query.clear();
+            }
             self.update_autocomplete_items();
         } else {
-            // Insert space after file, dismiss autocomplete.
-            self.text.insert(self.cursor, ' ');
-            self.cursor += 1;
-            self.cache_dirty = true;
             self.autocomplete = None;
         }
+    }
+    fn byte_to_visual(&self, target: usize) -> Option<(usize, usize)> {
+        let lines = self.textarea.lines();
+        let mut byte = 0;
+        for (row, line) in lines.iter().enumerate() {
+            let line_end = byte + line.len();
+            if target <= line_end {
+                let offset = target - byte;
+                let col: usize = line[..offset.min(line.len())].chars().count();
+                return Some((row, col));
+            }
+            byte = line_end + 1; // +1 for newline
+        }
+        // Target past end — place at end of last line.
+        let last = lines.len().saturating_sub(1);
+        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        Some((last, col))
     }
 
     pub fn autocomplete_items(&self) -> Vec<String> {
@@ -771,37 +456,42 @@ impl Editor {
     }
 
     fn refresh_slash_autocomplete(&mut self) {
-        let at_start = self.text.starts_with('/');
-        if !at_start || self.cursor == 0 {
+        let full = self.full_text();
+        let at_start = full.starts_with('/');
+        if !at_start {
+            self.dismiss_autocomplete();
+            return;
+        }
+        let (_, cursor_col) = self.cursor_pos();
+        if cursor_col == 0 {
             self.dismiss_autocomplete();
             return;
         }
 
-        let upto_cursor = &self.text[..self.cursor];
-        if !upto_cursor.starts_with('/') {
-            self.dismiss_autocomplete();
-            return;
-        }
-
-        let in_first_token = !upto_cursor.contains(' ') && !upto_cursor.contains('\n');
+        let in_first_token = !full[..self.visual_to_byte(0, cursor_col).min(full.len())]
+            .contains(' ')
+            && !full.contains('\n');
         if !in_first_token {
             self.dismiss_autocomplete();
             return;
         }
 
-        let prefix_start = 1;
+        let prefix_row = 0;
+        let prefix_col = 1; // skip the '/'
         if self.autocomplete.is_none() {
             self.autocomplete = Some(AutocompleteState {
                 items: Vec::new(),
                 selected: 0,
-                prefix_start,
+                prefix_row,
+                prefix_col,
                 query: String::new(),
                 trigger: '/',
             });
         }
 
         if let Some(ref mut ac) = self.autocomplete {
-            ac.prefix_start = prefix_start;
+            ac.prefix_row = prefix_row;
+            ac.prefix_col = prefix_col;
             ac.trigger = '/';
         }
         self.update_autocomplete_items();
@@ -821,83 +511,19 @@ impl Component for Editor {
 
         let inner = block.inner(area);
         if inner.width == 0 || inner.height == 0 {
-            let para = Paragraph::new("").block(block);
-            frame.render_widget(para, area);
-            return;
-        }
-        let width = inner.width as usize;
-        let height = inner.height as usize;
-        if width == 0 || height == 0 {
-            let para = Paragraph::new("").block(block);
-            frame.render_widget(para, area);
+            frame.render_widget(block, area);
             return;
         }
 
-        self.rebuild_visual_lines(width);
-        let total_lines = self.vis_lines.len();
+        // Render textarea inside the block.
+        frame.render_widget(&self.textarea, inner);
 
-        // Find cursor visual line and auto-scroll.
-        let (cursor_vl, _) = self.byte_to_vis_cached_internal(self.cursor);
-        if cursor_vl < self.scroll {
-            self.scroll = cursor_vl;
-        } else if cursor_vl >= self.scroll + height {
-            self.scroll = cursor_vl.saturating_add(1).saturating_sub(height);
-        }
-        self.clamp_scroll();
-
-        // Build visible text lines.
-        let end = (self.scroll + height).min(total_lines);
-        let mut visible_lines: Vec<Line> = Vec::with_capacity(end.saturating_sub(self.scroll));
-
-        for line_idx in self.scroll..end {
-            let chars_in_line = &self.vis_lines[line_idx];
-            let mut spans: Vec<Span> = Vec::with_capacity(chars_in_line.len().max(1));
-            for &byte_offset in chars_in_line {
-                let c = self.text[byte_offset..].chars().next().unwrap_or(' ');
-                let style = if self.focused && byte_offset == self.cursor {
-                    Style::default().fg(self.theme.bg).bg(self.theme.accent)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(c.to_string(), style));
-            }
-            // Block cursor at end of current line.
-            if self.focused && cursor_vl == line_idx {
-                let (_, cursor_col) = self.byte_to_vis_cached_internal(self.cursor);
-                if cursor_col == spans.len() {
-                    spans.push(Span::styled(
-                        " ",
-                        Style::default().fg(self.theme.bg).bg(self.theme.accent),
-                    ));
-                }
-            }
-            // Block cursor on empty line.
-            if spans.is_empty() && self.focused && cursor_vl == line_idx {
-                spans.push(Span::styled(
-                    " ",
-                    Style::default().fg(self.theme.bg).bg(self.theme.accent),
-                ));
-            }
-            visible_lines.push(Line::from(spans));
-        }
-
-        let bg_block = Block::default().style(Style::default().bg(self.theme.bg));
-        frame.render_widget(bg_block, area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new(Text::from(visible_lines)).style(Style::default().bg(self.theme.bg)),
-            inner,
-        );
-
+        // Position terminal cursor.
         if self.focused {
-            let (cursor_line, cursor_col) = self.byte_to_vis_cached_internal(self.cursor);
-            if cursor_line >= self.scroll && cursor_line < self.scroll + height {
-                let x = inner.x.saturating_add(cursor_col as u16);
-                let y = inner
-                    .y
-                    .saturating_add(cursor_line.saturating_sub(self.scroll) as u16);
-                frame.set_cursor_position((x, y));
-            }
+            let (row, col) = self.textarea.cursor();
+            let x = inner.x.saturating_add(col as u16);
+            let y = inner.y.saturating_add(row as u16);
+            frame.set_cursor_position((x, y));
         }
 
         self.last_inner_area = Some(inner);
@@ -907,55 +533,55 @@ impl Component for Editor {
         if !self.focused {
             return None;
         }
+
+        // ── Paste ──
         if let Event::Paste(pasted) = event {
-            self.text.insert_str(self.cursor, pasted);
-            self.cursor += pasted.len();
-            self.after_mutate();
+            for line in pasted.lines() {
+                if !line.is_empty() {
+                    let trimmed = line.trim_end_matches('\r');
+                    for c in trimmed.chars() {
+                        self.textarea.insert_char(c);
+                    }
+                }
+                self.textarea.insert_newline();
+            }
             self.refresh_slash_autocomplete();
             return None;
         }
+
+        // ── Mouse ──
         if let Event::Mouse(mouse) = event {
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    // Click-to-place cursor at the mouse position.
-                    if let Some((line, col)) = self.mouse_to_cell(mouse.column, mouse.row) {
-                        let vis_line = self.scroll + line;
-                        if vis_line < self.vis_lines.len() {
-                            let chars_on_line = &self.vis_lines[vis_line];
-                            let clamped_col = col.min(chars_on_line.len().saturating_sub(1));
-                            if let Some(&byte_offset) = chars_on_line.get(clamped_col) {
-                                self.cursor = byte_offset;
-                            } else {
-                                // Clicked past end of line → go to end.
-                                if let Some(&last_byte) = chars_on_line.last()
-                                    && let Some(ch) = self.text[last_byte..].chars().next()
-                                {
-                                    self.cursor = last_byte + ch.len_utf8();
-                                }
-                            }
-                            self.desired_col = self.byte_to_vis_col(self.cursor);
-                        }
+            if let Some(ref area) = self.last_inner_area {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let col = mouse.column.saturating_sub(area.x) as usize;
+                        let row = mouse.row.saturating_sub(area.y) as usize;
+                        self.textarea
+                            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+                        self.textarea.move_cursor(CursorMove::InViewport);
                     }
+                    MouseEventKind::ScrollUp => {
+                        self.textarea.scroll(Scrolling::PageUp);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.textarea.scroll(Scrolling::PageDown);
+                    }
+                    _ => {}
                 }
-                MouseEventKind::ScrollUp => {
-                    self.scroll = self.scroll.saturating_sub(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.scroll = self.scroll.saturating_add(3);
-                    self.clamp_scroll();
-                }
-                _ => {}
             }
             return None;
         }
+
         let Event::Key(key) = event else {
             return None;
         };
 
-        // If autocomplete is active, handle its keys first.
+        // ── Autocomplete-active key intercepts ──
         if self.autocomplete.is_some() {
             if is_newline_key(key, self.enter_behavior) {
-                self.insert_char('\n');
+                let input = key_to_tui_input(key);
+                self.textarea.input(input);
+                self.refresh_slash_autocomplete();
                 return None;
             }
             match key {
@@ -996,14 +622,18 @@ impl Component for Editor {
                         self.accept_autocomplete();
                         return None;
                     }
-                    // No autocomplete items — dismiss and fall through to send.
                     self.dismiss_autocomplete();
                 }
                 crossterm::event::KeyEvent {
                     code: KeyCode::Char(c),
                     ..
                 } => {
-                    self.insert_char(*c);
+                    let c = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        c.to_uppercase().next().unwrap_or(*c)
+                    } else {
+                        *c
+                    };
+                    self.textarea.insert_char(c);
                     let slash_mode = self
                         .autocomplete
                         .as_ref()
@@ -1020,14 +650,15 @@ impl Component for Editor {
                     code: KeyCode::Backspace,
                     ..
                 } => {
-                    if let Some(ref ac) = self.autocomplete
-                        && self.cursor <= ac.prefix_start
-                    {
-                        self.delete_before();
-                        self.dismiss_autocomplete();
-                        return None;
+                    if let Some(ref ac) = self.autocomplete {
+                        let (cur_row, cur_col) = self.cursor_pos();
+                        if cur_row == ac.prefix_row && cur_col <= ac.prefix_col {
+                            self.textarea.delete_char();
+                            self.dismiss_autocomplete();
+                            return None;
+                        }
                     }
-                    self.delete_before();
+                    self.textarea.delete_char();
                     self.update_autocomplete_items();
                     return None;
                 }
@@ -1035,6 +666,7 @@ impl Component for Editor {
             }
         }
 
+        // ── Submit keys (check before character handling) ──
         if is_enter_send(key, self.enter_behavior) {
             if let Some(text) = self.submit() {
                 return Some(Action::SendMessage(text));
@@ -1047,10 +679,8 @@ impl Component for Editor {
             }
             return None;
         }
-        if is_newline_key(key, self.enter_behavior) {
-            self.insert_char('\n');
-            return None;
-        }
+
+        // ── Custom key intercepts (BEFORE fallthrough to tui-textarea) ──
 
         match key {
             // ── Autocomplete triggers ──
@@ -1059,7 +689,7 @@ impl Component for Editor {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                self.insert_char('@');
+                self.textarea.insert_char('@');
                 self.start_autocomplete('@');
                 return None;
             }
@@ -1068,111 +698,104 @@ impl Component for Editor {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                self.insert_char('/');
-                if self.text.trim().is_empty()
-                    || self.text.ends_with(' ')
-                    || self.text.ends_with('\n')
-                    || self.text == "/"
+                self.textarea.insert_char('/');
+                let full = self.full_text();
+                let trimmed = full.trim();
+                if trimmed.is_empty() || full.ends_with(' ') || full.ends_with('\n') || full == "/"
                 {
                     self.start_autocomplete('/');
                 }
                 return None;
             }
-            // ── Regular character insertion ──
-            crossterm::event::KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            } if modifiers.is_empty() || *modifiers == KeyModifiers::SHIFT => {
-                self.insert_char(*c);
-                self.refresh_slash_autocomplete();
-            }
-            // ── Tab → 2 spaces ──
-            crossterm::event::KeyEvent {
-                code: KeyCode::Tab, ..
-            } => {
-                self.text.insert_str(self.cursor, "  ");
-                self.cursor += 2;
-                self.after_mutate();
-            }
-            // ── Backspace / Delete ──
-            crossterm::event::KeyEvent {
-                code: KeyCode::Backspace,
-                ..
-            } => {
-                self.delete_before();
-                self.refresh_slash_autocomplete();
-            }
+
+            // ── macOS: Cmd+Delete → kill current line ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Delete,
+                modifiers,
                 ..
-            } => {
-                self.delete_after();
-                self.refresh_slash_autocomplete();
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.textarea.move_cursor(CursorMove::Head);
+                self.textarea.delete_line_by_end();
+                // If not at end, delete the newline too.
+                self.textarea.delete_next_char();
+                return None;
             }
-            // ── Cursor navigation ──
+            // ── macOS: Cmd+Backspace → kill from start to cursor ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::Backspace,
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::SUPER) => {
+                self.textarea.move_cursor(CursorMove::Head);
+                self.textarea.delete_line_by_end();
+                self.textarea.delete_next_char();
+                return None;
+            }
+
+            // ── Cmd+Left/Right → text start/end ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Left,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_text_start();
+                self.textarea.move_cursor(CursorMove::Top);
+                self.textarea.move_cursor(CursorMove::Head);
+                return None;
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Right,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_text_end();
+                self.textarea.move_cursor(CursorMove::Bottom);
+                self.textarea.move_cursor(CursorMove::End);
+                return None;
             }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Left,
-                modifiers: KeyModifiers::ALT,
-                ..
-            } => {
-                self.move_word_left();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Right,
-                modifiers: KeyModifiers::ALT,
-                ..
-            } => {
-                self.move_word_right();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Left,
-                ..
-            } => {
-                self.move_left();
-            }
-            crossterm::event::KeyEvent {
-                code: KeyCode::Right,
-                ..
-            } => {
-                self.move_right();
-            }
-            // ── Vertical navigation: Up/Down moves cursor ──
+            // Cmd+Up → top
             crossterm::event::KeyEvent {
                 code: KeyCode::Up,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_text_start();
+                self.textarea.move_cursor(CursorMove::Top);
+                self.textarea.move_cursor(CursorMove::Head);
+                return None;
             }
+            // Cmd+Down → bottom
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SUPER) => {
-                self.move_text_end();
+                self.textarea.move_cursor(CursorMove::Bottom);
+                self.textarea.move_cursor(CursorMove::End);
+                return None;
             }
-            // ── History browsing: Alt+Up / Alt+Down (before bare Up/Down) ──
+
+            // ── Alt+Left / Alt+Right → word navigation ──
+            crossterm::event::KeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::WordBack);
+                return None;
+            }
+            crossterm::event::KeyEvent {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::WordForward);
+                return None;
+            }
             crossterm::event::KeyEvent {
                 code: KeyCode::Up,
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
                 self.history_up();
+                return None;
             }
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
@@ -1180,61 +803,86 @@ impl Component for Editor {
                 ..
             } => {
                 self.history_down();
+                return None;
             }
-            // ── Vertical navigation: Up/Down moves cursor ──
-            #[allow(clippy::collapsible_match)]
+
+            // ── Bare Up/Down: move cursor; at boundary → history ──
             crossterm::event::KeyEvent {
                 code: KeyCode::Up, ..
             } => {
-                if self.move_up() {
-                    // At first visual line → browse history.
+                let (row, _col) = self.cursor_pos();
+                if row == 0 {
                     self.history_up();
+                } else {
+                    let input = key_to_tui_input(key);
+                    self.textarea.input(input);
+                    self.refresh_slash_autocomplete();
                 }
+                return None;
             }
-            // ── Down: moves cursor down, history at last line ──
-            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::Down,
                 ..
             } => {
-                if self.move_down() {
-                    // At last visual line → browse history forward.
+                let line_count = self.textarea.lines().len();
+                let (row, _col) = self.cursor_pos();
+                if row >= line_count.saturating_sub(1) {
                     self.history_down();
+                } else {
+                    let input = key_to_tui_input(key);
+                    self.textarea.input(input);
+                    self.refresh_slash_autocomplete();
                 }
+                return None;
             }
-            // ── Page Up / Page Down ──
-            #[allow(clippy::collapsible_match)]
+
+            // ── PageUp/PageDown: at boundary → history ──
             crossterm::event::KeyEvent {
                 code: KeyCode::PageUp,
                 ..
             } => {
-                if self.move_page_up() {
+                let (row, _col) = self.cursor_pos();
+                let input = key_to_tui_input(key);
+                self.textarea.input(input);
+                if row == 0 {
                     self.history_up();
                 }
+                self.refresh_slash_autocomplete();
+                return None;
             }
-            #[allow(clippy::collapsible_match)]
             crossterm::event::KeyEvent {
                 code: KeyCode::PageDown,
                 ..
             } => {
-                if self.move_page_down() {
+                let line_count = self.textarea.lines().len();
+                let (row, _col) = self.cursor_pos();
+                let input = key_to_tui_input(key);
+                self.textarea.input(input);
+                if row >= line_count.saturating_sub(1) {
                     self.history_down();
                 }
+                self.refresh_slash_autocomplete();
+                return None;
             }
-            // ── Line start/end ──
-            crossterm::event::KeyEvent {
-                code: KeyCode::Home,
-                ..
-            } => {
-                self.move_line_start();
+
+            // ── Tab → 2 spaces (tui-textarea default with tab_length=2 already does this) ──
+            // Fall through to textarea.input() which handles Tab → spaces.
+
+            // ── Catch all: regular character input + refresh slash autocomplete ──
+            _ => {
+                let input = key_to_tui_input(key);
+                // Don't pass default (null) input — it would be a no-op anyway.
+                if input == Input::default() {
+                    return None;
+                }
+                self.textarea.input(input);
+                // Only refresh slash autocomplete on non-navigation keys.
+                if is_text_mutation_key(key) {
+                    self.refresh_slash_autocomplete();
+                }
             }
-            crossterm::event::KeyEvent {
-                code: KeyCode::End, ..
-            } => {
-                self.move_line_end();
-            }
-            _ => {}
         }
+
         None
     }
 
@@ -1247,182 +895,48 @@ impl Component for Editor {
     }
 }
 
-impl Editor {
-    pub fn mouse_to_cell(&self, col: u16, row: u16) -> Option<(usize, usize)> {
-        let area = self.last_inner_area?;
-        if col < area.x || row < area.y || col >= area.x + area.width || row >= area.y + area.height
-        {
-            return None;
-        }
-        let line = (row - area.y) as usize;
-        let col = (col - area.x) as usize;
-        Some((line, col))
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Visual-line helpers
+// crossterm KeyEvent → tui_textarea::Input conversion
 // ---------------------------------------------------------------------------
 
-/// Build visual line layout: for each visual line, a `Vec<usize>` of byte
-/// offsets of each character in that line.
-pub fn build_vis_lines(text: &str, width: usize) -> Vec<Vec<usize>> {
-    if width == 0 {
-        return vec![vec![]];
-    }
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    let mut col = 0usize;
+fn key_to_tui_input(key: &crossterm::event::KeyEvent) -> Input {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-    for (byte_idx, ch) in text.char_indices() {
-        if ch == '\n' {
-            lines.push(std::mem::take(&mut current));
-            col = 0;
-            continue;
-        }
-        if col >= width {
-            lines.push(std::mem::take(&mut current));
-            col = 0;
-        }
-        current.push(byte_idx);
-        col += 1;
-    }
-    // Always push the last (possibly empty) line.
-    lines.push(current);
-    lines
-}
-
-/// Convert byte offset to (vis_line, vis_col) using cached line starts.
-pub fn byte_to_vis_cached(
-    vis_lines: &[Vec<usize>],
-    vis_line_starts: &[usize],
-    text: &str,
-    byte: usize,
-) -> (usize, usize) {
-    if vis_lines.is_empty() {
-        return (0, 0);
-    }
-
-    let text_len = text.len();
-    if byte >= text_len {
-        let last_idx = vis_lines.len() - 1;
-        return (last_idx, vis_lines[last_idx].len());
-    }
-
-    let line_idx = match vis_line_starts.binary_search(&byte) {
-        Ok(idx) => idx,
-        Err(ins) => ins.saturating_sub(1),
-    }
-    .min(vis_lines.len().saturating_sub(1));
-
-    let line = &vis_lines[line_idx];
-    for (col_idx, &b) in line.iter().enumerate() {
-        if b == byte {
-            return (line_idx, col_idx);
-        }
-    }
-
-    (line_idx, line.len())
-}
-
-/// Convert byte offset to (vis_line, vis_col) using the cached layout.
-pub fn byte_to_vis(vis_lines: &[Vec<usize>], text: &str, byte: usize) -> (usize, usize) {
-    let starts = build_vis_line_starts_from_layout(vis_lines, text);
-    byte_to_vis_cached(vis_lines, &starts, text, byte)
-}
-
-fn build_vis_line_starts_from_layout(vis_lines: &[Vec<usize>], text: &str) -> Vec<usize> {
-    if vis_lines.is_empty() {
-        return Vec::new();
-    }
-
-    let mut starts = Vec::with_capacity(vis_lines.len());
-    let mut pos = 0usize;
-
-    for (i, line) in vis_lines.iter().enumerate() {
-        starts.push(pos.min(text.len()));
-
-        // Advance by this visual line's character count.
-        for _ in 0..line.len() {
-            if pos >= text.len() {
-                break;
-            }
-            let mut iter = text[pos..].chars();
-            if let Some(ch) = iter.next() {
-                pos += ch.len_utf8();
-            } else {
-                break;
-            }
-        }
-
-        // Between visual lines: consume newline boundary if present.
-        if i + 1 < vis_lines.len() && pos < text.len() && text.as_bytes()[pos] == b'\n' {
-            pos += 1;
-        }
-    }
-
-    starts
-}
-
-/// Returns true for code-like word characters.
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// Compute the byte offset for the start of a visual line at a given width.
-///
-/// This is robust for consecutive empty lines because it follows the same
-/// wrapping/newline rules as `build_vis_lines` while tracking explicit starts.
-fn line_start_byte_for_width(text: &str, width: usize, target_line: usize) -> usize {
-    if target_line == 0 {
-        return 0;
-    }
-    if width == 0 {
-        return text.len();
-    }
-
-    let mut current_line = 0usize;
-    let mut col = 0usize;
-
-    for (byte_idx, ch) in text.char_indices() {
-        if col == 0 && current_line == target_line {
-            return byte_idx;
-        }
-
-        if ch == '\n' {
-            current_line += 1;
-            col = 0;
-            continue;
-        }
-
-        if col >= width {
-            current_line += 1;
-            col = 0;
-            if current_line == target_line {
-                return byte_idx;
-            }
-        }
-
-        col += 1;
-    }
-
-    // After consuming text, there is always one trailing visual line.
-    if current_line + 1 == target_line {
-        return text.len();
-    }
-
-    text.len()
-}
-
-/// Convert (vis_line, vis_col) to byte offset.
-pub fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: usize) -> usize {
-    let Some(chars) = vis_lines.get(line) else {
-        return text_len;
+    let tui_key = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::F(n) => Key::F(n),
+        _ => return Input::default(),
     };
-    if col >= chars.len() {
-        return text_len;
+
+    Input {
+        key: tui_key,
+        ctrl,
+        alt,
+        shift,
     }
-    chars[col]
+}
+
+/// Returns true if a key event mutates text (insert, delete, etc.).
+fn is_text_mutation_key(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab | KeyCode::Enter
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1603,7 +1117,3 @@ fn fuzzy_command_matches(commands: &[String], query: &str) -> Vec<String> {
 
     out
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
