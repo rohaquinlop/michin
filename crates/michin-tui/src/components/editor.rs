@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::components::fuzzy::fuzzy_filter;
 use crate::components::{Action, Component};
@@ -28,6 +28,45 @@ struct AutocompleteState {
     query: String,
     /// '@' or '/'.
     trigger: char,
+}
+
+/// Lazy file index cache. Populated once on first `@` trigger,
+/// then filtered in-memory per keystroke. Invalidated on working dir change.
+struct FileIndex {
+    entries: Vec<String>,
+    built: bool,
+}
+
+impl FileIndex {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            built: false,
+        }
+    }
+
+    fn ensure_built(&mut self, base_dir: &Path) {
+        if self.built {
+            return;
+        }
+        self.entries = build_file_index(base_dir);
+        self.built = true;
+    }
+
+    #[allow(dead_code)]
+    fn invalidate(&mut self) {
+        self.built = false;
+        self.entries.clear();
+    }
+}
+
+/// Build file list from `git ls-files` or recursive `read_dir` fallback.
+fn build_file_index(base_dir: &Path) -> Vec<String> {
+    let mut entries = git_tracked_and_untracked_files(base_dir)
+        .unwrap_or_else(|| recursive_file_paths(base_dir, false));
+    entries.sort();
+    entries.dedup();
+    entries
 }
 
 /// Multiline text editor with visual-line cursor navigation.
@@ -63,6 +102,7 @@ pub struct Editor {
     saved_text: String,
     scroll: usize,
     autocomplete: Option<AutocompleteState>,
+    file_index: FileIndex,
     working_dir: PathBuf,
     slash_commands: Vec<String>,
     enter_behavior: EnterBehavior,
@@ -91,6 +131,7 @@ impl Editor {
             saved_text: String::new(),
             scroll: 0,
             autocomplete: None,
+            file_index: FileIndex::new(),
             working_dir,
             slash_commands,
             enter_behavior: EnterBehavior::parse(&enter_behavior),
@@ -589,7 +630,14 @@ impl Editor {
         }
 
         ac.items = match ac.trigger {
-            '@' => file_mention_matches(&self.working_dir, &ac.query),
+            '@' => {
+                self.file_index.ensure_built(&self.working_dir);
+                file_mention_matches_from_cache(
+                    &self.file_index.entries,
+                    &self.working_dir,
+                    &ac.query,
+                )
+            }
             '/' => fuzzy_command_matches(&self.slash_commands, &ac.query),
             _ => Vec::new(),
         };
@@ -1329,15 +1377,19 @@ pub fn vis_to_byte(vis_lines: &[Vec<usize>], text_len: usize, line: usize, col: 
 // Fuzzy file matching
 // ---------------------------------------------------------------------------
 
-/// Return file mention matches: recursive, relative paths, fuzzy-ranked.
-/// Respects .gitignore, but expands into gitignored directories when the
-/// user types an exact directory path (e.g. `docs/`).
-pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<String> {
-    let mut entries = git_tracked_and_untracked_files(base_dir)
-        .unwrap_or_else(|| recursive_file_paths(base_dir, query.starts_with('.')));
-    entries.sort();
-    entries.dedup();
+/// Backward-compat: builds index every call (slow). Used by tests.
+pub fn file_mention_matches(base_dir: &Path, query: &str) -> Vec<String> {
+    let entries = build_file_index(base_dir);
+    file_mention_matches_from_cache(&entries, base_dir, query)
+}
 
+/// Return file mention matches from a pre-built cache: fuzzy-ranked.
+pub fn file_mention_matches_from_cache(
+    entries: &[String],
+    base_dir: &Path,
+    query: &str,
+) -> Vec<String> {
+    let mut entries = entries.to_vec();
     let trimmed = query.trim();
 
     // Git excludes gitignored directories (e.g. docs/). When query has a
@@ -1396,7 +1448,7 @@ pub fn file_mention_matches(base_dir: &std::path::Path, query: &str) -> Vec<Stri
     filtered.into_iter().take(50).collect()
 }
 
-fn git_tracked_and_untracked_files(base_dir: &std::path::Path) -> Option<Vec<String>> {
+fn git_tracked_and_untracked_files(base_dir: &Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(base_dir)
