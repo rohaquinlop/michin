@@ -462,7 +462,9 @@ impl SessionManager {
         let mut index = self.load_index().await?;
         if let Some(meta) = index.sessions.iter_mut().find(|m| m.id == session_id) {
             for (provider, stats) in cache_stats {
-                let key = format!("{provider:?}");
+                let key =
+                    serde_json::to_string(provider).unwrap_or_else(|_| format!("{provider:?}"));
+                let key = key.trim_matches('"').to_string();
                 meta.cache_stats.insert(key, stats.clone());
             }
             meta.last_active_at = now_ms();

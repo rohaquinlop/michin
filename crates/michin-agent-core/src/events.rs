@@ -144,6 +144,7 @@ pub enum AgentEvent {
         cache_read_tokens: u32,
         cache_write_tokens: u32,
         cumulative_hit_ratio: f64,
+        effective_hit_ratio: f64,
     },
 }
 

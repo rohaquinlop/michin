@@ -454,6 +454,7 @@ async fn run_single_turn(
                                 cache_read_tokens: u.cache_read_tokens,
                                 cache_write_tokens: u.cache_write_tokens,
                                 cumulative_hit_ratio: ratio,
+                                effective_hit_ratio: effective,
                             });
                         }
                     }

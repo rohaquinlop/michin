@@ -224,13 +224,12 @@ impl AgentState {
 
     /// Update cumulative cache stats from API usage.
     pub fn update_cache_stats(&mut self, provider: Provider, usage: &michin_ai::Usage) {
-        if usage.cache_read_tokens == 0 && usage.cache_write_tokens == 0 {
-            return;
-        }
         let entry = self.cache_stats.entry(provider).or_default();
-        entry.total_cache_read_tokens += usage.cache_read_tokens as u64;
-        entry.total_cache_write_tokens += usage.cache_write_tokens as u64;
         entry.total_input_tokens += usage.input_tokens as u64;
+        if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
+            entry.total_cache_read_tokens += usage.cache_read_tokens as u64;
+            entry.total_cache_write_tokens += usage.cache_write_tokens as u64;
+        }
     }
 
     pub fn load_messages(&mut self, messages: Vec<Message>) {
@@ -354,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn update_cache_stats_skips_zero_usage() {
+    fn update_cache_stats_accumulates_input_without_cache() {
         let model = test_model();
         let mut state = AgentState::new(model.clone(), vec![model]);
         let usage = michin_ai::Usage {
@@ -364,7 +363,10 @@ mod tests {
             cache_write_tokens: 0,
         };
         state.update_cache_stats(Provider::XiaomiMiMo, &usage);
-        assert!(state.cache_stats.is_empty());
+        let stats = state.cache_stats.get(&Provider::XiaomiMiMo).unwrap();
+        assert_eq!(stats.total_input_tokens, 1000);
+        assert_eq!(stats.total_cache_read_tokens, 0);
+        assert_eq!(stats.total_cache_write_tokens, 0);
     }
 
     #[test]
