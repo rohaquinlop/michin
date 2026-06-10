@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use michin_tui::Action;
-use michin_tui::components::editor::{Editor, fff_dir_fallback, file_mention_matches};
+use michin_tui::components::editor::{Editor, file_mention_matches, shallow_dir_entries};
 use michin_tui::{Component, Theme};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1574,11 +1574,11 @@ fn viewport_shows_content_near_cursor_not_top() {
     );
 }
 
-// ── fff_dir_fallback ──
+// ── shallow_dir_entries ──
 
 #[test]
-fn fff_dir_fallback_lists_gitignored_directory_contents() {
-    let root = temp_root("fff-gidir");
+fn shallow_dir_entries_lists_gitignored_directory_contents() {
+    let root = temp_root("shallow-gidir");
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::write(root.join("docs/guide.md"), "").unwrap();
     std::fs::write(root.join("docs/api.md"), "").unwrap();
@@ -1589,86 +1589,75 @@ fn fff_dir_fallback_lists_gitignored_directory_contents() {
         .arg("init")
         .output();
 
-    let matches = fff_dir_fallback(&root, "docs/");
+    let mut entries = Vec::new();
+    shallow_dir_entries(&root, &root.join("docs"), false, &mut entries);
+    entries.sort();
     assert!(
-        matches.contains(&"docs/guide.md".to_string()),
-        "should list gitignored dir contents: {matches:?}"
+        entries.contains(&"docs/guide.md".to_string()),
+        "should list gitignored dir contents: {entries:?}"
     );
     assert!(
-        matches.contains(&"docs/api.md".to_string()),
-        "should list gitignored dir contents: {matches:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn fff_dir_fallback_partial_path_in_gitignored_dir() {
-    let root = temp_root("fff-partial");
-    std::fs::create_dir_all(root.join("docs")).unwrap();
-    std::fs::write(root.join("docs/guide.md"), "").unwrap();
-    std::fs::write(root.join("docs/api.md"), "").unwrap();
-    std::fs::write(root.join(".gitignore"), "docs/\n").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("init")
-        .output();
-
-    let matches = fff_dir_fallback(&root, "docs/gu");
-    assert!(
-        matches.contains(&"docs/guide.md".to_string()),
-        "partial path should fuzzy-match: {matches:?}"
-    );
-    // "api" doesn't match "gu" prefix/pattern
-    assert!(
-        !matches.contains(&"docs/api.md".to_string()),
-        "non-matching entry should be filtered out: {matches:?}"
+        entries.contains(&"docs/api.md".to_string()),
+        "should list gitignored dir contents: {entries:?}"
     );
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn fff_dir_fallback_resolves_dir_without_trailing_slash() {
-    let root = temp_root("fff-noslash");
+fn shallow_dir_entries_returns_immediate_children_with_trailing_slash() {
+    let root = temp_root("shallow-nested");
     std::fs::create_dir_all(root.join("vendor/lib")).unwrap();
-    std::fs::write(root.join("vendor/lib/a.js"), "").unwrap();
-    std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("init")
-        .output();
+    std::fs::write(root.join("vendor/a.js"), "").unwrap();
+    std::fs::write(root.join("vendor/lib/b.js"), "").unwrap();
 
-    let matches = fff_dir_fallback(&root, "vendor");
+    let mut entries = Vec::new();
+    shallow_dir_entries(&root, &root.join("vendor"), false, &mut entries);
+    entries.sort();
+    // Should include immediate children only, not recursive.
     assert!(
-        matches.contains(&"vendor/lib/a.js".to_string()),
-        "query without slash should resolve dir: {matches:?}"
+        entries.contains(&"vendor/a.js".to_string()),
+        "should include files: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"vendor/lib/".to_string()),
+        "should include dirs with trailing slash: {entries:?}"
+    );
+    // Should NOT include deeply nested files.
+    assert!(
+        !entries.contains(&"vendor/lib/b.js".to_string()),
+        "should not recurse: {entries:?}"
     );
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn fff_dir_fallback_returns_empty_for_nonexistent_path() {
-    let root = temp_root("fff-noexist");
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/main.rs"), "").unwrap();
+fn shallow_dir_entries_skips_hidden_by_default() {
+    let root = temp_root("shallow-hidden");
+    std::fs::create_dir_all(root.join("dir")).unwrap();
+    std::fs::write(root.join("dir/visible.rs"), "").unwrap();
+    std::fs::write(root.join("dir/.hidden"), "").unwrap();
 
-    let matches = fff_dir_fallback(&root, "nope/");
-    assert!(
-        matches.is_empty(),
-        "nonexistent dir should return empty: {matches:?}"
-    );
+    let mut entries = Vec::new();
+    shallow_dir_entries(&root, &root.join("dir"), false, &mut entries);
+    assert!(entries.contains(&"dir/visible.rs".to_string()));
+    assert!(!entries.iter().any(|e| e.contains(".hidden")));
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn fff_dir_fallback_returns_empty_for_empty_query() {
-    let root = temp_root("fff-empty");
-    let matches = fff_dir_fallback(&root, "");
-    assert!(matches.is_empty());
+fn shallow_dir_entries_includes_hidden_when_requested() {
+    let root = temp_root("shallow-show-hidden");
+    std::fs::create_dir_all(root.join("dir")).unwrap();
+    std::fs::write(root.join("dir/visible.rs"), "").unwrap();
+    std::fs::write(root.join("dir/.hidden"), "").unwrap();
+
+    let mut entries = Vec::new();
+    shallow_dir_entries(&root, &root.join("dir"), true, &mut entries);
+    assert!(entries.contains(&"dir/visible.rs".to_string()));
+    assert!(entries.contains(&"dir/.hidden".to_string()));
+
     let _ = std::fs::remove_dir_all(root);
 }
