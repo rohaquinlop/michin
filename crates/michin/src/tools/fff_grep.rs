@@ -121,6 +121,20 @@ impl AgentTool for FffGrepTool {
         };
 
         let handle = handle.as_ref().unwrap();
+
+        if !handle.is_index_ready() {
+            return Ok(ToolResult {
+                tool_call_id: tool_call_id.into(),
+                tool_name: "grep".into(),
+                content: vec![ContentBlock::Text {
+                    text: "FFF index still warming up \u{2014} initial file scan in progress. Retry in a moment."
+                        .into(),
+                }],
+                details: None,
+                is_error: false,
+            });
+        }
+
         let matches = fff::grep(
             handle,
             query,
