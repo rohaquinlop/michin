@@ -228,11 +228,28 @@ pub fn fuzzy_find_shared(
         .collect()
 }
 
+impl FffHandle {
+    /// Check if the initial file scan has completed and files are indexed.
+    /// Returns false during the warmup window between init() and scan finish.
+    pub fn is_index_ready(&self) -> bool {
+        let guard = match self.picker.read() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        guard
+            .as_ref()
+            .map(|p| !p.get_files().is_empty())
+            .unwrap_or(false)
+    }
+}
+
 /// Grep (content search) across indexed files.
 ///
-/// Path filtering is done post-hoc so `"compiler/rustc_parse/"` prefix-matches
-/// only files under that directory, not non-code files that happen to live there
-/// (FFF's PathSegment constraint means "contains-in-path", not "under-this-dir").
+/// Path filtering is done both upfront (prefilter via Glob constraint for
+/// FFF's file scanner) and post-hoc (match_path_constraint for strict
+/// directory- prefix matching). The upfront filter ensures FFF only searches
+/// files within the scope, while the post-hoc filter catches edge cases like
+/// single-segment path names that FFF's Globs match too broadly.
 pub fn grep(
     handle: &FffHandle,
     query: &str,
@@ -248,9 +265,30 @@ pub fn grep(
 
     let picker = guard.as_ref()?;
 
-    // Parse content query only — path filtering is done post-hoc.
-    let parser = fff_search::QueryParser::new(fff_search::AiGrepConfig);
-    let fff_query = parser.parse(query);
+    // Inject path constraint into FFF query as a Glob constraint so FFF's
+    // internal file prefilter only searches matching files. Without this,
+    // short common queries like "fff" hit FFF's page_limit before reaching
+    // the target file — the post-hoc filter finds zero results.
+    let prefilter_query = path_constraint
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let p = p.strip_suffix('/').unwrap_or(p);
+            if p.contains('*') || p.contains('?') || p.contains('[') || p.contains('{') {
+                // Already a glob — use directly
+                format!("{query} {p}")
+            } else {
+                // Build a single brace-expansion token that matches:
+                // - exact file at any depth: **/path
+                // - directory prefix: path/**
+                // globset handles {a,b} as union (OR).
+                format!("{query} {{**/{p},{p}/**}}")
+            }
+        })
+        .unwrap_or_else(|| query.to_string());
+
+    // Parse with strict GrepConfig so content tokens stay as search text.
+    let parser = fff_search::QueryParser::new(fff_search::GrepConfig);
+    let fff_query = parser.parse(&prefilter_query);
 
     let grep_text = fff_query.grep_text();
     if grep_text.is_empty() {
