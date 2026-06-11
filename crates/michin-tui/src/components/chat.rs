@@ -70,6 +70,7 @@ pub struct Chat {
     cached_inner_width: Option<usize>,
     cached_wrapped_lines: Vec<Line<'static>>,
     cached_visible_line_texts: Vec<String>,
+    cached_url_ranges: Vec<Vec<(usize, usize, String)>>,
     cached_user_line_flags: Vec<bool>,
     cached_line_is_continuation: Vec<bool>,
     pub cached_msg_ranges: Vec<(usize, usize)>,
@@ -108,6 +109,7 @@ impl Chat {
         self.messages.clear();
         self.active_tool_message_idx.clear();
         self.cached_msg_ranges.clear();
+        self.cached_url_ranges.clear();
         self.cached_user_line_flags.clear();
         self.cached_line_is_continuation.clear();
         self.cached_message_count = 0;
@@ -142,6 +144,7 @@ impl Chat {
             cached_wrapped_lines: Vec::new(),
             cached_visible_line_texts: Vec::new(),
             cached_user_line_flags: Vec::new(),
+            cached_url_ranges: Vec::new(),
             cached_line_is_continuation: Vec::new(),
             cached_msg_ranges: Vec::new(),
             cached_message_count: 0,
@@ -595,9 +598,10 @@ impl Component for Chat {
         let end = (start + inner.height as usize).min(self.cached_visible_line_texts.len());
         self.last_visible_lines = self.cached_visible_line_texts[start..end]
             .iter()
-            .map(|text| VisibleLine {
+            .zip(&self.cached_url_ranges[start..end])
+            .map(|(text, ranges)| VisibleLine {
                 text: text.clone(),
-                url_ranges: extract_url_ranges(text),
+                url_ranges: ranges.clone(),
             })
             .collect();
         self.last_visible_user_line_flags = self.cached_user_line_flags[start..end].to_vec();
@@ -791,6 +795,7 @@ impl Chat {
                 && should_insert_gap(prev.role.clone(), msg.role.clone())
             {
                 self.cached_visible_line_texts.push(String::new());
+                self.cached_url_ranges.push(Vec::new());
                 self.cached_user_line_flags.push(false);
                 self.cached_line_is_continuation.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
@@ -799,8 +804,14 @@ impl Chat {
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-            for (line, is_cont) in wrapped.into_iter().zip(cont) {
+            for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+                let url_ranges = if !is_user {
+                    style_bare_urls_in_line(&mut line, &self.theme)
+                } else {
+                    Vec::new()
+                };
                 self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_url_ranges.push(url_ranges);
                 self.cached_user_line_flags.push(is_user);
                 self.cached_line_is_continuation.push(is_cont);
                 self.cached_wrapped_lines.push(line);
@@ -819,6 +830,7 @@ impl Chat {
         self.cached_inner_width = Some(inner_width);
         self.cached_wrapped_lines.clear();
         self.cached_visible_line_texts.clear();
+        self.cached_url_ranges.clear();
         self.cached_user_line_flags.clear();
         self.cached_line_is_continuation.clear();
         self.cached_msg_ranges.clear();
@@ -834,6 +846,7 @@ impl Chat {
             {
                 let _line_idx = self.cached_wrapped_lines.len();
                 self.cached_visible_line_texts.push(String::new());
+                self.cached_url_ranges.push(Vec::new());
                 self.cached_user_line_flags.push(false);
                 self.cached_line_is_continuation.push(false);
                 self.cached_wrapped_lines.push(Line::raw(""));
@@ -842,8 +855,14 @@ impl Chat {
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-            for (line, is_cont) in wrapped.into_iter().zip(cont) {
+            for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+                let url_ranges = if !is_user {
+                    style_bare_urls_in_line(&mut line, &self.theme)
+                } else {
+                    Vec::new()
+                };
                 self.cached_visible_line_texts.push(line_text(&line));
+                self.cached_url_ranges.push(url_ranges);
                 self.cached_user_line_flags.push(is_user);
                 self.cached_line_is_continuation.push(is_cont);
                 self.cached_wrapped_lines.push(line);
@@ -883,6 +902,8 @@ impl Chat {
                 .drain(start..end.min(self.cached_wrapped_lines.len()));
             self.cached_visible_line_texts
                 .drain(start..end.min(self.cached_visible_line_texts.len()));
+            self.cached_url_ranges
+                .drain(start..end.min(self.cached_url_ranges.len()));
             self.cached_user_line_flags
                 .drain(start..end.min(self.cached_user_line_flags.len()));
             self.cached_line_is_continuation
@@ -892,11 +913,18 @@ impl Chat {
         let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
         let (new_lines, new_cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
+        let mut new_url_ranges = Vec::with_capacity(new_lines.len());
         let new_texts: Vec<String> = new_lines.iter().map(line_text).collect();
         let new_count = new_lines.len();
         // Splice new lines at the same position
         let insert_pos = start.min(self.cached_wrapped_lines.len());
-        for (i, line) in new_lines.into_iter().enumerate() {
+        for (i, mut line) in new_lines.into_iter().enumerate() {
+            let url_ranges = if !is_user {
+                style_bare_urls_in_line(&mut line, &self.theme)
+            } else {
+                Vec::new()
+            };
+            new_url_ranges.push(url_ranges);
             let pos = insert_pos + i;
             if pos < self.cached_wrapped_lines.len() {
                 self.cached_wrapped_lines[pos] = line;
@@ -910,6 +938,14 @@ impl Chat {
                 self.cached_visible_line_texts[pos] = text;
             } else {
                 self.cached_visible_line_texts.push(text);
+            }
+        }
+        for (i, ranges) in new_url_ranges.into_iter().enumerate() {
+            let pos = insert_pos + i;
+            if pos < self.cached_url_ranges.len() {
+                self.cached_url_ranges[pos] = ranges;
+            } else {
+                self.cached_url_ranges.push(ranges);
             }
         }
         for i in 0..new_count {
@@ -937,10 +973,12 @@ impl Chat {
             let drain_end = (drain_start + overflow)
                 .min(self.cached_wrapped_lines.len())
                 .min(self.cached_visible_line_texts.len())
+                .min(self.cached_url_ranges.len())
                 .min(self.cached_user_line_flags.len())
                 .min(self.cached_line_is_continuation.len());
             self.cached_wrapped_lines.drain(drain_start..drain_end);
             self.cached_visible_line_texts.drain(drain_start..drain_end);
+            self.cached_url_ranges.drain(drain_start..drain_end);
             self.cached_user_line_flags.drain(drain_start..drain_end);
             self.cached_line_is_continuation
                 .drain(drain_start..drain_end);
@@ -980,6 +1018,7 @@ impl Chat {
         };
         if insert_gap {
             self.cached_visible_line_texts.push(String::new());
+            self.cached_url_ranges.push(Vec::new());
             self.cached_user_line_flags.push(false);
             self.cached_line_is_continuation.push(false);
             self.cached_wrapped_lines.push(Line::raw(""));
@@ -988,8 +1027,14 @@ impl Chat {
         let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
         let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-        for (line, is_cont) in wrapped.into_iter().zip(cont) {
+        for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+            let url_ranges = if !is_user {
+                style_bare_urls_in_line(&mut line, &self.theme)
+            } else {
+                Vec::new()
+            };
             self.cached_visible_line_texts.push(line_text(&line));
+            self.cached_url_ranges.push(url_ranges);
             self.cached_user_line_flags.push(is_user);
             self.cached_line_is_continuation.push(is_cont);
             self.cached_wrapped_lines.push(line);
@@ -1368,6 +1413,66 @@ fn extract_url_ranges(text: &str) -> Vec<(usize, usize, String)> {
             ranges.push((start, i, url));
         }
     }
+    ranges
+}
+
+/// Post-process a rendered line: apply underline + link color to bare URLs
+/// that are not already styled as markdown links. Returns the URL ranges
+/// found so callers can reuse them without re-extracting.
+fn style_bare_urls_in_line(line: &mut Line<'static>, theme: &Theme) -> Vec<(usize, usize, String)> {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let ranges = extract_url_ranges(&text);
+    if ranges.is_empty() {
+        return ranges;
+    }
+    let url_style = Style::default()
+        .fg(theme.md_link)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut new_spans = Vec::new();
+    let mut char_pos = 0usize;
+    for span in &line.spans {
+        let span_text: &str = &span.content;
+        let span_start = char_pos;
+        let span_end = char_pos + span_text.chars().count();
+        // Skip spans already styled as markdown links (exact md_link color).
+        if span.style.fg == Some(theme.md_link)
+            && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        {
+            new_spans.push(span.clone());
+            char_pos = span_end;
+            continue;
+        }
+        let chars: Vec<char> = span_text.chars().collect();
+        let mut cursor = 0usize;
+        for &(url_start, url_end, _) in &ranges {
+            let overlap_start = url_start.max(span_start);
+            let overlap_end = url_end.min(span_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let rel_start = overlap_start - span_start;
+            let rel_end = overlap_end - span_start;
+            if rel_start > cursor {
+                new_spans.push(Span::styled(
+                    chars[cursor..rel_start].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+            new_spans.push(Span::styled(
+                chars[rel_start..rel_end].iter().collect::<String>(),
+                url_style,
+            ));
+            cursor = rel_end;
+        }
+        if cursor < chars.len() {
+            new_spans.push(Span::styled(
+                chars[cursor..].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+        char_pos = span_end;
+    }
+    line.spans = new_spans;
     ranges
 }
 
@@ -2449,5 +2554,119 @@ mod tests {
         let last_len = chat.cached_visible_line_texts[last].chars().count();
         let text = chat.selection_text_from_abs((last, last_len)).unwrap();
         assert_eq!(text, "hello world", ">  prefix should be stripped");
+    }
+
+    #[test]
+    fn bare_urls_in_assistant_text_are_styled() {
+        let theme = Theme::default();
+        let base_style = Style::default().fg(theme.fg);
+        let text = "Check https://example.com for details.";
+        let mut lines = format_markdown(text, base_style, &theme, "", 80);
+        // Before styling, the URL is plain text.
+        let plain: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(plain.contains("https://example.com"));
+        // Apply bare URL styling.
+        for line in &mut lines {
+            style_bare_urls_in_line(line, &theme);
+        }
+        // After styling, one span should have the URL with underline.
+        let url_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("https://example.com"))
+            .expect("URL span should exist");
+        assert!(
+            url_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "URL span should be underlined"
+        );
+        assert!(
+            url_span.style.fg.is_some(),
+            "URL span should have link color"
+        );
+    }
+
+    #[test]
+    fn bare_urls_in_tool_output_are_styled() {
+        let theme = Theme::default();
+        let tool_style = Style::default().fg(theme.warning);
+        let mut line = Line::from(vec![
+            Span::styled("[bash] ".to_string(), tool_style),
+            Span::styled(
+                "see https://example.com/path for info".to_string(),
+                tool_style,
+            ),
+        ]);
+        style_bare_urls_in_line(&mut line, &theme);
+        // The URL portion should be split out with underline + link color.
+        let url_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("https://example.com"))
+            .expect("URL span should exist in tool output");
+        assert!(
+            url_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "URL in tool output should be underlined"
+        );
+    }
+
+    #[test]
+    fn markdown_links_are_not_double_styled() {
+        let theme = Theme::default();
+        let base_style = Style::default().fg(theme.fg);
+        let md = "[click here](https://example.com)";
+        let mut lines = format_markdown(md, base_style, &theme, "", 80);
+        for line in &mut lines {
+            style_bare_urls_in_line(line, &theme);
+        }
+        // The parenthetical URL span added by format_markdown has fg=md_quote,
+        // not fg=md_link, so it will be split and re-styled by
+        // style_bare_urls_in_line. This is acceptable — the link text
+        // "click here" (fg=md_link, underlined) must be skipped.
+        // Verify no span has both the original md_link color AND was duplicated.
+        let link_text_spans: Vec<_> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.content.as_ref() == "click here")
+            .collect();
+        assert_eq!(
+            link_text_spans.len(),
+            1,
+            "link text should appear exactly once"
+        );
+        assert!(
+            link_text_spans[0].style.fg == Some(theme.md_link),
+            "link text should keep md_link color"
+        );
+        assert!(
+            link_text_spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED),
+            "link text should stay underlined"
+        );
+    }
+
+    #[test]
+    fn bare_http_urls_are_styled() {
+        let theme = Theme::default();
+        let base_style = Style::default().fg(theme.fg);
+        let text = "See http://example.com/path for info.";
+        let mut lines = format_markdown(text, base_style, &theme, "", 80);
+        for line in &mut lines {
+            style_bare_urls_in_line(line, &theme);
+        }
+        let url_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("http://example.com"))
+            .expect("http URL span should exist");
+        assert!(
+            url_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "http URL should be underlined"
+        );
+        assert!(
+            url_span.style.fg.is_some(),
+            "http URL should have link color"
+        );
     }
 }
