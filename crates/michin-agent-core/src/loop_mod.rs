@@ -1449,12 +1449,47 @@ fn add_jitter(delay_ms: u64) -> u64 {
     }
 }
 
+/// Shrink an individual tool result's content to a token budget.
+/// Always includes at least a partial portion of the first text block,
+/// capped at `cap_tokens` tokens (4 chars per token heuristic).
+/// Replaces the content with a truncated version plus a note.
+fn shrink_tool_content(content: &mut Vec<ContentBlock>, cap_tokens: u32) {
+    let tokens: u32 = content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => approximate_token_count(text),
+            _ => 0,
+        })
+        .sum();
+    if tokens <= cap_tokens {
+        return;
+    }
+
+    let mut truncated = String::new();
+    let mut remaining_chars = (cap_tokens as usize) * 4; // 4 chars/token heuristic
+
+    for block in content.iter() {
+        if let ContentBlock::Text { text } = block {
+            if remaining_chars == 0 {
+                break;
+            }
+            // Take at most `remaining_chars` chars from this block.
+            let take = text.chars().take(remaining_chars).collect::<String>();
+            truncated.push_str(&take);
+            remaining_chars = remaining_chars.saturating_sub(take.chars().count());
+        }
+    }
+
+    *content = vec![ContentBlock::text(format!(
+        "[Output truncated from ~{tokens} tokens to ~{cap_tokens}. Use 'read' tool to re-read full output if needed.]\n{truncated}"
+    ))];
+}
+
 /// Shrink oversized tool results that were just appended to state.messages.
 /// Keeps the LLM from dragging stale full output through every future turn.
 /// The full output is still visible in the TUI (display-level limit is separate).
 /// Only the content sent to the LLM is truncated.
 fn shrink_recent_tool_results(state: &mut AgentState, cap_tokens: u32) {
-    // Walk backwards over the most recent ToolResult messages (one batch).
     for msg in state
         .messages
         .iter_mut()
@@ -1470,51 +1505,38 @@ fn shrink_recent_tool_results(state: &mut AgentState, cap_tokens: u32) {
         if *is_error {
             continue;
         }
-        let tokens: u32 = content
-            .iter()
-            .map(|b| match b {
-                ContentBlock::Text { text } => approximate_token_count(text),
-                _ => 0,
-            })
-            .sum();
-        if tokens <= cap_tokens {
-            continue;
-        }
-        let mut truncated = String::new();
-        let mut remaining = cap_tokens;
-        for block in content.iter() {
-            if let ContentBlock::Text { text } = block {
-                let t = approximate_token_count(text);
-                if t <= remaining || truncated.is_empty() {
-                    truncated.push_str(text);
-                    remaining = remaining.saturating_sub(t);
-                }
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
-        *content = vec![ContentBlock::text(format!(
-            "[Output truncated from ~{tokens} tokens to {cap_tokens}. Use 'read' tool to re-read full output if needed.]\n{truncated}"
-        ))];
+        shrink_tool_content(content, cap_tokens);
     }
 }
 
 /// Post-response compaction check: if the context just exceeded 75% of the
-/// effective window, shrink the most recent tool results proactively to
-/// preserve the prefix cache for the next turn.
+/// effective window, shrink ALL tool results in the message history
+/// proactively to preserve the prefix cache for the next turn.
+/// This catches the case where no single tool result exceeds the per-item
+/// cap but the aggregate of many results pushes context over the threshold.
 fn post_response_compaction_check(state: &mut AgentState, config: &AgentLoopConfig) {
     let ctx_tokens = state.token_count();
     let effective_window = config.effective_context_window(state.model.context_window);
     let ratio = ctx_tokens as f64 / effective_window as f64;
 
     if ratio > 0.75 {
-        shrink_recent_tool_results(state, config.compaction.tool_result_cap_tokens);
+        // Halve the per-result cap when near the limit to preemptively
+        // free space without triggering an expensive compaction.
+        let aggressive_cap = (config.compaction.tool_result_cap_tokens / 2).max(500);
+        for msg in state.messages.iter_mut() {
+            if let Message::ToolResult {
+                content, is_error: false, ..
+            } = msg
+            {
+                shrink_tool_content(content, aggressive_cap);
+            }
+        }
         tracing::debug!(
             ctx_tokens,
             effective_window,
             ratio = %format!("{ratio:.2}"),
-            "post-response: context above 75%, shrunk recent tool results"
+            aggressive_cap,
+            "post-response: context above 75%, shrunk all tool results"
         );
     }
 }
