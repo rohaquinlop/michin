@@ -1525,7 +1525,9 @@ fn post_response_compaction_check(state: &mut AgentState, config: &AgentLoopConf
         let aggressive_cap = (config.compaction.tool_result_cap_tokens / 2).max(500);
         for msg in state.messages.iter_mut() {
             if let Message::ToolResult {
-                content, is_error: false, ..
+                content,
+                is_error: false,
+                ..
             } = msg
             {
                 shrink_tool_content(content, aggressive_cap);
