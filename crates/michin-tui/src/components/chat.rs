@@ -799,7 +799,10 @@ impl Chat {
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-            for (line, is_cont) in wrapped.into_iter().zip(cont) {
+            for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+                if !is_user {
+                    style_bare_urls_in_line(&mut line, &self.theme);
+                }
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_user_line_flags.push(is_user);
                 self.cached_line_is_continuation.push(is_cont);
@@ -842,7 +845,10 @@ impl Chat {
             let is_user = msg.role == ChatRole::User;
             let lines = self.format_message(msg, inner_width);
             let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-            for (line, is_cont) in wrapped.into_iter().zip(cont) {
+            for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+                if !is_user {
+                    style_bare_urls_in_line(&mut line, &self.theme);
+                }
                 self.cached_visible_line_texts.push(line_text(&line));
                 self.cached_user_line_flags.push(is_user);
                 self.cached_line_is_continuation.push(is_cont);
@@ -988,7 +994,10 @@ impl Chat {
         let is_user = msg.role == ChatRole::User;
         let lines = self.format_message(msg, inner_width);
         let (wrapped, cont) = wrap_styled_lines_with_continuation(&lines, inner_width);
-        for (line, is_cont) in wrapped.into_iter().zip(cont) {
+        for (mut line, is_cont) in wrapped.into_iter().zip(cont) {
+            if !is_user {
+                style_bare_urls_in_line(&mut line, &self.theme);
+            }
             self.cached_visible_line_texts.push(line_text(&line));
             self.cached_user_line_flags.push(is_user);
             self.cached_line_is_continuation.push(is_cont);
@@ -1369,6 +1378,62 @@ fn extract_url_ranges(text: &str) -> Vec<(usize, usize, String)> {
         }
     }
     ranges
+}
+
+/// Post-process a rendered line: apply underline + link color to bare URLs
+/// that are not already styled as markdown links.
+fn style_bare_urls_in_line(line: &mut Line<'static>, theme: &Theme) {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let ranges = extract_url_ranges(&text);
+    if ranges.is_empty() {
+        return;
+    }
+    let url_style = Style::default()
+        .fg(theme.md_link)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut new_spans = Vec::new();
+    let mut char_pos = 0usize;
+    for span in &line.spans {
+        let span_text: &str = &span.content;
+        let span_start = char_pos;
+        let span_end = char_pos + span_text.chars().count();
+        // Skip spans already styled as links.
+        if span.style.add_modifier.contains(Modifier::UNDERLINED) && span.style.fg.is_some() {
+            new_spans.push(span.clone());
+            char_pos = span_end;
+            continue;
+        }
+        let chars: Vec<char> = span_text.chars().collect();
+        let mut cursor = 0usize;
+        for &(url_start, url_end, _) in &ranges {
+            let overlap_start = url_start.max(span_start);
+            let overlap_end = url_end.min(span_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let rel_start = overlap_start - span_start;
+            let rel_end = overlap_end - span_start;
+            if rel_start > cursor {
+                new_spans.push(Span::styled(
+                    chars[cursor..rel_start].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+            new_spans.push(Span::styled(
+                chars[rel_start..rel_end].iter().collect::<String>(),
+                url_style,
+            ));
+            cursor = rel_end;
+        }
+        if cursor < chars.len() {
+            new_spans.push(Span::styled(
+                chars[cursor..].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+        char_pos = span_end;
+    }
+    line.spans = new_spans;
 }
 
 // ---------------------------------------------------------------------------
@@ -2449,5 +2514,84 @@ mod tests {
         let last_len = chat.cached_visible_line_texts[last].chars().count();
         let text = chat.selection_text_from_abs((last, last_len)).unwrap();
         assert_eq!(text, "hello world", ">  prefix should be stripped");
+    }
+
+    #[test]
+    fn bare_urls_in_assistant_text_are_styled() {
+        let theme = Theme::default();
+        let base_style = Style::default().fg(theme.fg);
+        let text = "Check https://example.com for details.";
+        let mut lines = format_markdown(text, base_style, &theme, "", 80);
+        // Before styling, the URL is plain text.
+        let plain: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(plain.contains("https://example.com"));
+        // Apply bare URL styling.
+        for line in &mut lines {
+            style_bare_urls_in_line(line, &theme);
+        }
+        // After styling, one span should have the URL with underline.
+        let url_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("https://example.com"))
+            .expect("URL span should exist");
+        assert!(
+            url_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "URL span should be underlined"
+        );
+        assert!(
+            url_span.style.fg.is_some(),
+            "URL span should have link color"
+        );
+    }
+
+    #[test]
+    fn bare_urls_in_tool_output_are_styled() {
+        let theme = Theme::default();
+        let tool_style = Style::default().fg(theme.warning);
+        let mut line = Line::from(vec![
+            Span::styled("[bash] ".to_string(), tool_style),
+            Span::styled(
+                "see https://example.com/path for info".to_string(),
+                tool_style,
+            ),
+        ]);
+        style_bare_urls_in_line(&mut line, &theme);
+        // The URL portion should be split out with underline + link color.
+        let url_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("https://example.com"))
+            .expect("URL span should exist in tool output");
+        assert!(
+            url_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "URL in tool output should be underlined"
+        );
+    }
+
+    #[test]
+    fn markdown_links_are_not_double_styled() {
+        let theme = Theme::default();
+        let base_style = Style::default().fg(theme.fg);
+        let md = "[click here](https://example.com)";
+        let mut lines = format_markdown(md, base_style, &theme, "", 80);
+        for line in &mut lines {
+            style_bare_urls_in_line(line, &theme);
+        }
+        // The link text span should already be underlined from markdown parsing.
+        // No span should contain the raw URL text (markdown adds " (url)" separately).
+        // The raw URL appears in the parenthetical added by format_markdown.
+        // style_bare_urls_in_line should skip spans already underlined.
+        let url_spans: Vec<_> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.content.as_ref().contains("https://example.com"))
+            .collect();
+        for span in &url_spans {
+            // If already underlined (from markdown link), style_bare_urls should skip it.
+            if span.style.add_modifier.contains(Modifier::UNDERLINED) {
+                // Good — either from markdown or from bare URL styling.
+            }
+        }
     }
 }

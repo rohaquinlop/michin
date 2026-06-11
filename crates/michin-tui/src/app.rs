@@ -1677,6 +1677,9 @@ impl App {
                     "  Esc            Close",
                     "  Backspace      Pop query char (model picker)",
                     "  Ctrl+F         Toggle favorite (model picker)",
+                    "",
+                    "Chat:",
+                    "  Ctrl+Click     Open URL under cursor in browser",
                 ]
                 .join("\n");
                 self.chat.add_message(ChatMessage {
