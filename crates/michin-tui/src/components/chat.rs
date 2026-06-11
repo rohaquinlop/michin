@@ -307,7 +307,7 @@ impl Chat {
             ChatRole::Assistant => ("", Style::default().fg(self.theme.fg)),
             ChatRole::Thinking => ("[thinking] ", Style::default().fg(self.theme.dim)),
             ChatRole::Tool => {
-                // Prefix and body computed dynamically below.
+                // Fully handled in the tool block below (prefix + body + error style).
                 ("", Style::default().fg(self.theme.warning))
             }
             ChatRole::System => ("", Style::default().fg(self.theme.dim)),
@@ -333,9 +333,8 @@ impl Chat {
                 Style::default().fg(self.theme.warning)
             };
             let (tool_name, body) = split_tool_message(&text);
-            let prefix_fn = |tool_style: Style| -> Span<'static> {
-                Span::styled(format!("[{tool_name}] "), tool_style)
-            };
+            let prefix =
+                || -> Span<'static> { Span::styled(format!("[{tool_name}] "), tool_style) };
 
             // read tool: style range "{offset}-{end}" in dim.
             if !msg.is_error
@@ -345,7 +344,7 @@ impl Chat {
                 let label_style = tool_style;
                 let range_style = Style::default().fg(self.theme.dim);
                 return vec![Line::from(vec![
-                    prefix_fn(tool_style),
+                    prefix(),
                     Span::styled(label.to_string(), label_style),
                     Span::styled(range.to_string(), range_style),
                 ])];
@@ -359,7 +358,7 @@ impl Chat {
                 let added_style = Style::default().fg(self.theme.success);
                 let removed_style = Style::default().fg(self.theme.error);
                 return vec![Line::from(vec![
-                    prefix_fn(tool_style),
+                    prefix(),
                     Span::styled(parts.prefix.to_string(), tool_style),
                     Span::styled(parts.added.to_string(), added_style),
                     Span::styled(parts.slash_minus.to_string(), tool_style),
@@ -370,7 +369,7 @@ impl Chat {
 
             // Default tool rendering: [tool-name] body.
             return vec![Line::from(vec![
-                prefix_fn(tool_style),
+                prefix(),
                 Span::styled(body.to_string(), tool_style),
             ])];
         }
@@ -1181,28 +1180,13 @@ fn truncate_output(text: &str, max_len: usize) -> String {
 /// Extract tool name and body from a tool message display text.
 /// Returns (tool_name, body) where tool_name is the short name for `[tool_name]` prefix.
 fn split_tool_message(text: &str) -> (&str, &str) {
-    let known: &[&str] = &["bash", "read", "edit", "write", "find", "grep"];
-    // Known tools: text starts with tool_name followed by ':' or ' '
-    let first_colon = text.find(':');
-    let first_space = text.find(' ');
-    let cand = |end: usize| -> Option<(&str, &str)> {
-        let candidate = &text[..end];
-        if known.contains(&candidate) {
-            let rest = text[end + 1..].trim_start();
-            Some((candidate, rest))
-        } else {
-            None
-        }
-    };
-    if let Some(c) = first_colon
-        && let Some(result) = cand(c)
-    {
-        return result;
+    // Split on first colon (tools like "bash: ls -la", custom tools "web-search: query")
+    // then on first space (tools like "read /path" where no colon).
+    if let Some(end) = text.find(':') {
+        return (&text[..end], text[end + 1..].trim_start());
     }
-    if let Some(s) = first_space
-        && let Some(result) = cand(s)
-    {
-        return result;
+    if let Some(end) = text.find(' ') {
+        return (&text[..end], text[end + 1..].trim_start());
     }
     ("tool", text)
 }
